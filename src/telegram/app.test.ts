@@ -13,7 +13,14 @@ import {
 } from '../core/index.js';
 import { testPrompts } from '../core/test-prompts.js';
 import { startTelegram } from './app.js';
-import { fakeBot, imageBytes, startFakeTelegram, type FakeTelegram } from './fake-api.js';
+import {
+  fakeBot,
+  imageBytes,
+  plainParts,
+  startFakeTelegram,
+  type FakeTelegram,
+} from './fake-api.js';
+import type { MessageEntity } from './footer.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -96,6 +103,8 @@ async function start(
     backlog,
     wait = { idleMs: 50, maxMs: 500 },
     rich = true,
+    usage = true,
+    clock = { ms: 0 },
   }: {
     storage?: Storage;
     state?: StateAdapter;
@@ -103,6 +112,10 @@ async function start(
     wait?: { idleMs: number; maxMs: number };
     /** 发富文本消息（LUOLI_TELEGRAM_RICH）；默认打开，和配置的默认值一样 */
     rich?: boolean;
+    /** 回复带尾部（LUOLI_TELEGRAM_USAGE）；默认打开，和配置的默认值一样 */
+    usage?: boolean;
+    /** 量回复用时的时钟（毫秒），测试拨动它；默认停在 0，用时是 0.0s */
+    clock?: { ms: number };
     /** 启动前就在假接口里的更新，相当于停机期间积压的 */
     backlog?: (api: FakeTelegram) => void;
   } = {},
@@ -122,6 +135,7 @@ async function start(
       errorText: '（出了点问题）',
       staleMs: 60 * 60_000,
       rich,
+      usage,
     },
     // 洛璃服务里由会话管理提供；这里直接建
     open: async (conversationId, { checkIdleOnCreate }) =>
@@ -140,6 +154,7 @@ async function start(
     pollTimeoutSeconds: 1,
     state,
     wait,
+    now: () => clock.ms,
   });
   running.push(() => app.stop());
   return { api, app, storage, entries };
@@ -167,6 +182,18 @@ const shown = (api: FakeTelegram) =>
 
 /** 一个段落块的富文本消息 */
 const paragraph = (text: string) => ({ blocks: [{ type: 'paragraph', text }] });
+
+/** 默认的模型（每次回复输入、输出各 1）、停着的时钟下的尾部 */
+const footer = '输入 1 · 输出 1 · 0.0s';
+
+/** 正文的段落、分隔线、下标包着尾部的段落 */
+const withFooter = (text: string) => ({
+  blocks: [
+    { type: 'paragraph', text },
+    { type: 'divider' },
+    { type: 'paragraph', text: { type: 'subscript', text: footer } },
+  ],
+});
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -205,7 +232,7 @@ async function historyOf(storage: Storage, chatId: number) {
 }
 
 describe('Telegram 前端（本地假 Bot API）', () => {
-  it('群里含唤醒词：记录并回复，发富文本消息（一个段落块，文字原样）、引用触发消息，期间发「正在输入」', async () => {
+  it('群里含唤醒词：记录并回复，发富文本消息（正文的段落、分隔线、下标的尾部三块，文字原样）、引用触发消息，期间发「正在输入」；尾部不进历史', async () => {
     const reply = '你好呀\n**原样** <b>不解析</b>';
     const { api, app, storage } = await start(replying(reply));
 
@@ -219,7 +246,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         token,
         body: {
           chat_id: String(group.id),
-          rich_message: paragraph(reply),
+          rich_message: withFooter(reply),
           reply_parameters: { message_id: id, allow_sending_without_reply: true },
         },
       },
@@ -230,8 +257,9 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         chatId: String(group.id),
         messageId: expect.any(Number),
         text: reply,
+        footer,
         replyTo: id,
-        rich: paragraph(reply),
+        rich: withFooter(reply),
       },
     ]);
     expect(api.calls.some((call) => call.method === 'sendChatAction')).toBe(true);
@@ -260,12 +288,50 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         {
           chat_id: String(group.id),
           message_thread_id: 77,
-          rich_message: paragraph('话题里回'),
+          rich_message: withFooter('话题里回'),
           reply_parameters: { message_id: id, allow_sending_without_reply: true },
         },
       ],
     ]);
   });
+
+  it.each([
+    ['富文本关着', false],
+    ['富文本被拒收', true],
+  ])(
+    '论坛话题里，%s：带尾部的 sendMessage 也发到触发消息所在的话题（带 message_thread_id）',
+    async (_case, rich) => {
+      const { api, app } = await start(replying('话题里回'), { rich });
+      if (rich) {
+        api.failRichSends({ status: 400, description: "Bad Request: can't parse rich message" });
+      }
+
+      const [id] = api.push({
+        chat: group,
+        from: alice,
+        text: 'nori 在吗',
+        is_topic_message: true,
+        message_thread_id: 77,
+      });
+      await delivered(api);
+      await app.bot.idle();
+
+      expect(sends(api).filter((call) => call.method === 'sendMessage')).toEqual([
+        {
+          method: 'sendMessage',
+          token,
+          body: {
+            chat_id: String(group.id),
+            message_thread_id: 77,
+            text: `话题里回\n\n${footer}`,
+            entities: [{ type: 'italic', offset: 6, length: footer.length }],
+            reply_parameters: { message_id: id, allow_sending_without_reply: true },
+          },
+        },
+      ]);
+      expect(api.delivered).toMatchObject([{ kind: 'plain', text: '话题里回', footer }]);
+    },
+  );
 
   it('被引用的消息已经删了：富文本消息照样发出，只是不带引用', async () => {
     const { api, app, entries } = await start(replying('还是回你'));
@@ -525,7 +591,14 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     api.push({ chat: group, from: alice, text: 'nori 二' });
     await api.waitFor(() => sends(api).length === 2);
 
-    expect(sends(api).map((call) => call.body.text)).toEqual(['第一句', '第二句']);
+    // 发出去的正文（尾部是末尾斜体的那一行）
+    expect(
+      sends(api).map(
+        (call) =>
+          plainParts(String(call.body.text), call.body.entities as MessageEntity[] | undefined)
+            .text,
+      ),
+    ).toEqual(['第一句', '第二句']);
     expect(entries.find((e) => e.msg === 'telegram.send_failed')?.fields).toMatchObject({
       method: 'sendMessage',
     });
@@ -571,7 +644,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
           'sendRichMessage',
           {
             chat_id: String(group.id),
-            rich_message: paragraph('你好呀'),
+            rich_message: withFooter('你好呀'),
             reply_parameters: { message_id: first, allow_sending_without_reply: true },
           },
         ],
@@ -579,7 +652,8 @@ describe('Telegram 前端（本地假 Bot API）', () => {
           'sendMessage',
           {
             chat_id: String(group.id),
-            text: '你好呀',
+            text: `你好呀\n\n${footer}`,
+            entities: [{ type: 'italic', offset: 5, length: footer.length }],
             reply_parameters: { message_id: first, allow_sending_without_reply: true },
           },
         ],
@@ -587,7 +661,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
           'sendRichMessage',
           {
             chat_id: String(group.id),
-            rich_message: paragraph('第二句'),
+            rich_message: withFooter('第二句'),
             reply_parameters: { message_id: second, allow_sending_without_reply: true },
           },
         ],
@@ -649,8 +723,8 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     },
   );
 
-  it('富文本关着：只有 sendMessage，请求和以前一样', async () => {
-    const { api, app } = await start(replying('你好呀'), { rich: false });
+  it('富文本、尾部都关着：只有 sendMessage，请求和以前一样（没有 entities）', async () => {
+    const { api, app } = await start(replying('你好呀'), { rich: false, usage: false });
 
     const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
     await delivered(api);
@@ -669,6 +743,59 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       },
     ]);
     expect(shown(api)).toEqual([{ kind: 'plain', text: '你好呀', replyTo: id }]);
+  });
+
+  it('富文本开着、尾部关着：sendRichMessage 里只有正文的一个段落', async () => {
+    const { api, app } = await start(replying('你好呀'), { usage: false });
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => [call.method, call.body])).toEqual([
+      [
+        'sendRichMessage',
+        {
+          chat_id: String(group.id),
+          rich_message: paragraph('你好呀'),
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      ],
+    ]);
+    expect(api.delivered[0]?.footer).toBeUndefined();
+  });
+
+  it('富文本关着、尾部开着：sendMessage 的文字是正文、空行、尾部，entities 把尾部标成斜体（正文有中文、emoji 时 offset 也对）', async () => {
+    const clock = { ms: 0 };
+    const reply = '好的 👍🏽 **原样** 𝒳';
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        clock.ms += 3200;
+        return replying(reply).doStream(options);
+      },
+    });
+    const { api, app } = await start(model, { rich: false, clock });
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    await delivered(api);
+    await app.bot.idle();
+
+    const line = '输入 1 · 输出 1 · 3.2s';
+    expect(sends(api)).toEqual([
+      {
+        method: 'sendMessage',
+        token,
+        body: {
+          chat_id: String(group.id),
+          text: `${reply}\n\n${line}`,
+          // 正文 17 个 UTF-16 码元（👍、🏽、𝒳 各 2 个）加空行的 2 个
+          entities: [{ type: 'italic', offset: 19, length: line.length }],
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      },
+    ]);
+    expect(shown(api)).toEqual([{ kind: 'plain', text: reply, replyTo: id }]);
+    expect(api.delivered[0]?.footer).toBe(line);
   });
 
   it('改群名：会话标题更新，下一段用新标题', async () => {

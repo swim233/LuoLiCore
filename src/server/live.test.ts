@@ -1003,6 +1003,7 @@ describe('Telegram：等待合并、再次触发与连接状态', () => {
         errorText: '（出了点问题）',
         staleMs: 60 * 60_000,
         rich: true,
+        usage: true,
       },
       sessions: service.sessions,
       storage: service.observed,

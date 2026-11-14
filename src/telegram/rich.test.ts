@@ -16,4 +16,17 @@ describe('原样文字做成的富文本消息', () => {
 
     expect(plainRichMessage(text)).toEqual({ blocks: [{ type: 'paragraph', text }] });
   });
+
+  it('带尾部：正文的段落、分隔线、下标包着尾部的段落，三块；正文照样原样', () => {
+    const text = '答案是 **4**\n<i>$x$</i>';
+    const footer = '输入 5k · 输出 135 · 3.2s';
+
+    expect(plainRichMessage(text, footer)).toEqual({
+      blocks: [
+        { type: 'paragraph', text },
+        { type: 'divider' },
+        { type: 'paragraph', text: { type: 'subscript', text: footer } },
+      ],
+    });
+  });
 });

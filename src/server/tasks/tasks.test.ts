@@ -1192,6 +1192,7 @@ async function withTelegram(
       errorText: '（出了点问题）',
       staleMs: 60 * 60_000,
       rich: true,
+      usage: true,
     },
     sessions: s.sessions!,
     storage: s.observed,
@@ -1331,6 +1332,8 @@ describe('到点进 Telegram', () => {
         replyTo: source,
       },
     ]);
+    // 任务到点的回复也带尾部（用时走的是真的时钟，只看格式）
+    expect(t.api.delivered[0]?.footer).toMatch(/^输入 10 · 输出 2 · \d+\.\ds$/);
     expect(await kinds(s, id)).toEqual(['user', 'task', 'assistant']);
     expect(promptOf(model, 0)).toContain('<event type=\\"task\\" task=\\"t1\\"');
     const lives = s.lives();

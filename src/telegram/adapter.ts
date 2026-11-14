@@ -5,6 +5,7 @@ import {
 } from '@chat-adapter/telegram';
 import type { Logger as ChatLogger, WebhookOptions } from 'chat';
 import type { Logger } from '../core/index.js';
+import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
 import { RichMessageError, type InputRichMessage } from './rich.js';
 
@@ -26,6 +27,9 @@ import { RichMessageError, type InputRichMessage } from './rich.js';
  *   resolveThreadId、buildChatTargetParams、buildReplyParameters 拼。失败按基类换成的错误类的名字
  *   （ResourceNotFoundError、ValidationError、PermissionError）分出不认识接口、拒收两种，
  *   依赖 4.43.0 的 telegramFetch、这几个方法和这些名字，升级前要核对。
+ * - 发带格式标记的普通消息（postTextMessage，尾部的斜体）：同样直接用 telegramFetch 调
+ *   sendMessage，参数用同样的几个方法拼。postMessage 会改动文字（把 {{emoji:名字}} 换成 emoji、
+ *   超长时截断），entities 的 offset 就对不上了。不带格式标记的普通消息照旧走 postMessage、reply。
  * - 连接状态：记下最近一次拉取更新是否成功（connected）与成功的时间，变了时调 onConnectionChange，
  *   洛璃服务据此报告「离线」。断开期间的拉取不长轮询（timeout 0），恢复后第一次拉取就立即返回、
  *   变回连上；之后照旧长轮询。否则恢复后要等一次长轮询返回（默认 30 秒）才知道连上了。
@@ -159,6 +163,25 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
       const kind = richFailure(error);
       throw kind ? new RichMessageError(kind, error) : error;
     }
+  }
+
+  /**
+   * 发一条普通消息（sendMessage），文字原样，entities 是格式标记（offset、length 对着这段文字算，
+   * UTF-16 码元）。引用的规则同 postRichMessage。失败原样抛出（和 postMessage 一样）
+   */
+  async postTextMessage(
+    threadId: string,
+    text: string,
+    entities: readonly MessageEntity[],
+    replyTo?: string,
+  ): Promise<void> {
+    const thread = this.resolveThreadId(threadId);
+    await this.telegramFetch('sendMessage', {
+      ...this.buildChatTargetParams(thread),
+      text,
+      entities,
+      reply_parameters: this.buildReplyParameters(replyTo, thread.chatId),
+    });
   }
 
   /** 按 file_id 下载文件（getFile 再取文件；地址含 token，出错时的消息里只有 file_id） */

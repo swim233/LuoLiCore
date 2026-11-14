@@ -24,6 +24,11 @@ export type TelegramConfig = {
    * 和以前一样
    */
   rich: boolean;
+  /**
+   * 回复的最后一条消息末尾带一行用量（尾部），LUOLI_TELEGRAM_USAGE。不设时打开；设成 off 时不带。
+   * 和 rich 各管各的：富文本关着时尾部是普通消息里斜体的一行
+   */
+  usage: boolean;
 };
 
 export const defaultErrorText = '（出了点问题，稍后再试）';
@@ -70,6 +75,11 @@ export function parseTelegramConfig(
     return { ok: false, error: 'LUOLI_TELEGRAM_RICH 只能是 off（发普通消息；不设时打开）' };
   }
 
+  const usage = env.LUOLI_TELEGRAM_USAGE || undefined;
+  if (usage !== undefined && usage !== 'off') {
+    return { ok: false, error: 'LUOLI_TELEGRAM_USAGE 只能是 off（回复不带用量；不设时打开）' };
+  }
+
   return {
     ok: true,
     config: {
@@ -81,6 +91,7 @@ export function parseTelegramConfig(
       staleMs,
       apiUrl,
       rich: rich !== 'off',
+      usage: usage !== 'off',
     },
   };
 }

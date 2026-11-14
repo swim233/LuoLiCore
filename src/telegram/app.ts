@@ -41,6 +41,7 @@ export async function startTelegram({
   pollTimeoutSeconds = 30,
   typingIntervalMs,
   wait,
+  now,
   state = createMemoryState(),
   onRound,
   onConnectionChange,
@@ -56,6 +57,8 @@ export async function startTelegram({
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
   wait?: { idleMs: number; maxMs: number };
+  /** 量回复用时的时钟，见 createTelegramBot；测试里换成可控的 */
+  now?: () => number;
   /** Chat SDK 的平台状态（去重、轮询进度等），默认放内存；测试里可以换成记录调用的 */
   state?: StateAdapter;
   /** 一轮回复里的等待合并、回复中又被触发、这一轮结束，见 RoundNotice */
@@ -93,10 +96,13 @@ export async function startTelegram({
     open,
     sender: {
       typing: (target) => adapter.startTyping(threadId(target)),
-      // 传字符串：适配器按纯文本发普通消息，不转 Markdown，也不自己试富文本
-      send: async (target, text, replyTo) => {
-        if (replyTo === undefined) await adapter.postMessage(threadId(target), text);
-        else await adapter.reply(threadId(target), String(replyTo), text);
+      // 传字符串：适配器按纯文本发普通消息，不转 Markdown，也不自己试富文本。带格式标记（尾部的
+      // 斜体）的另走 postTextMessage：文字原样发出，offset 才对得上
+      send: async (target, text, replyTo, entities) => {
+        const quoted = replyTo === undefined ? undefined : String(replyTo);
+        if (entities) await adapter.postTextMessage(threadId(target), text, entities, quoted);
+        else if (quoted === undefined) await adapter.postMessage(threadId(target), text);
+        else await adapter.reply(threadId(target), quoted, text);
       },
       sendRich: (target, message, replyTo) =>
         adapter.postRichMessage(
@@ -115,6 +121,8 @@ export async function startTelegram({
     errorText: config.errorText,
     staleMs: config.staleMs,
     rich: config.rich,
+    usage: config.usage,
+    now,
     typingIntervalMs,
     wait,
     onRound,

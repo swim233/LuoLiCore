@@ -14,6 +14,7 @@ import {
 } from '../core/index.js';
 import { parseCommand, type TelegramCommand } from './command.js';
 import { editedText, toAppendInput } from './content.js';
+import { plainWithFooter, usageFooter, type MessageEntity } from './footer.js';
 import {
   conversationTitle,
   displayName,
@@ -22,7 +23,7 @@ import {
   type TelegramRaw,
 } from './message.js';
 import { plainRichMessage, RichMessageError, type InputRichMessage } from './rich.js';
-import { splitMessage } from './split.js';
+import { splitMessage, telegramMessageLimit } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
 /** 往哪个聊天发：论坛群里回到触发消息所在的话题 */
@@ -34,9 +35,16 @@ export type Sender = {
   typing(target: ChatTarget): Promise<void>;
   /**
    * 发一条纯文本的普通消息；replyTo 为被引用消息的 id。被引用的消息不在了（删了、id 不对）时
-   * 照样发出，只是不带引用（适配器带上 allow_sending_without_reply）
+   * 照样发出，只是不带引用（适配器带上 allow_sending_without_reply）。
+   * entities 是文字里的格式标记（尾部的斜体），offset、length 对着 text 原样算；有它时文字要原样
+   * 发出，不能被改动。没有时和以前一样
    */
-  send(target: ChatTarget, text: string, replyTo?: number): Promise<void>;
+  send(
+    target: ChatTarget,
+    text: string,
+    replyTo?: number,
+    entities?: readonly MessageEntity[],
+  ): Promise<void>;
   /**
    * 发一条富文本消息（sendRichMessage），引用的规则同 send。服务端不认识这个接口、Telegram 拒收
    * 这一条时抛 RichMessageError（unsupported、rejected），由调用方改发普通消息；别的失败原样抛出
@@ -184,6 +192,8 @@ export function createTelegramBot({
   errorText,
   staleMs,
   rich,
+  usage,
+  now = () => performance.now(),
   typingIntervalMs = 4000,
   wait = { idleMs: waitMs, maxMs: maxWaitMs },
   onRound,
@@ -207,6 +217,10 @@ export function createTelegramBot({
   staleMs: number;
   /** 回复发富文本消息；false 时发普通消息，和以前一样 */
   rich: boolean;
+  /** 回复的最后一条消息末尾带一行用量（尾部）；false 时不带 */
+  usage: boolean;
+  /** 量回复用时的时钟（毫秒，只用差值）；测试里换成可控的 */
+  now?: () => number;
   /** 等待与生成期间每隔多久重发「正在输入」 */
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
@@ -397,12 +411,18 @@ export function createTelegramBot({
   }
 
   /**
-   * 一次回复，分条发出：每一步的文字在这一步的模型输出结束时发出。这一步调了工具时，
-   * 在它的第一个工具段出现时发（核心在请求正常结束后才放出工具段，之前的文字已经齐了）；
-   * 最后一步的文字在这一步结束时发。没有文字的步不发。每条都引用 quote（没有时不引用）。
-   * 流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
+   * 一次回复，分条发出：每一步的文字在这一步的模型输出结束时发出。
+   * - 调了工具的步：工具段之前的话在第一个工具段出现时发（核心在请求正常结束后才放出工具段，之前的
+   *   文字已经齐了）；工具段之后又说的话在这一步的 finish-step 时发。这一步不会是最后一步（核心
+   *   执行完工具一定再请求一次，收尾的那步不提供工具），所以都不带尾部。
+   * - 没调工具的步：finish-step 时先留着，看下一个段：是 finish（回复正常结束）就是最后一条，带上
+   *   尾部发出；是 abort 就不发（中止的不发）；是别的（又开始了一步、请求重试、出错）就照原样发出、
+   *   不带尾部，这是兜底。流结束了都没有 finish 的也不发。
+   * 没有文字的步不发；最后一步没有文字时没有地方挂尾部，这次就不显示。每条都引用 quote（没有时
+   * 不引用）。流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
    * 再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
-   * 文字照旧按 4096 拆段，每段先试富文本消息（见 deliver）；失败提示总是普通消息。
+   * 文字照旧按 4096 拆段，尾部挂在最后一段；每段先试富文本消息（见 deliver）；失败提示总是普通
+   * 消息，不带尾部。用时从调用 reply() 之前量到 finish 段到达，不含等待合并、不含发最后一条。
    * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）
    */
   async function reply(
@@ -417,32 +437,66 @@ export function createTelegramBot({
     const fields = { conversationId: session.conversationId };
     // 这一步还没发出的文字
     let pending = '';
+    // 结束了的一步的文字，等下一个段决定带不带尾部
+    let held: string | undefined;
+    // 这一步出现过工具段：finish-step 时直接发，不留
+    let toolInStep = false;
     let failed = false;
-    const flush = async () => {
-      const text = pending;
-      pending = '';
+    const flush = async (text: string, footer?: string) => {
       // 关闭时被中止的回复不再发出
       if (stopping.signal.aborted) return;
       const chunks = splitMessage(text).filter((chunk) => chunk.trim());
       for (const [index, chunk] of chunks.entries()) {
-        // 第一段引用触发消息，后面的接着发
-        const sent = await deliver(target, chunk, index === 0 ? quote : undefined, fields);
+        // 第一段引用触发消息，后面的接着发；尾部挂在最后一段
+        const last = index === chunks.length - 1;
+        const sent = await deliver(target, chunk, {
+          replyTo: index === 0 ? quote : undefined,
+          footer: last ? footer : undefined,
+          fields,
+        });
         if (!sent) break;
       }
     };
+    const startedAt = now();
     const stream = session.conversation.reply({
       abortSignal: stopping.signal,
       triggers,
       ...(tasks.length > 0 ? { tasks } : {}),
     });
     for await (const chunk of stream) {
+      if (held !== undefined) {
+        const text = held;
+        held = undefined;
+        if (chunk.type === 'finish') {
+          const footer = usage
+            ? usageFooter(chunk.messageMetadata?.usage, now() - startedAt)
+            : undefined;
+          await flush(text, footer);
+          continue;
+        }
+        // 中止的不发；别的段说明还没结束（又开始了一步，或出错），这一条照原样发出
+        if (chunk.type !== 'abort') await flush(text);
+      }
       if (chunk.type === 'text-delta') pending += chunk.delta;
-      else if (chunk.type === 'reset-step') pending = '';
-      else if (chunk.type === 'error') {
+      else if (chunk.type === 'start-step') toolInStep = false;
+      else if (chunk.type === 'reset-step') {
+        // 这一步重新生成：之前的输出作废（核心只在请求正常结束后放出工具段，所以这时其实不会有）
+        pending = '';
+        toolInStep = false;
+      } else if (chunk.type === 'error') {
         failed = true;
         pending = '';
-      } else if (startsToolCall(chunk) || (chunk.type === 'finish-step' && !failed)) {
-        await flush();
+      } else if (startsToolCall(chunk)) {
+        toolInStep = true;
+        const text = pending;
+        pending = '';
+        await flush(text);
+      } else if (chunk.type === 'finish-step' && !failed) {
+        const text = pending;
+        pending = '';
+        // 调了工具的步后面还有一步，直接发；别的步留着等下一个段。没有可发的字时不留
+        if (toolInStep) await flush(text);
+        else if (text.trim()) held = text;
       }
     }
     if (stopping.signal.aborted) return;
@@ -642,8 +696,10 @@ export function createTelegramBot({
   }
 
   /**
-   * 发回复的一段文字。先试富文本消息（开着富文本、服务端也认识这个接口时），文字原样放进一个段落：
-   * - Telegram 拒收这一条：这一段改发普通消息，记 telegram.rich_fallback；下一段照常先试富文本；
+   * 发回复的一段文字。先试富文本消息（开着富文本、服务端也认识这个接口时），文字原样放进一个段落，
+   * 有尾部时后面加分隔线和下标的一行：
+   * - Telegram 拒收这一条：这一段改发普通消息（有尾部时带斜体的一行），记 telegram.rich_fallback；
+   *   下一段照常先试富文本；
    * - 服务端不认识这个接口：这一段改发普通消息，之后都直接发普通消息，telegram.rich_unavailable
    *   只记一次；
    * - 别的失败：和普通消息发送失败一样只记日志，不改发、不重试。
@@ -652,12 +708,11 @@ export function createTelegramBot({
   async function deliver(
     target: ChatTarget,
     text: string,
-    replyTo: number | undefined,
-    fields: object,
+    { replyTo, footer, fields }: { replyTo?: number; footer?: string; fields: object },
   ): Promise<boolean> {
     if (richAvailable) {
       try {
-        await sender.sendRich(target, plainRichMessage(text), replyTo);
+        await sender.sendRich(target, plainRichMessage(text, footer), replyTo);
         return true;
       } catch (error) {
         if (!(error instanceof RichMessageError)) {
@@ -676,18 +731,31 @@ export function createTelegramBot({
         }
       }
     }
-    return send(target, text, replyTo, fields);
+    if (footer === undefined) return send(target, text, replyTo, fields);
+    // 普通消息：正文、空行、斜体的尾部。加上尾部超过上限时尾部单独成一条（不引用）
+    const withFooter = plainWithFooter(text, footer);
+    if (withFooter.text.length <= telegramMessageLimit) {
+      return send(target, withFooter.text, replyTo, fields, withFooter.entities);
+    }
+    if (!(await send(target, text, replyTo, fields))) return false;
+    const alone = plainWithFooter('', footer);
+    return send(target, alone.text, undefined, fields, alone.entities);
   }
 
-  /** 发一条普通消息。发送失败只记日志，不重试；返回是否发出 */
+  /**
+   * 发一条普通消息，entities 是尾部的斜体（没有时和以前一样）。发送失败只记日志，不重试；
+   * 返回是否发出
+   */
   async function send(
     target: ChatTarget,
     text: string,
     replyTo: number | undefined,
     fields: object,
+    entities?: readonly MessageEntity[],
   ): Promise<boolean> {
     try {
-      await sender.send(target, text, replyTo);
+      if (entities) await sender.send(target, text, replyTo, entities);
+      else await sender.send(target, text, replyTo);
       return true;
     } catch (error) {
       sendFailed('sendMessage', error, fields);

@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '@chat-adapter/telegram';
+import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
-import type { InputRichMessage } from './rich.js';
+import type { InputRichBlock, InputRichMessage, RichText } from './rich.js';
 
 /** 测试用的本地 Bot API：收到的请求都记下来，更新由测试推送 */
 export type FakeTelegram = Awaited<ReturnType<typeof startFakeTelegram>>;
@@ -18,16 +19,18 @@ export const fakeBot: TelegramUser = {
 
 /**
  * 群里看得到的一条 bot 发的消息：哪一种（plain 是 sendMessage 发的普通消息，rich 是 sendRichMessage
- * 发的富文本消息）、在哪个聊天、文字、引用了哪条（没引用时没有）。富文本消息的 text 是各个段落块的
- * 文字（隔一个空行），rich 是收到的 rich_message 原样
+ * 发的富文本消息）、在哪个聊天、正文、尾部（有时）、引用了哪条（没引用时没有）。正文与尾部怎么分见
+ * richParts、plainParts。rich 是收到的 rich_message 原样，entities 是普通消息收到的格式标记原样
  */
 export type Delivered = {
   kind: 'plain' | 'rich';
   chatId: string;
   messageId: number;
   text: string;
+  footer?: string;
   replyTo?: number;
   rich?: InputRichMessage;
+  entities?: MessageEntity[];
 };
 
 /** 让发送失败：状态码与 Telegram 的说明文字 */
@@ -38,7 +41,9 @@ export type SendFailure = { status: number; description: string };
  * sendMessage、sendRichMessage、sendChatAction、getFile、setMyCommands，以及文件下载
  * （/file/bot<token>/<路径>）。其他返回 404（真的 Bot API 对不认识的方法也是 404）。
  * 两种发送的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
- * 带 allow_sending_without_reply 就不带引用发出，否则 400
+ * 带 allow_sending_without_reply 就不带引用发出，否则 400。
+ * 富文本消息只认段落（文字是字符串、数组、下标）和分隔线；普通消息的 entities 只认斜体，超出文字的
+ * 范围也不认。不认的回 400，和真的 Bot API 拒收一样
  */
 export async function startFakeTelegram() {
   const updates: TelegramUpdate[] = [];
@@ -141,8 +146,24 @@ export async function startFakeTelegram() {
     const failure = (kind === 'rich' ? richFailures : sendFailures).shift();
     if (failure) return fail(response, failure.status, failure.description);
     const rich = kind === 'rich' ? (body.rich_message as InputRichMessage | undefined) : undefined;
-    if (kind === 'rich' && !Array.isArray(rich?.blocks)) {
+    if (kind === 'rich' && !(Array.isArray(rich?.blocks) && rich.blocks.every(isKnownBlock))) {
       return fail(response, 400, 'Bad Request: rich_message is invalid');
+    }
+    const entities = body.entities as MessageEntity[] | undefined;
+    if (kind === 'plain' && entities !== undefined) {
+      const length = String(body.text).length;
+      const valid =
+        Array.isArray(entities) &&
+        entities.every(
+          (entity) =>
+            entity.type === 'italic' &&
+            Number.isInteger(entity.offset) &&
+            Number.isInteger(entity.length) &&
+            entity.offset >= 0 &&
+            entity.length > 0 &&
+            entity.offset + entity.length <= length,
+        );
+      if (!valid) return fail(response, 400, "Bad Request: can't parse entities");
     }
     const chatId = String(body.chat_id);
     const quoted = body.reply_parameters as
@@ -151,7 +172,7 @@ export async function startFakeTelegram() {
     if (quoted && replyTo === undefined && !quoted.allow_sending_without_reply) {
       return fail(response, 400, 'Bad Request: message to be replied not found');
     }
-    const text = rich ? paragraphsOf(rich) : String(body.text);
+    const seen = rich ? richParts(rich) : plainParts(String(body.text), entities);
     const sent = {
       message_id: nextMessageId++,
       chat: {
@@ -161,16 +182,17 @@ export async function startFakeTelegram() {
       date: Math.floor(Date.now() / 1000),
       from: fakeBot,
       // 富文本消息没有 text，内容在 rich_message 里
-      ...(rich ? { rich_message: rich } : { text }),
+      ...(rich ? { rich_message: rich } : { text: String(body.text) }),
     } as TelegramMessage;
     remember(chatId, sent.message_id);
     delivered.push({
       kind,
       chatId,
       messageId: sent.message_id,
-      text,
+      ...seen,
       ...(replyTo === undefined ? {} : { replyTo }),
       ...(rich ? { rich } : {}),
+      ...(entities ? { entities } : {}),
     });
     return ok(response, sent);
   }
@@ -318,12 +340,60 @@ export function tagOf(data: Uint8Array): string {
   return new TextDecoder().decode(data).split('|').at(-1)!;
 }
 
-/** 富文本消息里各个段落块的文字，隔一个空行 */
-function paragraphsOf(message: InputRichMessage): string {
-  return message.blocks
-    .filter((block) => block.type === 'paragraph')
-    .map((block) => block.text)
-    .join('\n\n');
+/**
+ * 富文本消息里看到的正文与尾部：分隔线之前各段落的文字是正文（隔一个空行），分隔线之后的是尾部
+ * （下标等样式去掉，只留文字）；没有分隔线时没有尾部
+ */
+export function richParts(message: InputRichMessage): { text: string; footer?: string } {
+  const divider = message.blocks.findIndex((block) => block.type === 'divider');
+  const paragraphs = (blocks: InputRichBlock[]) =>
+    blocks.flatMap((block) => (block.type === 'paragraph' ? [plainOf(block.text)] : []));
+  if (divider < 0) return { text: paragraphs(message.blocks).join('\n\n') };
+  return {
+    text: paragraphs(message.blocks.slice(0, divider)).join('\n\n'),
+    footer: paragraphs(message.blocks.slice(divider + 1)).join('\n\n'),
+  };
+}
+
+/**
+ * 普通消息里看到的正文与尾部：末尾被标成斜体的那一段是尾部，它前面的是正文（去掉隔开它们的空行）；
+ * 只有尾部的消息正文是空的。没有斜体时整段都是正文
+ */
+export function plainParts(
+  text: string,
+  entities: readonly MessageEntity[] | undefined,
+): { text: string; footer?: string } {
+  const tail = entities?.find(
+    (entity) => entity.type === 'italic' && entity.offset + entity.length === text.length,
+  );
+  if (!tail) return { text };
+  return {
+    text: text.slice(0, tail.offset).replace(/\n\n$/, ''),
+    footer: text.slice(tail.offset),
+  };
+}
+
+/** 富文本里的文字：样式去掉，只留文字 */
+function plainOf(text: RichText): string {
+  if (typeof text === 'string') return text;
+  if (Array.isArray(text)) return text.map(plainOf).join('');
+  return plainOf(text.text);
+}
+
+/** 假接口认得的块：段落（文字是认得的富文本）、分隔线 */
+function isKnownBlock(block: unknown): boolean {
+  if (typeof block !== 'object' || block === null) return false;
+  const { type, text } = block as { type?: unknown; text?: unknown };
+  if (type === 'divider') return Object.keys(block).length === 1;
+  return type === 'paragraph' && isKnownText(text);
+}
+
+function isKnownText(text: unknown): boolean {
+  if (typeof text === 'string') return true;
+  if (Array.isArray(text)) return text.every(isKnownText);
+  if (typeof text !== 'object' || text === null) return false;
+  const rich = text as { type?: unknown; text?: unknown };
+  return rich.type === 'subscript' && isKnownText(rich.text);
 }
 
 function ok(response: ServerResponse, result: unknown): void {

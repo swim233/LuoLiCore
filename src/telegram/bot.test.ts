@@ -11,11 +11,13 @@ import {
   type Conversation,
   type InstalledTool,
   type Logger,
+  type MessageChunk,
   type Storage,
 } from '../core/index.js';
 import { testPrompts } from '../core/test-prompts.js';
 import { createTelegramBot, type ChatTarget, type RoundNotice } from './bot.js';
-import { imageBytes } from './fake-api.js';
+import { imageBytes, plainParts, richParts } from './fake-api.js';
+import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
 import { RichMessageError, type InputRichMessage } from './rich.js';
 import { telegramMessageLimit } from './split.js';
@@ -75,15 +77,18 @@ function replying(...turns: Array<string | { text: string; gate: Promise<void> }
 }
 
 /**
- * 群里看到的一条：哪一种（plain 普通消息，rich 富文本消息）、发到哪、文字、引用哪条。
- * 富文本消息的 text 是各段落的文字，message 是发出的富文本消息原样
+ * 群里看到的一条：哪一种（plain 普通消息，rich 富文本消息）、发到哪、正文、尾部（有时）、引用哪条。
+ * 正文与尾部的分法同假的 Bot API（richParts、plainParts）。message 是发出的富文本消息原样，
+ * entities 是普通消息带的格式标记原样
  */
 type Sent = {
   kind: 'plain' | 'rich';
   target: ChatTarget;
   text: string;
+  footer?: string;
   replyTo?: number;
   message?: InputRichMessage;
+  entities?: readonly MessageEntity[];
 };
 
 /** 适配器换成的错误：只有 name 与说明，和 @chat-adapter/shared 的那些类一样 */
@@ -118,6 +123,9 @@ function setup({
   sendDelayMs = 0,
   users = [],
   rich = true,
+  usage = true,
+  clock = { ms: 0 },
+  replyStream,
   onSendRich,
   onSend,
   onRound,
@@ -141,6 +149,12 @@ function setup({
   users?: string[];
   /** 发富文本消息；默认打开 */
   rich?: boolean;
+  /** 最后一条消息带尾部；默认打开 */
+  usage?: boolean;
+  /** 量回复用时的时钟（毫秒），测试拨动它；默认停在 0 */
+  clock?: { ms: number };
+  /** 给了时，会话的 reply() 换成它给的流（照写回复流里的段），用来摆出核心不容易摆出的顺序 */
+  replyStream?: (abortSignal: AbortSignal | undefined) => ReadableStream<MessageChunk>;
   /** 第 call 次（从 0 起）发富文本消息、普通消息时先调它：抛错就是这次发送失败 */
   onSendRich?: (call: number) => void | Promise<void>;
   onSend?: (call: number) => void | Promise<void>;
@@ -168,25 +182,31 @@ function setup({
         tools,
       });
       conversations.push(conversation);
-      return conversation;
+      if (!replyStream) return conversation;
+      return { ...conversation, reply: (options) => replyStream(options?.abortSignal) };
     },
     sender: {
       typing: async (target) => {
         typing.push(target);
         if (typingFails) throw new Error('网络不通');
       },
-      send: async (target, text, replyTo) => {
+      send: async (target, text, replyTo, entities) => {
         const call = calls.plain++;
         if (sendDelayMs) await sleep(sendDelayMs);
         await onSend?.(call);
-        sent.push({ kind: 'plain', target, text, replyTo });
+        sent.push({
+          kind: 'plain',
+          target,
+          ...plainParts(text, entities),
+          replyTo,
+          ...(entities ? { entities } : {}),
+        });
       },
       sendRich: async (target, message, replyTo) => {
         const call = calls.rich++;
         if (sendDelayMs) await sleep(sendDelayMs);
         await onSendRich?.(call);
-        const text = message.blocks.map((block) => block.text).join('\n\n');
-        sent.push({ kind: 'rich', target, text, replyTo, message });
+        sent.push({ kind: 'rich', target, ...richParts(message), replyTo, message });
       },
     },
     download: async (fileId) => {
@@ -203,6 +223,8 @@ function setup({
     errorText: '（出错了）',
     staleMs: 60 * 60_000,
     rich,
+    usage,
+    now: () => clock.ms,
     typingIntervalMs,
     wait,
     onRound,
@@ -906,10 +928,18 @@ describe('分条发送（装了工具时）', () => {
     { type: 'tool-input-end', id },
     { type: 'tool-call', toolCallId: id, toolName: 'lookup', input: '{}' },
   ];
-  const finish = (reason: 'stop' | 'tool-calls'): StreamPart => ({
+  const finish = (
+    reason: 'stop' | 'tool-calls',
+    stepUsage: Extract<StreamPart, { type: 'finish' }>['usage'] = usage,
+  ): StreamPart => ({
     type: 'finish',
     finishReason: { unified: reason, raw: undefined },
-    usage,
+    usage: stepUsage,
+  });
+  /** 一步的用量：输入（其中缓存命中）、输出（其中推理） */
+  const tokens = (input: number, cacheRead: number, output: number, reasoning: number) => ({
+    inputTokens: { total: input, noCache: input - cacheRead, cacheRead, cacheWrite: undefined },
+    outputTokens: { total: output, text: output - reasoning, reasoning },
   });
   /** 这一步说了 content（可以为空）再调工具 */
   const callsTool = (content = ''): StreamPart[] => [
@@ -944,11 +974,26 @@ describe('分条发送（装了工具时）', () => {
     });
   }
 
+  /** 同 steps，每次请求时把时钟拨快 ms（像模型在生成） */
+  function timedSteps(clock: { ms: number }, ms: number, ...turns: Array<StreamPart[] | Error>) {
+    const inner = steps(...turns);
+    return new MockLanguageModelV4({
+      doStream: async (options) => {
+        clock.ms += ms;
+        return inner.doStream(options);
+      },
+    });
+  }
+
   /**
    * 装上 lookup 工具的 bot：工具执行时记下群里已经发出的消息（seen，也用来知道工具开始执行了），
    * gate 给出时等它放行
    */
-  function setupWithTool(model: MockLanguageModelV4, gate?: Promise<void>) {
+  function setupWithTool(
+    model: MockLanguageModelV4,
+    gate?: Promise<void>,
+    options: Omit<Parameters<typeof setup>[0], 'model' | 'tools' | 'sendDelayMs'> = {},
+  ) {
     const seen: string[][] = [];
     let sentNow: () => string[] = () => [];
     const lookup = defineTool({
@@ -962,7 +1007,12 @@ describe('分条发送（装了工具时）', () => {
       },
     });
     // 发送要花一点时间，像真的网络请求：与工具执行并行
-    const t = setup({ model, tools: installTools([lookup], {}).tools, sendDelayMs: 20 });
+    const t = setup({
+      model,
+      tools: installTools([lookup], {}).tools,
+      sendDelayMs: 20,
+      ...options,
+    });
     sentNow = () => t.sent.map((s) => s.text);
     return { ...t, seen };
   }
@@ -1056,7 +1106,7 @@ describe('分条发送（装了工具时）', () => {
     ]);
   });
 
-  it('富文本开着：每一步的每一段都发富文本消息，文字原样放进一个段落；每一步的第一段引用触发消息，其余不引用', async () => {
+  it('富文本开着：每一步的每一段都发富文本消息，文字原样放进一个段落；每一步的第一段引用触发消息，其余不引用；尾部只在最后一段', async () => {
     const first = '我查一下\n**马上**';
     const tail = '**b**\n<i>$x$';
     const { bot, sent, calls } = setupWithTool(
@@ -1075,18 +1125,157 @@ describe('分条发送（装了工具时）', () => {
         message: paragraph('a'.repeat(telegramMessageLimit)),
         replyTo: trigger.message_id,
       },
-      { kind: 'rich', message: paragraph(tail), replyTo: undefined },
+      {
+        kind: 'rich',
+        message: {
+          blocks: [
+            { type: 'paragraph', text: tail },
+            { type: 'divider' },
+            { type: 'paragraph', text: { type: 'subscript', text: '输入 2 · 输出 2 · 0.0s' } },
+          ],
+        },
+        replyTo: undefined,
+      },
     ]);
     expect(calls.plain).toBe(0);
   });
 
-  it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留', async () => {
+  it('带工具的多步回复：调工具之前说的话不带尾部；最后的回答带，写的是各步的合计，用时从开始生成到回复完成', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setupWithTool(
+      timedSteps(
+        clock,
+        1250,
+        [...text('我查一下'), ...call(), finish('tool-calls', tokens(1000, 0, 20, 0))],
+        [...text('查到了'), finish('stop', tokens(3096, 3000, 115, 40))],
+      ),
+      undefined,
+      { clock },
+    );
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent.map(({ text, footer, replyTo }) => ({ text, footer, replyTo }))).toEqual([
+      { text: '我查一下', footer: undefined, replyTo: trigger.message_id },
+      {
+        text: '查到了',
+        footer: '输入 4.1k · 缓存 3k · 输出 135 · 推理 40 · 2.5s',
+        replyTo: trigger.message_id,
+      },
+    ]);
+  });
+
+  it.each([
+    { rich: true, usage: true },
+    { rich: false, usage: false },
+  ])(
+    '工具之后同一步里又说了话（RICH=$rich、USAGE=$usage）：这句在下一步的模型请求返回之前就已发出，不带尾部；最后的回答带尾部、写合计',
+    async ({ rich, usage }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const inner = steps(
+        [
+          ...text('我查一下'),
+          ...call(),
+          { type: 'text-start', id: 'u' },
+          { type: 'text-delta', id: 'u', delta: '等等' },
+          { type: 'text-end', id: 'u' },
+          finish('tool-calls'),
+        ],
+        answer('查到了'),
+      );
+      let requests = 0;
+      // 第二步的请求等闸门放开才返回（像服务端在处理长上下文）
+      const model = new MockLanguageModelV4({
+        doStream: async (options) => {
+          if (requests++ === 1) await gate;
+          return inner.doStream(options);
+        },
+      });
+      const { bot, sent } = setupWithTool(model, undefined, { rich, usage });
+
+      const trigger = message({ text: 'nori 查一下' });
+      await bot.handle(trigger);
+      const deadline = Date.now() + 2000;
+      while (sent.length < 2 && Date.now() < deadline) await sleep(5);
+      const beforeSecond = sent.map(({ text, footer }) => ({ text, footer }));
+      const secondRequested = requests === 2;
+      release();
+      await bot.idle();
+
+      expect(secondRequested).toBe(true);
+      expect(beforeSecond).toEqual([
+        { text: '我查一下', footer: undefined },
+        { text: '等等', footer: undefined },
+      ]);
+      expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+        { kind: rich ? 'rich' : 'plain', text: '我查一下', footer: undefined },
+        { kind: rich ? 'rich' : 'plain', text: '等等', footer: undefined },
+        {
+          kind: rich ? 'rich' : 'plain',
+          text: '查到了',
+          footer: usage ? '输入 2 · 输出 2 · 0.0s' : undefined,
+        },
+      ]);
+    },
+  );
+
+  it('长文字拆成两段：尾部在第二段，第一段没有', async () => {
+    const { bot, sent } = setupWithTool(steps(answer(`${'a'.repeat(telegramMessageLimit)}尾巴`)));
+
+    await bot.handle(message({ text: 'nori 讲长一点' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ length: text.length, footer }))).toEqual([
+      { length: telegramMessageLimit, footer: undefined },
+      { length: 2, footer: '输入 1 · 输出 1 · 0.0s' },
+    ]);
+  });
+
+  it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留；没有尾部，也不为它另发一条', async () => {
     const { bot, sent } = setupWithTool(steps(callsTool('我查一下'), answer('')));
 
     await bot.handle(message({ text: 'nori 查一下' }));
     await bot.idle();
 
-    expect(sent.map((s) => s.text)).toEqual(['我查一下']);
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '我查一下', footer: undefined },
+    ]);
+    expect(sent[0]?.message?.blocks).toHaveLength(1);
+  });
+
+  it('出错的回复：已完成的步和固定的提示都不带尾部', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(callsTool('我查一下'), serverError(), serverError(), serverError()),
+    );
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+      { kind: 'rich', text: '我查一下', footer: undefined },
+      { kind: 'plain', text: '（出错了）', footer: undefined },
+    ]);
+    expect(sent[0]?.message?.blocks).toHaveLength(1);
+    expect(sent[1]?.entities).toBeUndefined();
+  });
+
+  it('服务退出时被中止的回复：调工具之前说的话已经发出（不带尾部），中止的这次不再发，也没有尾部', async () => {
+    const { bot, sent, seen } = setupWithTool(
+      steps(callsTool('我查一下'), answer('不该出现')),
+      new Promise<void>(() => {}),
+    );
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    const deadline = Date.now() + 2000;
+    while (seen.length === 0 && Date.now() < deadline) await sleep(5);
+    await bot.close(30);
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '我查一下', footer: undefined },
+    ]);
   });
 
   it('合并回复：工具执行期间又被触发，这次的各条都引用原来的触发，下一次的引用期间最后一条触发', async () => {
@@ -2028,8 +2217,8 @@ describe('富文本消息与改发普通消息', () => {
     ]);
   });
 
-  it('富文本关着：一次也不调富文本的操作，发出去的和以前一样', async () => {
-    const { bot, sent, calls } = setup({ model: replying(long), rich: false });
+  it('富文本关着（尾部也关着）：一次也不调富文本的操作，发出去的和以前一样', async () => {
+    const { bot, sent, calls } = setup({ model: replying(long), rich: false, usage: false });
 
     const trigger = message({ text: 'nori 讲长一点' });
     await bot.handle(trigger);
@@ -2039,6 +2228,7 @@ describe('富文本消息与改发普通消息', () => {
       { kind: 'plain', text: head, replyTo: trigger.message_id },
       { kind: 'plain', text: '尾巴', replyTo: undefined },
     ]);
+    expect(sent.map((s) => s.entities)).toEqual([undefined, undefined]);
     expect(calls.rich).toBe(0);
   });
 
@@ -2058,5 +2248,387 @@ describe('富文本消息与改发普通消息', () => {
       { kind: 'plain', text: '（出错了）', replyTo: trigger.message_id },
     ]);
     expect(calls.rich).toBe(0);
+  });
+});
+
+describe('回复的尾部', () => {
+  /** 一次请求的用量；none 表示服务端一项都没报 */
+  type Tokens = { input: number; cacheRead: number; output: number; reasoning: number } | 'none';
+  const usageOf = (tokens: Tokens) =>
+    tokens === 'none'
+      ? {
+          inputTokens: {
+            total: undefined,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+        }
+      : {
+          inputTokens: {
+            total: tokens.input,
+            noCache: tokens.input - tokens.cacheRead,
+            cacheRead: tokens.cacheRead,
+            cacheWrite: undefined,
+          },
+          outputTokens: {
+            total: tokens.output,
+            text: tokens.output - tokens.reasoning,
+            reasoning: tokens.reasoning,
+          },
+        };
+  const small: Tokens = { input: 10, cacheRead: 0, output: 2, reasoning: 0 };
+  const smallFooter = '输入 10 · 输出 2 · 0.0s';
+
+  /**
+   * 依次回复：每次请求时把时钟拨快 ms（像模型在生成），说 text，带 tokens 的用量；
+   * 带 gate 的拨完时钟等它放行才输出
+   */
+  function answering(
+    clock: { ms: number },
+    ...turns: Array<{ text: string; ms: number; tokens?: Tokens; gate?: Promise<void> }>
+  ) {
+    let call = 0;
+    return new MockLanguageModelV4({
+      doStream: async () => {
+        const { text, ms, tokens = small, gate } = turns[call++] ?? { text: '', ms: 0 };
+        clock.ms += ms;
+        await gate;
+        const parts: StreamPart[] = [
+          { type: 'text-start', id: 't' },
+          { type: 'text-delta', id: 't', delta: text },
+          { type: 'text-end', id: 't' },
+          {
+            type: 'finish',
+            finishReason: { unified: 'stop', raw: undefined },
+            usage: usageOf(tokens),
+          },
+        ];
+        return { stream: simulateReadableStream({ chunks: parts }) };
+      },
+    });
+  }
+
+  /** 照写的回复流：依次给出这些段；then 是之后的事（等中止等），返回之后再给的段 */
+  function scripted(
+    chunks: MessageChunk[],
+    then: (abortSignal: AbortSignal | undefined) => Promise<MessageChunk[]> = async () => [],
+  ) {
+    return (abortSignal: AbortSignal | undefined) =>
+      new ReadableStream<MessageChunk>({
+        async start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          for (const chunk of await then(abortSignal)) controller.enqueue(chunk);
+          controller.close();
+        },
+      });
+  }
+  const finishedStep: MessageChunk[] = [
+    { type: 'start' },
+    { type: 'start-step' },
+    { type: 'text-start', id: 't' },
+    { type: 'text-delta', id: 't', delta: '说完了' },
+    { type: 'text-end', id: 't' },
+    { type: 'finish-step' },
+  ];
+
+  it('一步的回复：那一条带尾部，数字来自回复结束时的用量，用时从开始生成到回复完成（不含等待合并、不含发送）', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: answering(clock, {
+        text: '好的',
+        ms: 3200,
+        tokens: { input: 4976, cacheRead: 4096, output: 135, reasoning: 102 },
+      }),
+      clock,
+      // 等待合并花了 5 秒，发送花了 10 秒：都不算
+      onRound: (notice) => {
+        if (notice.type === 'wait') clock.ms += 5000;
+      },
+      onSendRich: () => {
+        clock.ms += 10_000;
+      },
+    });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    const footer = '输入 5k · 缓存 4.1k · 输出 135 · 推理 102 · 3.2s';
+    expect(
+      sent.map(({ kind, text, footer, replyTo }) => ({ kind, text, footer, replyTo })),
+    ).toEqual([{ kind: 'rich', text: '好的', footer, replyTo: trigger.message_id }]);
+    expect(sent[0]?.message).toEqual({
+      blocks: [
+        { type: 'paragraph', text: '好的' },
+        { type: 'divider' },
+        { type: 'paragraph', text: { type: 'subscript', text: footer } },
+      ],
+    });
+  });
+
+  it('服务端没报用量：尾部只有用时', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: answering(clock, { text: '好的', ms: 65_000, tokens: 'none' }),
+      clock,
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '好的', footer: '1m05s' },
+    ]);
+  });
+
+  it('回复中又被触发、补的那一次：两次回复各有尾部，各算各的用量和用时', async () => {
+    const clock = { ms: 0 };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const model = answering(
+      clock,
+      { text: '第一次', ms: 1000, gate },
+      { text: '第二次', ms: 2000, tokens: { input: 20, cacheRead: 0, output: 4, reasoning: 0 } },
+    );
+    const { bot, sent } = setup({ model, clock });
+
+    const first = message({ text: 'nori 讲个故事' });
+    await bot.handle(first);
+    while (model.doStreamCalls.length === 0) await sleep(5);
+    const again = message({ text: 'nori 我也要听' });
+    await bot.handle(again);
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, footer, replyTo }) => ({ text, footer, replyTo }))).toEqual([
+      { text: '第一次', footer: '输入 10 · 输出 2 · 1.0s', replyTo: first.message_id },
+      { text: '第二次', footer: '输入 20 · 输出 4 · 2.0s', replyTo: again.message_id },
+    ]);
+  });
+
+  it('富文本消息被拒收、改发普通消息：正文不变，空一行后是斜体的尾部', async () => {
+    const text = '好的 👍 **原样**';
+    const { bot, sent } = setup({
+      model: answering({ ms: 0 }, { text, ms: 0 }),
+      onSendRich: () => {
+        throw rejected();
+      },
+    });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent).toEqual([
+      {
+        kind: 'plain',
+        target: { chatId: group.id },
+        text,
+        footer: smallFooter,
+        replyTo: trigger.message_id,
+        entities: [{ type: 'italic', offset: text.length + 2, length: smallFooter.length }],
+      },
+    ]);
+  });
+
+  it('普通消息的最后一段加上尾部超过 4096、正文那条发送失败：不再发尾部那一条', async () => {
+    const fits = 'b'.repeat(telegramMessageLimit - 2 - smallFooter.length);
+    const { bot, sent, calls, entries } = setup({
+      model: answering({ ms: 0 }, { text: `${fits}c`, ms: 0 }),
+      rich: false,
+      onSend: () => {
+        throw adapterError('NetworkError', 'Network error calling Telegram sendMessage');
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(calls.plain).toBe(1);
+    expect(entries.filter((e) => e.msg === 'telegram.send_failed')).toHaveLength(1);
+  });
+
+  it('普通消息的最后一段加上尾部超过 4096：尾部单独成一条（只有斜体的那一行，不引用）；正好放得下时还是一条', async () => {
+    // 正文加空行加尾部正好 4096 个码元
+    const fits = 'b'.repeat(telegramMessageLimit - 2 - smallFooter.length);
+    const { bot, sent } = setup({
+      model: answering({ ms: 0 }, { text: `${fits}c`, ms: 0 }, { text: fits, ms: 0 }),
+      rich: false,
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(
+      sent.map(({ text, footer, replyTo, entities }) => ({
+        length: text.length,
+        footer,
+        replyTo,
+        entities,
+      })),
+    ).toEqual([
+      {
+        length: fits.length + 1,
+        footer: undefined,
+        replyTo: first.message_id,
+        entities: undefined,
+      },
+      {
+        length: 0,
+        footer: smallFooter,
+        replyTo: undefined,
+        entities: [{ type: 'italic', offset: 0, length: smallFooter.length }],
+      },
+      {
+        length: fits.length,
+        footer: smallFooter,
+        replyTo: second.message_id,
+        entities: [{ type: 'italic', offset: fits.length + 2, length: smallFooter.length }],
+      },
+    ]);
+  });
+
+  it.each([
+    { rich: true, usage: true, kind: 'rich', footer: true },
+    { rich: true, usage: false, kind: 'rich', footer: false },
+    { rich: false, usage: true, kind: 'plain', footer: true },
+    { rich: false, usage: false, kind: 'plain', footer: false },
+  ])(
+    '开关 RICH=$rich、USAGE=$usage：发 $kind 消息，尾部 $footer',
+    async ({ rich, usage, kind, footer }) => {
+      const { bot, sent, calls } = setup({
+        model: answering({ ms: 0 }, { text: '好的', ms: 0 }),
+        rich,
+        usage,
+      });
+
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await bot.idle();
+
+      expect(sent.map((s) => ({ kind: s.kind, text: s.text }))).toEqual([{ kind, text: '好的' }]);
+      expect(sent[0]?.footer).toBe(footer ? smallFooter : undefined);
+      if (kind === 'rich') {
+        expect(sent[0]?.message?.blocks).toHaveLength(footer ? 3 : 1);
+        expect(calls.plain).toBe(0);
+      } else {
+        // 没有尾部的普通消息和以前一样：不带格式标记
+        expect(sent[0]?.entities).toEqual(
+          footer ? [{ type: 'italic', offset: 4, length: smallFooter.length }] : undefined,
+        );
+        expect(calls.rich).toBe(0);
+      }
+    },
+  );
+
+  it('服务退出：一步结束后被中止（没有回复完成的段），这一步的文字不发，也没有尾部', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted(finishedStep, async (abortSignal) => {
+        await new Promise((resolve) => abortSignal?.addEventListener('abort', resolve));
+        return [{ type: 'abort' }];
+      }),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await sleep(30);
+    await bot.close(0);
+
+    expect(sent).toEqual([]);
+  });
+
+  it('一步结束后流里来的是中止的段（不是 bot 自己关闭）：照样不发', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([...finishedStep, { type: 'abort' }]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+  });
+
+  it('用时从调用 reply() 之前算起：调用之后、第一个段到达之前过去的时间也算（如核心读历史、等切段）', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: replying(),
+      clock,
+      replyStream: () =>
+        new ReadableStream<MessageChunk>({
+          async start(controller) {
+            await Promise.resolve();
+            // 第一个段还没来，时钟已经走了 0.7 秒
+            clock.ms += 700;
+            for (const chunk of [
+              ...finishedStep,
+              { type: 'finish', messageMetadata: { createdAt: '2026-11-14T00:00:00.000Z' } },
+            ] satisfies MessageChunk[]) {
+              controller.enqueue(chunk);
+            }
+            controller.close();
+          },
+        }),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '说完了', footer: '0.7s' },
+    ]);
+  });
+
+  it('一步结束后流就结束了、没有回复完成的段：不发', async () => {
+    const { bot, sent } = setup({ model: replying(), replyStream: scripted(finishedStep) });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+  });
+
+  it('一步结束后出错：这一步的文字照原样发出（不带尾部），再发固定的提示', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([...finishedStep, { type: 'error', errorText: '出错了' }]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+      { kind: 'rich', text: '说完了', footer: undefined },
+      { kind: 'plain', text: '（出错了）', footer: undefined },
+    ]);
+  });
+
+  it('一步结束后又开始了一步：这一步的文字照原样发出，尾部挂在最后一步', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([
+        ...finishedStep,
+        { type: 'start-step' },
+        { type: 'text-start', id: 'u' },
+        { type: 'text-delta', id: 'u', delta: '还有一句' },
+        { type: 'text-end', id: 'u' },
+        { type: 'finish-step' },
+        { type: 'finish', messageMetadata: { createdAt: '2026-11-14T00:00:00.000Z' } },
+      ]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '说完了', footer: undefined },
+      { text: '还有一句', footer: '0.0s' },
+    ]);
   });
 });

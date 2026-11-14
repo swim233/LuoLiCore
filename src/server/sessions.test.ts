@@ -452,6 +452,7 @@ describe('Telegram 前端从会话管理取会话', () => {
         errorText: '（出了点问题）',
         staleMs: 60 * 60_000,
         rich: true,
+        usage: true,
       },
       open: (conversationId, options) => sessions.open(conversationId, options),
       storage,
