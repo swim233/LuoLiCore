@@ -86,6 +86,7 @@ function setup({
   files = {},
   tools = [],
   sendDelayMs = 0,
+  users = [],
   onRound,
 }: {
   model: MockLanguageModelV4;
@@ -101,6 +102,8 @@ function setup({
   tools?: InstalledTool[];
   /** 每次发送要等这么久才发出（像真的网络请求） */
   sendDelayMs?: number;
+  /** 白名单里能私聊的用户 id */
+  users?: string[];
   onRound?: (notice: RoundNotice) => void;
 }) {
   const sent: Sent[] = [];
@@ -144,7 +147,7 @@ function setup({
     logger,
     bot: () => ({ id: '999', username: 'nori_bot' }),
     chats: new Set([String(group.id)]),
-    users: new Set(),
+    users: new Set(users),
     wakeWords: ['nori'],
     errorText: '（出错了）',
     staleMs: 60 * 60_000,
@@ -1033,5 +1036,733 @@ describe('分条发送（装了工具时）', () => {
       { text: '查到了', replyTo: first.message_id },
       { text: '第二次', replyTo: last.message_id },
     ]);
+  });
+});
+
+describe('指令（/compact、/clear）', () => {
+  const alicePrivate: TelegramChat = { id: alice.id, type: 'private', first_name: 'Alice' };
+  const byAlice = { id: String(alice.id), name: 'Alice' };
+  const quoted = (sent: Sent[]) => sent.map(({ text, replyTo }) => ({ text, replyTo }));
+
+  async function waitFor(check: () => boolean, what = '条件'): Promise<void> {
+    const deadline = Date.now() + 3000;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error(`等待${what}超时`);
+      await sleep(5);
+    }
+  }
+
+  /** 在 ms 毫秒内返回为 true；被拖住时为 false（不让测试一直挂着） */
+  async function returnsWithin(task: Promise<unknown>, ms = 1000): Promise<boolean> {
+    return Promise.race([task.then(() => true), sleep(ms).then(() => false)]);
+  }
+
+  async function storeOf(storage: Storage, chatId: number = group.id) {
+    const info = await storage.findConversation('telegram', String(chatId));
+    return info && { id: info.id, store: await storage.openConversation(info.id) };
+  }
+
+  /** 各段：起点、原因、摘要、执行人 */
+  async function segmentsOf(storage: Storage, chatId: number = group.id) {
+    const found = await storeOf(storage, chatId);
+    if (!found) return [];
+    return (await found.store.segments()).map((segment) => ({
+      startSeq: segment.startSeq,
+      reason: segment.startReason,
+      summary: segment.priorSummary,
+      by: segment.startedBy,
+    }));
+  }
+
+  /** 历史里的消息：序号、角色、正文 */
+  async function entriesOf(storage: Storage, chatId: number = group.id) {
+    const found = await storeOf(storage, chatId);
+    if (!found) return [];
+    return (await found.store.entries()).map(({ seq, message }) => ({
+      seq,
+      role: message.role,
+      text: message.parts.map((part) => (part.type === 'text' ? part.text : '')).join(''),
+    }));
+  }
+
+  type Entry = { level: string; msg: string; fields: Record<string, unknown> };
+  const commandLogs = (entries: Entry[]) =>
+    entries.filter((e) => e.msg === 'telegram.command').map((e) => e.fields);
+
+  const minutesAgo = (minutes: number) => Math.floor(Date.now() / 1000) - minutes * 60;
+
+  describe('执行', () => {
+    it('群里发 /clear：不进历史、不触发回复；多一段清空的段，执行人是发指令的人；引用指令回「已清空上下文」。再发一次回「上下文已经是空的」，段不变', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '已清空上下文', replyTo: clear.message_id }]);
+      expect(sent[0]!.target).toEqual({ chatId: group.id });
+      expect(await entriesOf(storage)).toEqual([{ seq: 1, role: 'user', text: '今天读到第三章' }]);
+      const segments = await segmentsOf(storage);
+      expect(segments.at(-1)).toEqual({
+        startSeq: 2,
+        reason: 'clear',
+        summary: undefined,
+        by: byAlice,
+      });
+      expect(model.doStreamCalls).toHaveLength(0);
+      // 清空不显示「正在输入」
+      expect(typing).toEqual([]);
+
+      const again = message({ text: '/clear' });
+      await bot.handle(again);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '已清空上下文', replyTo: clear.message_id },
+        { text: '上下文已经是空的', replyTo: again.message_id },
+      ]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(model.doStreamCalls).toHaveLength(0);
+    });
+
+    it('群里发 /compact：执行期间发「正在输入」；多一段手动压缩的段，带摘要与执行人；引用指令回「已压缩」；之后的回复里 system 是新摘要、消息只有压缩之后的。段里没有消息时回「没有可压缩的内容」，不请求模型', async () => {
+      const { model, release, calledAt } = gated('读书会的新摘要', '回复');
+      const { bot, sent, typing, storage } = setup({ model, typingIntervalMs: 20 });
+      await bot.handle(message({ text: '今天读到第三章' }));
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      await sleep(50);
+      // 压缩还没结束：「正在输入」一直在发，提示还没发
+      expect(typing.length).toBeGreaterThanOrEqual(2);
+      expect(typing[0]).toEqual({ chatId: group.id });
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+      const count = typing.length;
+      await sleep(60);
+      expect(typing.length).toBe(count);
+
+      expect(quoted(sent)).toEqual([{ text: '已压缩', replyTo: compact.message_id }]);
+      expect(promptText(model, 0)).toContain('今天读到第三章');
+      expect((await segmentsOf(storage)).at(-1)).toEqual({
+        startSeq: 2,
+        reason: 'manual',
+        summary: '读书会的新摘要',
+        by: byAlice,
+      });
+
+      const again = message({ text: '/compact' });
+      await bot.handle(again);
+      await bot.idle();
+      expect(quoted(sent).at(-1)).toEqual({ text: '没有可压缩的内容', replyTo: again.message_id });
+      expect(model.doStreamCalls).toHaveLength(1);
+
+      await bot.handle(message({ text: 'nori 我们读到哪了' }));
+      await bot.idle();
+      expect(sent.at(-1)!.text).toBe('回复');
+      const prompt = promptText(model, 1);
+      expect(prompt).toContain('读书会的新摘要');
+      expect(prompt).toContain('nori 我们读到哪了');
+      expect(prompt).not.toContain('今天读到第三章');
+      // 指令本身不进历史，也不会出现在请求里
+      expect(prompt).not.toContain('/compact');
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '今天读到第三章',
+        'nori 我们读到哪了',
+        '回复',
+      ]);
+    });
+
+    it('私聊里同样能用，提示发回私聊；指令不触发回复', async () => {
+      const model = replying('好', '不该出现');
+      const { bot, sent, storage } = setup({ model, users: [String(alice.id)] });
+      await bot.handle(message({ chat: alicePrivate, text: '在吗' }));
+      await bot.idle();
+
+      const clear = message({ chat: alicePrivate, text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(sent.map(({ target, text, replyTo }) => ({ target, text, replyTo }))).toEqual([
+        { target: { chatId: alice.id }, text: '好', replyTo: expect.any(Number) },
+        { target: { chatId: alice.id }, text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(model.doStreamCalls).toHaveLength(1);
+      expect((await segmentsOf(storage, alice.id)).at(-1)).toMatchObject({
+        startSeq: 3,
+        reason: 'clear',
+        by: byAlice,
+      });
+      expect(await entriesOf(storage, alice.id)).toHaveLength(2);
+    });
+
+    it('论坛群的话题里：「正在输入」和提示都发回指令所在的话题', async () => {
+      const model = replying('话题里的摘要');
+      const { bot, sent, typing } = setup({ model });
+      const topic = { is_topic_message: true, message_thread_id: 77 };
+      await bot.handle(message({ text: '话题里的闲聊', ...topic }));
+
+      const compact = message({ text: '/compact@nori_bot', ...topic });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(typing[0]).toEqual({ chatId: group.id, messageThreadId: 77 });
+      expect(sent).toEqual([
+        {
+          target: { chatId: group.id, messageThreadId: 77 },
+          text: '已压缩',
+          replyTo: compact.message_id,
+        },
+      ]);
+    });
+
+    it('还没有会话的聊天（白名单里、从没说过话）：不建会话，/clear 回「上下文已经是空的」，/compact 回「没有可压缩的内容」', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, storage, entries } = setup({ model, users: [String(alice.id)] });
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const compact = message({ chat: alicePrivate, text: '/compact' });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(sent).toEqual([
+        { target: { chatId: group.id }, text: '上下文已经是空的', replyTo: clear.message_id },
+        { target: { chatId: alice.id }, text: '没有可压缩的内容', replyTo: compact.message_id },
+      ]);
+      expect(await storage.listConversations('telegram')).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(commandLogs(entries)).toEqual([
+        {
+          chatId: String(group.id),
+          command: 'clear',
+          byId: '11',
+          result: 'already-empty',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+        {
+          chatId: String(alice.id),
+          command: 'compact',
+          byId: '11',
+          result: 'nothing-to-compact',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+      ]);
+    });
+
+    it('白名单之外的群、私聊发指令：没有任何动作，日志只有 telegram.ignored', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage, entries } = setup({ model });
+
+      await bot.handle(message({ chat: { ...group, id: -1002 }, text: '/clear' }));
+      await bot.handle(message({ chat: alicePrivate, text: '/compact' }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(typing).toEqual([]);
+      expect(await storage.listConversations('telegram')).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(entries.map((e) => e.msg)).toEqual(['telegram.ignored', 'telegram.ignored']);
+    });
+
+    it('指令结束的那行日志：会话 id、指令、执行人的 id、结果、等了多久、执行了多久，没有正文和名字', async () => {
+      const { bot, storage, entries } = setup({ model: replying('不该出现') });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      await bot.handle(message({ text: '/clear' }));
+      await bot.idle();
+
+      const id = (await storage.findConversation('telegram', String(group.id)))!.id;
+      const logs = commandLogs(entries);
+      expect(logs).toEqual([
+        {
+          conversationId: id,
+          command: 'clear',
+          byId: '11',
+          result: 'cleared',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+      ]);
+      expect(logs[0]!.waitedMs).toBeGreaterThanOrEqual(0);
+      expect(logs[0]!.ranMs).toBeGreaterThanOrEqual(0);
+      const telegramLines = JSON.stringify(entries.filter((e) => e.msg.startsWith('telegram.')));
+      expect(telegramLines).not.toContain('Alice');
+      expect(telegramLines).not.toContain('/clear');
+      expect(telegramLines).not.toContain('第三章');
+    });
+  });
+
+  describe('等一轮回复结束', () => {
+    it('等待合并期间发 /clear：不重置等待的计时；这一轮照常回复，回复发出后才清空并回提示；那次回复和它回答的消息都在旧的一段里', async () => {
+      const { model, release, calledAt } = gated('回复');
+      release();
+      const { bot, sent, storage } = setup({ model, wait: { idleMs: 150, maxMs: 1000 } });
+
+      const trigger = message({ text: 'nori 第三章讲了什么' });
+      await bot.handle(trigger);
+      const triggeredAt = Date.now();
+      await sleep(100);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      // 指令若重置了计时，要到 250 毫秒之后才开始
+      expect(calledAt[0]! - triggeredAt).toBeLessThan(240);
+      expect(quoted(sent)).toEqual([
+        { text: '回复', replyTo: trigger.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(promptText(model, 0)).toContain('nori 第三章讲了什么');
+      expect(await entriesOf(storage)).toEqual([
+        { seq: 1, role: 'user', text: 'nori 第三章讲了什么' },
+        { seq: 2, role: 'assistant', text: '回复' },
+      ]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({ startSeq: 3, reason: 'clear' });
+    });
+
+    it('回复中发 /clear，之后又有人触发：补回复也发出后才清空；补回复看得到期间的新消息', async () => {
+      const { model, release, calledAt } = gated('第一次', '第二次');
+      const { bot, sent, storage } = setup({ model });
+
+      const first = message({ text: 'nori 讲个故事' });
+      await bot.handle(first);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const second = message({ text: 'nori 我也要听' });
+      await bot.handle(second);
+      release();
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '第一次', replyTo: first.message_id },
+        { text: '第二次', replyTo: second.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(promptText(model, 1)).toContain('nori 我也要听');
+      expect(promptText(model, 1)).not.toContain('/clear');
+      const entries = await entriesOf(storage);
+      expect(entries.map((entry) => entry.text)).toEqual([
+        'nori 讲个故事',
+        '第一次',
+        'nori 我也要听',
+        '第二次',
+      ]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        startSeq: entries.at(-1)!.seq + 1,
+        reason: 'clear',
+      });
+    });
+
+    it('回复中先后发 /compact、/clear：这一轮结束后按先后执行，两句提示按先后发出', async () => {
+      const { model, release, calledAt } = gated('第一次', '摘要');
+      const { bot, sent, entries } = setup({ model });
+
+      const first = message({ text: 'nori 讲个故事' });
+      await bot.handle(first);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await sleep(30);
+      // 回复还没结束：两条都在等
+      expect(calledAt).toHaveLength(1);
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '第一次', replyTo: first.message_id },
+        { text: '已压缩', replyTo: compact.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(calledAt).toHaveLength(2);
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['compact', 'compacted'],
+        ['clear', 'cleared'],
+      ]);
+    });
+
+    it('压缩进行中有人触发：回复在压缩结束后才请求模型，system 里是新摘要、消息里有这条触发；这一轮回复期间再发的指令等它结束才执行', async () => {
+      const { model, release, calledAt } = gated('压缩出来的摘要', '回复');
+      const { bot, sent, storage } = setup({ model });
+      await bot.handle(message({ text: '压缩之前的话' }));
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      const trigger = message({ text: 'nori 在吗' });
+      await bot.handle(trigger);
+      // 等待合并（5 毫秒）早就过了，回复已经开始，在等压缩
+      await sleep(60);
+      expect(calledAt).toHaveLength(1);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const releasedAt = Date.now();
+      release();
+      await bot.idle();
+
+      expect(calledAt).toHaveLength(2);
+      expect(calledAt[1]!).toBeGreaterThanOrEqual(releasedAt);
+      const prompt = promptText(model, 1);
+      expect(prompt).toContain('压缩出来的摘要');
+      expect(prompt).toContain('nori 在吗');
+      expect(prompt).not.toContain('压缩之前的话');
+      // 压缩的提示和回复谁先发出不一定；清空等这一轮结束，最后才发
+      expect(quoted(sent)).toEqual(
+        expect.arrayContaining([
+          { text: '已压缩', replyTo: compact.message_id },
+          { text: '回复', replyTo: trigger.message_id },
+        ]),
+      );
+      expect(quoted(sent)).toHaveLength(3);
+      expect(quoted(sent)[2]).toEqual({ text: '已清空上下文', replyTo: clear.message_id });
+      const entries = await entriesOf(storage);
+      expect(entries.map((entry) => entry.text)).toEqual(['压缩之前的话', 'nori 在吗', '回复']);
+      const segments = await segmentsOf(storage);
+      expect(segments.slice(-2)).toEqual([
+        { startSeq: 2, reason: 'manual', summary: '压缩出来的摘要', by: byAlice },
+        { startSeq: entries.at(-1)!.seq + 1, reason: 'clear', summary: undefined, by: byAlice },
+      ]);
+    });
+
+    it('压缩进行中群里有普通消息：handle 没有被压缩拖住，消息照常记录，在新的一段里', async () => {
+      const { model, release, calledAt } = gated('摘要');
+      const { bot, sent, storage } = setup({ model });
+      await bot.handle(message({ text: '压缩之前的话' }));
+
+      expect(await returnsWithin(bot.handle(message({ text: '/compact' })))).toBe(true);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      expect(await returnsWithin(bot.handle(message({ text: '压缩期间的闲聊' })))).toBe(true);
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '压缩之前的话',
+        '压缩期间的闲聊',
+      ]);
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+
+      expect(sent.map((s) => s.text)).toEqual(['已压缩']);
+      expect(promptText(model, 0)).not.toContain('压缩期间的闲聊');
+      // 期间的闲聊是 2 号，新的一段从它开始
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        startSeq: 2,
+        reason: 'manual',
+      });
+    });
+
+    it('一轮结束的那一刻就执行，中间不留空当：「这一轮结束」的通知里紧接着来的消息，在清空之后的一段里', async () => {
+      const { model, release, calledAt } = gated('回复');
+      let next: Promise<void> | undefined;
+      const { bot, sent, storage } = setup({
+        model,
+        // 收到这一轮结束的通知时马上来一条普通消息。执行指令之前要是先等了一下（哪怕一个
+        // setTimeout(0)），它就会抢在清空之前写进历史，落进被清掉的旧段
+        onRound: (notice) => {
+          if (notice.type === 'end' && !next) {
+            next = bot.handle(message({ text: '紧接着的一句' }));
+          }
+        },
+      });
+
+      const trigger = message({ text: 'nori 讲个故事' });
+      await bot.handle(trigger);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      release();
+      await bot.idle();
+      await next;
+
+      expect(quoted(sent)).toEqual([
+        { text: '回复', replyTo: trigger.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(await entriesOf(storage)).toEqual([
+        { seq: 1, role: 'user', text: 'nori 讲个故事' },
+        { seq: 2, role: 'assistant', text: '回复' },
+        { seq: 3, role: 'user', text: '紧接着的一句' },
+      ]);
+      // 清空的段从这条消息开始：它不在被清掉的旧段里
+      expect((await segmentsOf(storage)).at(-1)).toEqual({
+        startSeq: 3,
+        reason: 'clear',
+        summary: undefined,
+        by: byAlice,
+      });
+    });
+  });
+
+  describe('失败与不执行', () => {
+    it('压缩失败（模型报错）：引用指令回「压缩失败」，段不变；之后还能再压缩', async () => {
+      let call = 0;
+      const model = new MockLanguageModelV4({
+        doStream: async (options) => {
+          if (call++ === 0) throw new Error('模型挂了');
+          return replying('第二次的摘要').doStream(options);
+        },
+      });
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '压缩失败', replyTo: compact.message_id }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(entries.map((e) => e.msg)).toContain('summary.failed');
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['failed']);
+      // 详情只在核心的 summary.failed 里，群里只有那句话
+      expect(sent.map((s) => s.text).join('')).not.toContain('模型挂了');
+
+      const again = message({ text: '/compact' });
+      await bot.handle(again);
+      await bot.idle();
+      expect(quoted(sent).at(-1)).toEqual({ text: '已压缩', replyTo: again.message_id });
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        reason: 'manual',
+        summary: '第二次的摘要',
+      });
+    });
+
+    it('清空失败（存储出错）：引用指令回「清空失败」，段不变；错误记在指令的那一行', async () => {
+      const storage = createMemoryStorage();
+      const openConversation = storage.openConversation.bind(storage);
+      storage.openConversation = async (id) => {
+        const store = await openConversation(id);
+        return {
+          ...store,
+          addSegment: async () => {
+            throw new Error('磁盘满了');
+          },
+        };
+      };
+      const { bot, sent, entries } = setup({ model: replying('不该出现'), storage });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '清空失败', replyTo: clear.message_id }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries)).toEqual([
+        expect.objectContaining({
+          command: 'clear',
+          result: 'failed',
+          error: { type: 'Error', message: '磁盘满了' },
+        }),
+      ]);
+    });
+
+    it('核心以「正忙」拒绝（绕开 bot 直接开始了一次回复）：当作失败回「清空失败」，另记一行 telegram.command_busy', async () => {
+      const { model, release, calledAt } = gated('不经 bot 的回复');
+      const { bot, sent, storage, entries, conversations } = setup({ model });
+      await bot.handle(message({ text: '你好' }));
+      const reading = conversations[0]!.reply().pipeTo(new WritableStream());
+      await waitFor(() => calledAt.length === 1, '回复的请求');
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '清空失败', replyTo: clear.message_id }]);
+      const id = (await storage.findConversation('telegram', String(group.id)))!.id;
+      expect(entries.filter((e) => e.msg === 'telegram.command_busy')).toEqual([
+        {
+          level: 'error',
+          msg: 'telegram.command_busy',
+          fields: { conversationId: id, command: 'clear', reason: 'replying' },
+        },
+      ]);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['failed']);
+      release();
+      await reading;
+    });
+
+    it('过期的指令（发送时间早于时限）：不执行、不回提示，日志一行', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      await bot.handle(message({ text: '/compact', date: minutesAgo(61) }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(typing).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(await entriesOf(storage)).toHaveLength(1);
+      expect(commandLogs(entries)).toEqual([
+        {
+          chatId: String(group.id),
+          ageMinutes: 61,
+          command: 'compact',
+          byId: '11',
+          result: 'stale',
+          waitedMs: expect.any(Number),
+        },
+      ]);
+    });
+
+    it('把一条旧消息编辑成 /clear：照编辑处理（历史里那条的正文变了），没有清空', async () => {
+      const { bot, sent, storage, entries } = setup({ model: replying('不该出现') });
+      const original = message({ text: '原来的话' });
+      await bot.handle(original);
+      const segments = await segmentsOf(storage);
+
+      await bot.handle({ ...original, text: '/clear', edit_date: Math.floor(Date.now() / 1000) });
+      await bot.idle();
+
+      expect(await entriesOf(storage)).toEqual([{ seq: 1, role: 'user', text: '/clear' }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(sent).toEqual([]);
+      expect(commandLogs(entries)).toEqual([]);
+      expect(entries.map((e) => e.msg)).toContain('telegram.edited');
+    });
+
+    it('不算指令的（/clear 现在、/clear@别的bot、说明文字是 /clear 的图片）：照普通消息记录；私聊里照常触发回复', async () => {
+      const model = replying('私聊里的回复');
+      const { bot, sent, storage, entries } = setup({ model, users: [String(alice.id)] });
+
+      await bot.handle(message({ text: '/clear 现在' }));
+      await bot.handle(message({ text: '/clear@other_bot' }));
+      await bot.handle(
+        message({ photo: [{ file_id: 'p', width: 8, height: 8 }], caption: '/clear' }),
+      );
+      await bot.idle();
+      expect(sent).toEqual([]);
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '/clear 现在',
+        '/clear@other_bot',
+        '/clear',
+      ]);
+      expect(await segmentsOf(storage)).toHaveLength(1);
+
+      const privately = message({ chat: alicePrivate, text: '/compact 记住旅行计划' });
+      await bot.handle(privately);
+      await bot.idle();
+      expect(quoted(sent)).toEqual([{ text: '私聊里的回复', replyTo: privately.message_id }]);
+      expect(promptText(model, 0)).toContain('/compact 记住旅行计划');
+      expect(commandLogs(entries)).toEqual([]);
+    });
+  });
+
+  describe('关闭', () => {
+    it('还在等的指令丢掉：不执行、不发提示，各记一行 closing', async () => {
+      const model = replying({ text: '永远等不到', gate: new Promise<void>(() => {}) });
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await waitFor(() => model.doStreamCalls.length === 1, '回复的请求');
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/clear' }));
+      await bot.handle(message({ text: '/compact' }));
+
+      await bot.close(30);
+      await sleep(30);
+
+      expect(sent).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(1);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['clear', 'closing'],
+        ['compact', 'closing'],
+      ]);
+    });
+
+    it('进行中的压缩马上中止：段不变、没有提示；不等满宽限期（回复在等这次压缩时也一样）', async () => {
+      const model = replying({ text: '不会用上的摘要', gate: new Promise<void>(() => {}) }, '回复');
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/compact' }));
+      await waitFor(() => model.doStreamCalls.length === 1, '摘要请求');
+      // 一轮回复已经开始，在核心里等这次压缩
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await sleep(30);
+
+      const startedAt = Date.now();
+      await bot.close(10_000);
+
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      // 宽限期内回复照常发完（关闭的原有规则）；压缩没有提示
+      expect(sent.map((s) => s.text)).toEqual(['回复']);
+      expect(entries.map((e) => e.msg)).toContain('summary.aborted');
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['compact', 'aborted'],
+      ]);
+    });
+
+    it('关闭时被放弃的等待中的一轮，没有带出排着的指令的执行', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, storage, entries } = setup({
+        model,
+        wait: { idleMs: 5000, maxMs: 8000 },
+      });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      await bot.handle(message({ text: 'nori 在吗' }));
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/clear' }));
+
+      await bot.close(10_000);
+      await sleep(30);
+
+      expect(sent).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['closing']);
+    });
+
+    it('进行中的清空照常做完（不发提示）；各会话等它结束才关闭', async () => {
+      const storage = createMemoryStorage();
+      const openConversation = storage.openConversation.bind(storage);
+      let slow = false;
+      storage.openConversation = async (id) => {
+        const store = await openConversation(id);
+        return {
+          ...store,
+          currentSegment: async () => {
+            if (slow) await sleep(50);
+            return store.currentSegment();
+          },
+        };
+      };
+      const { bot, sent, entries } = setup({ model: replying('不该出现'), storage });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      slow = true;
+
+      await bot.handle(message({ text: '/clear' }));
+      await bot.close(0);
+
+      expect(sent).toEqual([]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({ startSeq: 2, reason: 'clear' });
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['cleared']);
+    });
+
+    it('关闭之后再发指令：不执行，记一行 closing', async () => {
+      const { bot, sent, storage, entries } = setup({ model: replying('不该出现') });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+      await bot.close(0);
+
+      await bot.handle(message({ text: '/clear' }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['closing']);
+    });
   });
 });

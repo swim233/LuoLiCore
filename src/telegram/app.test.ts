@@ -903,3 +903,140 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     });
   });
 });
+
+describe('指令（经过真的适配器）', () => {
+  const entity = (text: string) => [{ type: 'bot_command', offset: 0, length: text.length }];
+  /** 带 bot_command 实体的指令消息，和 Telegram 客户端发出的一样 */
+  const command = (chat: TelegramChat, text: string) => ({
+    chat,
+    from: alice,
+    text,
+    entities: entity(text),
+  });
+  const menu = [
+    { command: 'compact', description: '压缩上下文：之前的对话并成摘要' },
+    { command: 'clear', description: '清空上下文：忘掉之前的对话，不能撤销' },
+  ];
+
+  it('带 bot_command 实体的 /compact、/clear@本bot：群里和私聊里各恰好处理一次（只当指令，不当普通消息）', async () => {
+    const model = replying('群里的摘要', '收到', '私聊的摘要');
+    const { api, app, storage, entries } = await start(model);
+    const sent = () => sends(api).length;
+
+    api.push({ chat: group, from: alice, text: '今天读到第三章' });
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 1);
+    const [groupCompact] = api.push(command(group, '/compact'));
+    await waitUntil(() => sent() === 1);
+    const [groupClear] = api.push(command(group, '/clear@nori_test_bot'));
+    await waitUntil(() => sent() === 2);
+
+    const [hello] = api.push({ chat: privateWith(alice), from: alice, text: '在吗' });
+    await waitUntil(() => sent() === 3);
+    const [privateCompact] = api.push(command(privateWith(alice), '/compact'));
+    await waitUntil(() => sent() === 4);
+    const [privateClear] = api.push(command(privateWith(alice), '/CLEAR@Nori_Test_Bot'));
+    await waitUntil(() => sent() === 5);
+    await app.bot.idle();
+    await sleep(100);
+
+    const quote = (id: number | undefined) => ({
+      message_id: id,
+      allow_sending_without_reply: true,
+    });
+    expect(sends(api).map((call) => call.body)).toEqual([
+      { chat_id: String(group.id), text: '已压缩', reply_parameters: quote(groupCompact) },
+      { chat_id: String(group.id), text: '已清空上下文', reply_parameters: quote(groupClear) },
+      { chat_id: String(alice.id), text: '收到', reply_parameters: quote(hello) },
+      { chat_id: String(alice.id), text: '已压缩', reply_parameters: quote(privateCompact) },
+      { chat_id: String(alice.id), text: '已清空上下文', reply_parameters: quote(privateClear) },
+    ]);
+    // 两次压缩、私聊里的一次回复；指令没有触发回复
+    expect(model.doStreamCalls).toHaveLength(3);
+    expect((await historyOf(storage, group.id)).map((m) => m.text)).toEqual(['今天读到第三章']);
+    expect((await historyOf(storage, alice.id)).map((m) => m.text)).toEqual(['在吗', '收到']);
+    expect(
+      entries
+        .filter((e) => e.msg === 'telegram.command')
+        .map((e) => [e.fields.command, e.fields.result]),
+    ).toEqual([
+      ['compact', 'compacted'],
+      ['clear', 'cleared'],
+      ['compact', 'compacted'],
+      ['clear', 'cleared'],
+    ]);
+    expect(entries.map((e) => e.msg)).not.toContain('telegram.handle_failed');
+  });
+
+  it('带 bot_command 实体的 /clear@别的bot：适配器不当指令派发，照普通消息记录一次，不清空', async () => {
+    const model = replying('不该出现');
+    const { api, app, storage, entries } = await start(model);
+
+    api.push({ chat: group, from: alice, text: '今天读到第三章' });
+    api.push(command(group, '/clear@other_bot'));
+    await waitUntil(async () => (await historyOf(storage, group.id)).length === 2);
+    await app.bot.idle();
+    await sleep(100);
+
+    expect((await historyOf(storage, group.id)).map((m) => m.text)).toEqual([
+      '今天读到第三章',
+      '/clear@other_bot',
+    ]);
+    expect(sends(api)).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect(entries.map((e) => e.msg)).not.toContain('telegram.command');
+  });
+
+  it('启动后登记指令菜单一次：两条指令，不带范围和语言', async () => {
+    const { api, app, entries } = await start(replying());
+    await app.commandsRegistered;
+    await sleep(50);
+
+    expect(api.calls.filter((call) => call.method === 'setMyCommands')).toEqual([
+      { method: 'setMyCommands', token, body: { commands: menu } },
+    ]);
+    expect(entries.filter((e) => e.msg === 'telegram.commands_registered')).toEqual([
+      { level: 'info', msg: 'telegram.commands_registered', fields: { commands: 2 } },
+    ]);
+  });
+
+  it('登记不拖住启动：Bot API 还没回应时启动已经完成、照常回复', async () => {
+    let release!: () => void;
+    const { api, app, entries } = await start(replying('收到'), {
+      backlog: (api) => (release = api.holdSetCommands()),
+    });
+    let registered = false;
+    void app.commandsRegistered.then(() => (registered = true));
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    await waitUntil(() => sends(api).length === 1);
+    expect(sends(api)[0]!.body).toMatchObject({
+      text: '收到',
+      reply_parameters: { message_id: id },
+    });
+    expect(registered).toBe(false);
+
+    release();
+    await app.commandsRegistered;
+    expect(entries.map((e) => e.msg)).toContain('telegram.commands_registered');
+  });
+
+  it('登记失败（token 不对）：启动照常，日志一行，没有 token，不重试', async () => {
+    const { api, app, entries } = await start(replying('收到'), {
+      backlog: (api) => api.failSetCommands(401),
+    });
+    await app.commandsRegistered;
+
+    const failed = entries.filter((e) => e.msg === 'telegram.commands_failed');
+    expect(failed).toEqual([
+      { level: 'warn', msg: 'telegram.commands_failed', fields: { error: expect.any(String) } },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(token);
+    expect(entries.map((e) => e.msg)).not.toContain('telegram.commands_registered');
+
+    // 照常收消息、回复
+    api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    await waitUntil(() => sends(api).length === 1);
+    await sleep(50);
+    expect(api.calls.filter((call) => call.method === 'setMyCommands')).toHaveLength(1);
+  });
+});

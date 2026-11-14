@@ -19,6 +19,7 @@ import type { TelegramRaw } from './message.js';
  * - 相册：适配器攒齐后只派发一条（原始数据只有最后一条），各条原始消息另记一份，由 takeAlbum 取回。
  *   相册某一条的编辑不再攒，立即按单条派发。
  * - 下载文件：公开基类的 downloadFile。
+ * - 登记指令菜单：setCommands（setMyCommands）。
  * - 连接状态：记下最近一次拉取更新是否成功（connected）与成功的时间，变了时调 onConnectionChange，
  *   洛璃服务据此报告「离线」。断开期间的拉取不长轮询（timeout 0），恢复后第一次拉取就立即返回、
  *   变回连上；之后照旧长轮询。否则恢复后要等一次长轮询返回（默认 30 秒）才知道连上了。
@@ -117,6 +118,16 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     }
     if (updates.length < Number(payload?.limit ?? 100)) this.backlogDrained = true;
     return updates as TResult;
+  }
+
+  /**
+   * 登记 bot 的指令菜单（Bot API 的 setMyCommands），不带范围和语言：默认范围，所有人看到同一份。
+   * 会覆盖之前登记的（含在 BotFather 里设的）。出错时抛出（错误信息里没有 token）
+   */
+  async setCommands(
+    commands: ReadonlyArray<{ command: string; description: string }>,
+  ): Promise<void> {
+    await this.telegramFetch<boolean>('setMyCommands', { commands });
   }
 
   /** 按 file_id 下载文件（getFile 再取文件；地址含 token，出错时的消息里只有 file_id） */

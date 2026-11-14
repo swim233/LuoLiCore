@@ -1,6 +1,10 @@
 import {
+  ConversationBusyError,
   DuplicateMessageError,
   editMessage,
+  type Author,
+  type ClearResult,
+  type CompactResult,
   type Conversation,
   type Logger,
   type MessageChunk,
@@ -8,8 +12,15 @@ import {
   type Storage,
   type Trigger,
 } from '../core/index.js';
+import { parseCommand, type TelegramCommand } from './command.js';
 import { editedText, toAppendInput } from './content.js';
-import { conversationTitle, isAllowed, isAllowedChat, type TelegramRaw } from './message.js';
+import {
+  conversationTitle,
+  displayName,
+  isAllowed,
+  isAllowedChat,
+  type TelegramRaw,
+} from './message.js';
 import { splitMessage } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
@@ -106,6 +117,33 @@ type Round = {
   finish: () => void;
 };
 
+/** 指令的结果：核心给的，或者失败 */
+type CommandOutcome = CompactResult | ClearResult | 'failed';
+
+/** 群里看到的提示；被中止（服务退出）时不发 */
+const commandReplies: Record<Exclude<CommandOutcome, 'aborted' | 'failed'>, string> = {
+  cleared: '已清空上下文',
+  'already-empty': '上下文已经是空的',
+  compacted: '已压缩',
+  'nothing-to-compact': '没有可压缩的内容',
+};
+const failedReplies: Record<TelegramCommand, string> = { compact: '压缩失败', clear: '清空失败' };
+
+/** 排在会话里的一条指令（压缩、清空） */
+type QueuedCommand = {
+  kind: TelegramCommand;
+  /** 指令那条消息：提示引用它，发到它所在的聊天（与话题） */
+  raw: TelegramRaw;
+  /** 执行人：发指令的人 */
+  by: Author;
+  /** 收到的时刻（Date.now()） */
+  receivedAt: number;
+  /** 开始执行的时刻；还在等时没有 */
+  startedAt?: number;
+  /** 中止进行中的压缩（关闭时） */
+  abort: AbortController;
+};
+
 type Session = {
   conversationId: string;
   conversation: BotConversation;
@@ -113,6 +151,13 @@ type Session = {
   title?: string;
   /** 每个会话三种状态：空闲（没有 round）、等待、回复中 */
   round?: Round;
+  /**
+   * 指令队列，按收到的先后：第一条在执行（有 startedAt）或在等，其余的在等。一轮回复还没结束时
+   * 都等着；一轮结束、或前一条执行完，开始下一条
+   */
+  commands: QueuedCommand[];
+  /** 正在执行的那条指令结束时兑现 */
+  running?: Promise<void>;
 };
 
 /**
@@ -179,6 +224,14 @@ export function createTelegramBot({
     }
   }
 
+  function newSession(
+    conversationId: string,
+    conversation: BotConversation,
+    title: string | undefined,
+  ): Session {
+    return { conversationId, conversation, title, commands: [] };
+  }
+
   /** 已经打开好的会话（打开失败的不算） */
   async function openedSessions(): Promise<Session[]> {
     const all = await Promise.allSettled(sessions.values());
@@ -192,11 +245,8 @@ export function createTelegramBot({
       session = (async () => {
         const found = await storage.findConversation('telegram', chatId);
         if (found) {
-          return {
-            conversationId: found.id,
-            conversation: await open(found.id, { checkIdleOnCreate: false }),
-            title: found.title,
-          };
+          const conversation = await open(found.id, { checkIdleOnCreate: false });
+          return newSession(found.id, conversation, found.title);
         }
         const title = conversationTitle(raw.chat);
         const id = await storage.createConversation({
@@ -204,11 +254,7 @@ export function createTelegramBot({
           platformConversationId: chatId,
           title,
         });
-        return {
-          conversationId: id,
-          conversation: await open(id, { checkIdleOnCreate: false }),
-          title,
-        };
+        return newSession(id, await open(id, { checkIdleOnCreate: false }), title);
       })();
       // 打开失败时不留下坏的条目，下一条消息再试
       session.catch(() => sessions.delete(chatId));
@@ -335,6 +381,8 @@ export function createTelegramBot({
     if (session.round === round) session.round = undefined;
     round.finish();
     notify('end', session);
+    // 这一轮全部结束：轮到排着的指令（正在关闭时不开始）
+    runCommands(session);
   }
 
   /**
@@ -390,6 +438,155 @@ export function createTelegramBot({
     if (failed) await send(target, errorText, quote, fields);
   }
 
+  // 不属于哪个会话的后台任务（还没有会话的聊天里回的提示）：idle、close 等它们
+  const background = new Set<Promise<unknown>>();
+  function track(task: Promise<unknown>): void {
+    background.add(task);
+    void task.finally(() => background.delete(task));
+  }
+
+  /**
+   * 指令结束（或不执行）时记一行 telegram.command：会话 id（还没有会话时是 chat id）、哪条指令、
+   * 执行人的 id、结果、等了多久；开始执行过的还有执行了多久（到核心给出结果为止）。
+   * 不记正文，不记名字
+   */
+  function logCommand(
+    command: { kind: TelegramCommand; by: Author; receivedAt: number; startedAt?: number },
+    result: CommandOutcome | 'stale' | 'closing',
+    fields: object,
+    endedAt = Date.now(),
+  ): void {
+    const { startedAt, receivedAt } = command;
+    logger.info(
+      {
+        ...fields,
+        command: command.kind,
+        byId: command.by.id,
+        result,
+        waitedMs: (startedAt ?? endedAt) - receivedAt,
+        ...(startedAt === undefined ? {} : { ranMs: endedAt - startedAt }),
+      },
+      'telegram.command',
+    );
+  }
+
+  /** 从会话的指令队列里拿掉这一条（已经不在时什么都不做） */
+  function dequeue(session: Session, command: QueuedCommand): void {
+    const index = session.commands.indexOf(command);
+    if (index >= 0) session.commands.splice(index, 1);
+  }
+
+  /**
+   * 收到一条指令（已过白名单、不是编辑）：过期的、正在关闭时的不执行，只记日志；这个聊天还没有
+   * 会话时不建会话，直接回提示；有会话时排进它的指令队列。不等执行完就返回
+   */
+  async function onCommand(kind: TelegramCommand, raw: TelegramRaw): Promise<void> {
+    const chatId = String(raw.chat.id);
+    const from = raw.from!;
+    const command = {
+      kind,
+      raw,
+      by: { id: String(from.id), name: displayName(from) },
+      receivedAt: Date.now(),
+    };
+    const ageMs = Date.now() - raw.date * 1000;
+    if (ageMs > staleMs) {
+      logCommand(command, 'stale', { chatId, ageMinutes: Math.floor(ageMs / 60_000) });
+      return;
+    }
+    if (closing) return logCommand(command, 'closing', { chatId });
+    // 这个聊天还没有会话（从没说过话）：不建会话，上下文本来就是空的
+    const known = sessions.has(chatId) || (await storage.findConversation('telegram', chatId));
+    if (closing) return logCommand(command, 'closing', { chatId });
+    if (!known) {
+      const result = kind === 'clear' ? 'already-empty' : 'nothing-to-compact';
+      const done = { ...command, startedAt: Date.now() };
+      track(
+        (async () => {
+          await send(targetOf(raw), commandReplies[result], raw.message_id, { chatId });
+          logCommand(done, result, { chatId }, done.startedAt);
+        })(),
+      );
+      return;
+    }
+    const session = await sessionFor(raw);
+    if (closing) {
+      return logCommand(command, 'closing', { conversationId: session.conversationId });
+    }
+    session.commands.push({ ...command, abort: new AbortController() });
+    runCommands(session);
+  }
+
+  /**
+   * 会话空着（没有一轮回复在进行，最前面的指令也还没开始）时，开始排在最前面的指令。
+   * 正在关闭时不开始
+   */
+  function runCommands(session: Session): void {
+    if (closing) return;
+    const first = session.commands[0];
+    if (!first || first.startedAt !== undefined || session.round) return;
+    execute(session, first);
+  }
+
+  /**
+   * 执行一条指令：同步调用核心（这之前不 await，核心取到的界线就是这一刻的最后一条消息）；压缩
+   * 期间对指令所在的聊天显示「正在输入」。结束后引用指令那条消息发一句提示（被中止、正在关闭时
+   * 不发），再看下一条能不能开始
+   */
+  function execute(session: Session, command: QueuedCommand): void {
+    command.startedAt = Date.now();
+    const fields = { conversationId: session.conversationId };
+    const target = targetOf(command.raw);
+    let running: Promise<CompactResult | ClearResult>;
+    try {
+      running =
+        command.kind === 'compact'
+          ? session.conversation.compact({ by: command.by, abortSignal: command.abort.signal })
+          : session.conversation.clear({ by: command.by });
+    } catch (error) {
+      running = Promise.reject(error);
+    }
+    const stopTyping = command.kind === 'compact' ? keepTyping(target, fields) : () => {};
+    session.running = (async () => {
+      try {
+        let outcome: CommandOutcome;
+        // 失败的详情只进日志：压缩的核心已经记了 summary.failed，清空的记在指令的那一行
+        let failure: object = {};
+        try {
+          outcome = await running;
+        } catch (error) {
+          outcome = 'failed';
+          if (command.kind === 'clear') failure = { error: describe(error) };
+          // 正忙：按排队的规矩不该发生（一轮回复还没结束时指令只会等着）
+          if (error instanceof ConversationBusyError) {
+            logger.error(
+              { ...fields, command: command.kind, reason: error.reason },
+              'telegram.command_busy',
+            );
+          }
+        } finally {
+          stopTyping();
+        }
+        const endedAt = Date.now();
+        // 群里只发固定的一句；被中止（关闭时）、正在关闭时不发
+        const text =
+          outcome === 'failed'
+            ? failedReplies[command.kind]
+            : outcome === 'aborted'
+              ? undefined
+              : commandReplies[outcome];
+        if (text !== undefined && !closing) {
+          await send(target, text, command.raw.message_id, fields);
+        }
+        logCommand(command, outcome, { ...fields, ...failure }, endedAt);
+      } finally {
+        session.running = undefined;
+        dequeue(session, command);
+        runCommands(session);
+      }
+    })();
+  }
+
   /** 从现在起显示「正在输入」，每隔一段时间重发，直到调用返回的函数 */
   function keepTyping(target: ChatTarget, fields: object): () => void {
     let failed = false;
@@ -423,11 +620,9 @@ export function createTelegramBot({
     if (!session) {
       if (closing) return undefined;
       // 到点按现在的时间：创建时补做漏掉的空闲切段（会话管理里多半已经打开，这时不起作用）
-      session = open(conversationId, { checkIdleOnCreate: true }).then((conversation) => ({
-        conversationId,
-        conversation,
-        title,
-      }));
+      session = open(conversationId, { checkIdleOnCreate: true }).then((conversation) =>
+        newSession(conversationId, conversation, title),
+      );
       session.catch(() => sessions.delete(chatId));
       sessions.set(chatId, session);
     }
@@ -456,7 +651,10 @@ export function createTelegramBot({
   return {
     /**
      * 处理一条原始消息（相册由适配器攒齐后只派发一条，各条由 albumOf 取回）。
-     * 等到记录完成才返回，等待与回复在后台进行；从不抛错
+     * 等到记录完成才返回，等待与回复在后台进行；从不抛错。
+     * 指令（`/compact`、`/clear`，见 parseCommand）不记录：等这个会话一整轮回复（等待合并、
+     * 回复中、补回复）结束再执行，同一个会话的按先后一个个执行，结束后引用指令发一句提示。
+     * 排进队列就返回，不等执行完（适配器按聊天排队处理，压缩期间这个群的消息照常记录）
      */
     async handle(raw: TelegramRaw): Promise<void> {
       try {
@@ -475,6 +673,13 @@ export function createTelegramBot({
         }
         if (raw.edit_date !== undefined) {
           await edit(raw);
+          return;
+        }
+        // 指令：不写进历史、不触发回复、不参与等待合并；在判断触发之前拦下（群里的 /clear@本bot
+        // 带着对 bot 的 @，会被当成「@助手」）
+        const command = parseCommand(raw, bot());
+        if (command) {
+          await onCommand(command, raw);
           return;
         }
         const session = await sessionFor(raw);
@@ -600,30 +805,45 @@ export function createTelegramBot({
         opened++;
         sessions.set(
           platformConversationId,
-          open(id, { checkIdleOnCreate: true }).then((conversation) => ({
-            conversationId: id,
-            conversation,
-            title,
-          })),
+          open(id, { checkIdleOnCreate: true }).then((conversation) =>
+            newSession(id, conversation, title),
+          ),
         );
       }
       await Promise.all(sessions.values());
       return opened;
     },
 
-    /** 等待中与回复中的都结束（测试用） */
+    /** 等待中与回复中的、排着的指令都结束（测试用） */
     async idle(): Promise<void> {
-      for (const session of await openedSessions()) await session.round?.done;
+      for (const session of await openedSessions()) {
+        // 一轮结束时会开始排着的指令，指令执行完又可能轮到下一条
+        while (session.round || session.running) {
+          await Promise.all([session.round?.done, session.running]);
+        }
+      }
+      await Promise.all(background);
     },
 
     /**
-     * 关闭：不再开始新的一轮；等待中的直接放弃；回复中的最多等 graceMs，仍未完成的中止
-     * （不发出）；再关闭各会话（中止进行中的摘要）
+     * 关闭：不再开始新的一轮与指令；等待中的直接放弃；还在等的指令丢掉（不执行、不发提示），
+     * 进行中的压缩马上中止（不发提示），进行中的清空照常做完；回复中的最多等 graceMs，仍未完成的
+     * 中止（不发出）；等进行中的指令结束，再关闭各会话（中止进行中的摘要）
      */
     async close(graceMs = 10_000): Promise<void> {
       closing = true;
       const opened = await openedSessions();
       for (const session of opened) {
+        for (const command of [...session.commands]) {
+          // 进行中的：压缩马上中止，清空不理会这个信号、照常做完
+          if (command.startedAt !== undefined) {
+            command.abort.abort();
+            continue;
+          }
+          dequeue(session, command);
+          logCommand(command, 'closing', { conversationId: session.conversationId });
+        }
+        // 放弃等待中的一轮：正在关闭，不会因此开始排着的指令
         if (session.round?.state === 'waiting') endRound(session, session.round);
       }
       const rounds = Promise.all(opened.map((session) => session.round?.done));
@@ -637,6 +857,7 @@ export function createTelegramBot({
       clearTimeout(timer);
       stopping.abort();
       await rounds;
+      await Promise.all([...opened.map((session) => session.running), ...background]);
       await Promise.all(opened.map((session) => session.conversation.close()));
     },
   };

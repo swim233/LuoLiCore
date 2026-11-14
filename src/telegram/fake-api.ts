@@ -20,7 +20,8 @@ export type Delivered = { chatId: string; messageId: number; text: string; reply
 
 /**
  * 只实现前端用到的方法：getMe、deleteWebhook、getUpdates（长轮询）、
- * sendMessage、sendChatAction、getFile，以及文件下载（/file/bot<token>/<路径>）。其他返回 404。
+ * sendMessage、sendChatAction、getFile、setMyCommands，以及文件下载（/file/bot<token>/<路径>）。
+ * 其他返回 404。
  * sendMessage 的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
  * 带 allow_sending_without_reply 就不带引用发出，否则 400
  */
@@ -36,6 +37,10 @@ export async function startFakeTelegram() {
   const sendFailures: number[] = [];
   // 为 true 时 getUpdates 一律返回 502（模拟连不上 Telegram）
   let pollsFailing = false;
+  // setMyCommands 以这个状态码失败；没有时成功
+  let setCommandsFailure: number | undefined;
+  // 有时 setMyCommands 等它放行才回应
+  let setCommandsHold: Promise<void> | undefined;
   // 可下载的文件：file_id → 内容；在 failingFiles 里的下载时返回 500
   const files = new Map<string, Uint8Array>();
   const failingFiles = new Set<string>();
@@ -71,6 +76,16 @@ export async function startFakeTelegram() {
         return ok(response, fakeBot);
       case 'deleteWebhook':
       case 'sendChatAction':
+        return ok(response, true);
+      case 'setMyCommands':
+        await setCommandsHold;
+        if (setCommandsFailure) {
+          return reply(response, setCommandsFailure, {
+            ok: false,
+            error_code: setCommandsFailure,
+            description: setCommandsFailure === 401 ? 'Unauthorized' : 'Internal Server Error',
+          });
+        }
         return ok(response, true);
       case 'getUpdates':
         polls.push(body);
@@ -176,6 +191,19 @@ export async function startFakeTelegram() {
     downloads,
     /** bot 发出、群里看得到的消息，按发出先后 */
     delivered,
+    /** 之后的 setMyCommands 以这个状态码失败（如 401）；undefined 时恢复。收到的内容记在 calls 里 */
+    failSetCommands(status: number | undefined) {
+      setCommandsFailure = status;
+    },
+    /** 之后的 setMyCommands 先不回应，等调用返回的函数才回应 */
+    holdSetCommands(): () => void {
+      let release!: () => void;
+      setCommandsHold = new Promise<void>((resolve) => (release = resolve));
+      return () => {
+        setCommandsHold = undefined;
+        release();
+      };
+    },
     /** 推送一批更新（同一次 getUpdates 里返回），返回各自的 message_id */
     push(...messages: Array<Omit<TelegramRaw, 'message_id' | 'date'> & { date?: number }>) {
       const ids = messages.map((message) => {
