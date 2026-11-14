@@ -290,7 +290,13 @@ describe('模型调用表：回复', () => {
     ]);
     expect(calls[0]).not.toHaveProperty('summaryReason');
     expect(calls[0]).not.toHaveProperty('error');
-    expect(reply?.metadata?.usage).toEqual({ input: 120, output: 30, total: 150, cacheRead: 100 });
+    expect(reply?.metadata?.usage).toEqual({
+      input: 120,
+      output: 30,
+      total: 150,
+      cacheRead: 100,
+      reasoning: 12,
+    });
     expect(logsOf(entries, 'reply.end')[0]?.fields).toMatchObject({
       replyId: reply?.id,
       attempts: 1,

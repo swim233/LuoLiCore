@@ -511,11 +511,12 @@ describe('多步回复的缓存命中与推理 token：按各步判断服务端�
     return { usage: reply?.metadata?.usage, row };
   }
 
-  it('两步都没报：metadata 没有 cacheRead，模型调用表两列为空；输入、输出、总数照旧是两步之和', async () => {
+  it('两步都没报：metadata 没有 cacheRead、reasoning，模型调用表两列为空；输入、输出、总数照旧是两步之和', async () => {
     const { usage, row } = await twoSteps(rawUsage(100, 10), rawUsage(150, 20));
 
     expect(usage).toEqual({ input: 250, output: 30, total: 280 });
     expect(usage).not.toHaveProperty('cacheRead', 0);
+    expect(usage?.reasoning).toBeUndefined();
     expect(row).toMatchObject({ inputTokens: 250, outputTokens: 30 });
     expect(row?.cacheReadTokens).toBeUndefined();
     expect(row?.reasoningTokens).toBeUndefined();
@@ -527,8 +528,18 @@ describe('多步回复的缓存命中与推理 token：按各步判断服务端�
       rawUsage(150, 20, { cached: 50, reasoning: 7 }),
     );
 
-    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 80 });
+    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 80, reasoning: 7 });
     expect(row).toMatchObject({ cacheReadTokens: 80, reasoningTokens: 7 });
+  });
+
+  it('两步的推理 token 都不是 0：metadata 的 reasoning 是两步之和，与模型调用表一致', async () => {
+    const { usage, row } = await twoSteps(
+      rawUsage(100, 10, { reasoning: 4 }),
+      rawUsage(150, 20, { reasoning: 7 }),
+    );
+
+    expect(usage?.reasoning).toBe(11);
+    expect(row?.reasoningTokens).toBe(11);
   });
 
   it('只有一步报了：是报了的那一步的值', async () => {
@@ -537,8 +548,27 @@ describe('多步回复的缓存命中与推理 token：按各步判断服务端�
       rawUsage(150, 20, { cached: 40, reasoning: 3 }),
     );
 
-    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 40 });
+    expect(usage).toEqual({ input: 250, output: 30, total: 280, cacheRead: 40, reasoning: 3 });
     expect(row).toMatchObject({ cacheReadTokens: 40, reasoningTokens: 3 });
+  });
+
+  it('三步里两步报了推理 token：回复流结束段与 metadata 的 reasoning 都是报了的两步之和', async () => {
+    const { conversation, store, round } = setup({
+      definitions: [dice],
+      turns: [
+        calls(rawUsage(100, 10, { reasoning: 4 }), call('dice', { sides: 6 }, 'c1')),
+        calls(rawUsage(120, 15), call('dice', { sides: 8 }, 'c2')),
+        answer('掷出了 4 和 6', rawUsage(150, 20, { reasoning: 7 })),
+      ],
+    });
+
+    const chunks = await round('掷两次');
+
+    const usage = (await conversation.messages())[1]?.metadata?.usage;
+    expect(usage).toEqual({ input: 370, output: 45, total: 415, reasoning: 11 });
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+    expect(finishChunk?.type === 'finish' && finishChunk.messageMetadata?.usage).toEqual(usage);
+    expect(await store.calls()).toMatchObject([{ steps: 3, reasoningTokens: 11 }]);
   });
 });
 
