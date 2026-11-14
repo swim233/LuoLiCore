@@ -1,7 +1,8 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import { attachBubbleFrame } from './bubble-frame';
 import { attachBubbleSky } from './bubble-sky';
-import { Hl, Spin } from './Hl';
+import { Tag, Spinner } from '@luoli/ui/controls';
+import { Hl } from './Hl';
 import { Typed } from './Typed';
 import type { CursorRef } from './Typed';
 import { Markdown } from './Markdown';
@@ -78,7 +79,9 @@ function ThinkFold({
   if (p.streaming && ended)
     return (
       <div className="fold is-think">
-        <span className="fold-tag">{ended === 'fail' ? '思考中断' : '思考被中止'}</span>
+        <Tag variant="soft" tone="accent" className="fold-tag">
+          {ended === 'fail' ? '思考中断' : '思考被中止'}
+        </Tag>
       </div>
     );
   if (!p.streaming && !p.text.trim()) return null;
@@ -116,7 +119,7 @@ function ToolFold({ p, ended }: { p: Extract<BPart, { kind: 'tool' }>; ended: bo
           ended ? (
             <span>…</span>
           ) : (
-            <Spin />
+            <Spinner className="spin" />
           )
         ) : (
           <span className={err ? 'bad' : 'ok'}>

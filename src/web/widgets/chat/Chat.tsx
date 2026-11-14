@@ -2,12 +2,14 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { Chat, useChat } from '@ai-sdk/react';
 import { MsgBubble } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
-import { Spin, Thumb } from '../../components/Hl';
+import { Thumb } from '../../components/Hl';
 import { VirtualLog } from '../../components/VirtualLog';
 import { Pane } from '../../components/Pane';
 import { useGlide } from '../../components/glide';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { IconChat } from '../../components/icons';
+import { Button, IconButton, Spinner } from '@luoli/ui/controls';
+import { IconChevronLeft } from '@luoli/ui/icons';
 import { useStore } from '@luoli/ui/store';
 import { fmtDay, fmtShort } from '../../lib/util';
 import { bus } from '../../model/bus';
@@ -64,16 +66,16 @@ const NO_CHAT = new Chat<ChatMessage>({ messages: [] });
 /** 出错的回复下面的「重试」：让洛璃对着同样的历史再回复一次，不用重新打字 */
 function RetryBar({ convId, lastSeq }: { convId: string; lastSeq: number }) {
   return (
-    <button
-      className="log-retry chat-retry"
-      type="button"
+    <Button
+      size="sm"
+      className="chat-retry"
       onClick={() => {
         if (!isBusy(convId)) retryChat(convId);
       }}
       data-seq={lastSeq}
     >
       重试
-    </button>
+    </Button>
   );
 }
 
@@ -322,13 +324,9 @@ function ChatLog({ convId }: { convId: string }) {
     return note(
       '这个对话的消息没取到',
       info.error,
-      <button
-        className="log-retry"
-        type="button"
-        onClick={() => getSource().openConversation(convId)}
-      >
+      <Button size="sm" onClick={() => getSource().openConversation(convId)}>
         重试
-      </button>,
+      </Button>,
     );
 
   const rows = db.msgs(convId);
@@ -412,13 +410,9 @@ function ChatLog({ convId }: { convId: string }) {
     ) : info.older === 'error' ? (
       <span className="log-pill is-err">
         更早的消息没取到
-        <button
-          className="log-retry"
-          type="button"
-          onClick={() => getSource().loadOlder(convId, true)}
-        >
+        <Button size="xs" onClick={() => getSource().loadOlder(convId, true)}>
           重试
-        </button>
+        </Button>
       </span>
     ) : null;
   return (
@@ -442,11 +436,11 @@ function ReplyingBar({ convId }: { convId: string | null }) {
   if (!isBusyElsewhere(convId)) return null;
   return (
     <div className="chat-live" role="status">
-      <Spin />
+      <Spinner className="spin" />
       <span>{luoli}正在回复…</span>
-      <button className="log-retry" type="button" onClick={() => void abortChat(convId)}>
+      <Button size="xs" onClick={() => void abortChat(convId)}>
         中止
-      </button>
+      </Button>
     </div>
   );
 }
@@ -534,7 +528,7 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
             <Thumb part={{ blob: a.url, name: a.name }} w={56} h={56} />
             {a.state === 'uploading' && (
               <span className="att-state" aria-label="上传中">
-                <Spin />
+                <Spinner className="spin" />
               </span>
             )}
             {a.state === 'failed' && (
@@ -595,9 +589,9 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
             }
           }}
         />
-        <button
-          className={'chat-send' + (stop ? ' is-stop' : '')}
-          type="button"
+        <Button
+          variant={stop ? 'danger' : 'primary'}
+          className="chat-send"
           disabled={d.sending}
           title={
             stop ? '中止生成（Esc）' : busy ? '发送：排在当前回复后面（Enter）' : '发送（Enter）'
@@ -608,7 +602,7 @@ function Composer({ convId, fullId }: { convId: string | null; fullId: string })
           }}
         >
           {d.sending ? (uploading ? '上传中' : '发送中') : stop ? '中止' : '发送'}
-        </button>
+        </Button>
       </div>
       <div className="chat-hint">
         <span className="chat-hint-keys">Enter 发送 · Shift+Enter 换行 · 可以粘贴或拖入图片</span>
@@ -746,15 +740,14 @@ function ChatView({ mode }: ViewProps) {
         className="chat sess-main is-main"
         top={
           <div className="chat-bar">
-            <button
-              className="w-btn sess-back"
-              type="button"
+            <IconButton
+              className="sess-back"
               title="返回列表"
               aria-label="返回列表"
               onClick={() => setDetail(false)}
             >
-              ‹
-            </button>
+              <IconChevronLeft />
+            </IconButton>
             <h3 className="chat-title">{title}</h3>
           </div>
         }

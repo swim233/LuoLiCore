@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
+import { Button, Seg } from '@luoli/ui/controls';
+import { Star4 } from '@luoli/ui/icons';
 import { motionOn, useMotionOn } from '@luoli/ui/motion';
-import { Star4 } from '../components/icons';
-import { Seg } from '../components/Seg';
 import { EASE_OUT_CSS } from '@luoli/ui/easing';
 import { setGlass, useGlassMode } from '../lib/glass';
 import type { Glass } from '../lib/glass';
@@ -279,9 +279,7 @@ export function DemoPanel() {
             </div>
             <div className="demo-row" style={{ marginTop: 6 }}>
               <span>布局</span>
-              <button className="chip" type="button" data-act="reset-layout">
-                恢复默认布局
-              </button>
+              <Button data-act="reset-layout">恢复默认布局</Button>
             </div>
           </section>
         </div>
@@ -295,7 +293,7 @@ export function DemoPanel() {
         onClick={() => toggleDemo()}
       >
         <i>
-          <Star4 />
+          <Star4 className="st4" />
         </i>
         <span>演示控制</span>
       </button>

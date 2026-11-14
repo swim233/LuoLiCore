@@ -9,19 +9,20 @@
     box-sizing: border-box;
     display: inline-flex;
     align-items: center;
-    /* 控件自己的高度：sm 18、md 22 */
+    /* 控件自己的高度：sm 18、md 22；行高写成和高一样，字在条里居中、不出半个像素（和 .ll-badge 一样） */
     height: 18px;
     padding: 0 var(--ll-space-8);
     border-radius: var(--ll-radius-full);
     color: var(--ll-tag-fg);
     font-size: var(--ll-text-xs);
-    line-height: 1;
+    line-height: 18px;
     white-space: nowrap;
   }
   .ll-tag[data-size='md'] {
     height: 22px;
     padding-inline: var(--ll-space-10);
     font-size: var(--ll-text-sm);
+    line-height: 22px;
   }
   .ll-tag[data-tone='accent'] {
     --ll-tag-fg: var(--ll-fg-3);

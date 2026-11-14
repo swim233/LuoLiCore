@@ -53,10 +53,6 @@ body::before {
   z-index: 70;
   background: var(--ll-bg);
 }
-button {
-  font: inherit;
-  color: inherit;
-}
 .sr-only {
   position: absolute;
   width: 1px;
@@ -214,70 +210,6 @@ button {
   align-items: center;
   gap: 8px;
   flex: none;
-}
-/* 顶栏的按钮：没有边框的半透明底 */
-.tbtn {
-  height: 32px;
-  padding: 0 14px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--ll-ctl-bg);
-  border: 0;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--ll-fg-2);
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.tbtn:hover {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
-}
-.tbtn[aria-pressed='true'] {
-  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
-  color: var(--ll-fg);
-}
-.tbtn svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
-}
-.tswitch {
-  gap: 8px;
-  padding: 0 13px 0 8px;
-}
-/* 开关：开着是强调色的底、白色的钮 */
-.tswitch-track {
-  width: 28px;
-  height: 16px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ll-fg-dim) 45%, transparent);
-  position: relative;
-  transition: background-color var(--ll-dur-hover);
-  flex: none;
-}
-.tswitch-track::after {
-  content: '';
-  position: absolute;
-  left: 2px;
-  top: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--ll-fg-2);
-  transition:
-    transform 0.2s var(--ll-ease-out),
-    background-color 0.2s;
-}
-.tswitch[aria-checked='true'] .tswitch-track {
-  background: var(--ll-accent);
-}
-.tswitch[aria-checked='true'] .tswitch-track::after {
-  transform: translateX(12px);
-  background: var(--ll-white);
 }
 
 /* ---------- 整理模式提示条 ---------- */
@@ -509,28 +441,6 @@ button {
   display: flex;
   gap: 2px;
   flex: none;
-}
-.w-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  color: var(--ll-fg-dim);
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.w-btn:hover {
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg);
-}
-.w-btn svg {
-  width: 15px;
-  height: 15px;
 }
 /* 内容铺满整块：部件的视图（窗格，或几个窗格排成的栏）填满它 */
 .w-body {
@@ -1121,72 +1031,6 @@ button {
   gap: 6px;
   justify-content: center;
 }
-.chip {
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 999px;
-  cursor: pointer;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.chip:hover {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
-}
-.chip[aria-pressed='true'] {
-  background: var(--ll-ctl-bg-on);
-  color: var(--ll-fg);
-}
-.chip:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-/* 要再点一次才生效的按钮（设置里的「恢复默认布局」）等待确认时 */
-.chip.is-armed {
-  background: color-mix(in srgb, var(--ll-danger) 22%, transparent);
-  color: var(--ll-danger-pale);
-  box-shadow: 0 0 14px -4px var(--ll-danger-glow);
-}
-/* 分段选择（components/Seg.tsx）：设置里的「外观」和开发模式的演示面板共用 */
-/* 分段选择：没有边框的底，选中的那段是强调色 30% 的底 */
-.seg-ctl {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 9px;
-  background: var(--ll-ctl-bg);
-}
-.seg-ctl button {
-  flex: 1;
-  height: 26px;
-  padding: 0 8px;
-  border-radius: 7px;
-  border: 0;
-  background: transparent;
-  color: var(--ll-fg-3);
-  cursor: pointer;
-  font-size: 12px;
-  white-space: nowrap;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.seg-ctl button:hover {
-  color: var(--ll-fg);
-}
-.seg-ctl button[aria-pressed='true'] {
-  background: var(--ll-ctl-bg-on);
-  color: var(--ll-fg);
-}
-.w-hide {
-  color: var(--ll-fg-2);
-}
 .cap-x {
   display: grid;
   place-items: center;
@@ -1557,7 +1401,7 @@ button {
   display: block;
   pointer-events: none;
 }
-/* 徽记里每一层 svg 都和徽记一样大。宽高写 !important：.cap-icon svg、.w-icon svg、.fs-tab svg、.tbtn svg 这类
+/* 徽记里每一层 svg 都和徽记一样大。宽高写 !important：.cap-icon svg、.w-icon svg、.fs-tab svg、.ll-btn > svg 这类
    给「图标里的 svg」定固定大小的通用规则（不管特异性多高、写在前面还是后面）都不许改它，不靠尺寸碰巧相同 */
 .bd-svg {
   position: absolute;
@@ -1781,38 +1625,6 @@ button {
   animation: b-blink 0.8s ease-in-out infinite;
 }
 
-/* 状态点（各群的状态） */
-.sdot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--ll-fg-dim);
-}
-.sdot[data-s='waiting'] {
-  background: var(--ll-accent);
-}
-.sdot[data-s='thinking'] {
-  background: var(--ll-quote);
-}
-.sdot[data-s='replying'] {
-  background: var(--ll-star);
-  box-shadow: 0 0 8px var(--ll-star-glow);
-}
-.sdot[data-s='tool'] {
-  background: var(--ll-tool);
-}
-.sdot[data-s='retry'] {
-  background: var(--ll-warning);
-}
-.sdot[data-s='error'] {
-  background: var(--ll-danger);
-  box-shadow: 0 0 8px var(--ll-danger-glow);
-}
-.sdot[data-s='idle'] {
-  background: var(--ll-ok);
-}
-
 /* ---------- 弹出的各群状态 ---------- */
 .pop {
   position: fixed;
@@ -2015,19 +1827,6 @@ button {
 }
 .now-open {
   margin-left: auto;
-  height: 26px;
-  padding: 0 11px;
-  border-radius: 999px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.now-open:hover {
-  color: var(--ll-fg);
-  background: var(--ll-ctl-bg-hover);
 }
 
 /* ---------- 终端（「此刻」的样式，用户逐项拼出来的） ----------
@@ -2073,43 +1872,8 @@ button {
   pointer-events: none;
 }
 .term-jump {
-  all: unset;
-  box-sizing: border-box;
   pointer-events: auto;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 13px 0 14px;
-  border-radius: 999px;
-  font: 12.5px/1 var(--ll-font-ui, inherit);
-  color: var(--ll-fg);
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  box-shadow:
-    var(--ll-glass-edge),
-    0 8px 20px -8px rgba(0, 0, 0, 0.7);
-  white-space: nowrap;
   animation: term-jump-in 0.22s var(--ll-ease-out) both;
-  transition: background-color var(--ll-dur-hover);
-}
-.term-jump:hover {
-  background: color-mix(in srgb, var(--ll-glass-bg) 70%, var(--ll-ctl-bg-hover));
-}
-.term-jump:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: 2px;
-}
-.term-jump .chev {
-  width: 0.42em;
-  height: 0.42em;
-  margin-top: -0.12em;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg);
-  opacity: 0.8;
 }
 @keyframes term-jump-in {
   from {
@@ -2193,10 +1957,7 @@ button {
   visibility: hidden;
 }
 .spin {
-  display: inline-block;
-  width: 1.2ch;
   margin-left: 0.6ch;
-  color: var(--ll-star);
 }
 .tl-ok {
   color: var(--ll-ok);
@@ -2250,6 +2011,11 @@ button {
   outline: 2px solid var(--ll-accent);
   outline-offset: 1px;
   border-radius: 3px;
+}
+/* 文字按钮里的小箭头：和字之间的空隙是版面的事（库的 Chevron 自己不带 margin） */
+.tl-think .ll-chev,
+.task-more .ll-chev {
+  margin: 0 0.2em 0 0.5em;
 }
 .tl-think-text {
   display: block;
@@ -2334,20 +2100,6 @@ button {
   width: 0.74em;
   height: 0.74em;
   vertical-align: -0.04em;
-}
-/* 展开 / 收起的小箭头（CSS 画的，不靠字体） */
-.chev {
-  display: inline-block;
-  width: 0.38em;
-  height: 0.38em;
-  margin: 0 0.2em 0 0.5em;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-0.12em) rotate(-45deg);
-  transition: transform 0.2s;
-}
-[aria-expanded='true'] > .chev {
-  transform: translateY(-0.22em) rotate(45deg);
 }
 .cur.is-gone {
   opacity: 0 !important;
@@ -2481,23 +2233,6 @@ button {
   color: var(--ll-fg-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-.conv-unread {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  box-sizing: border-box;
-  border-radius: 999px;
-  background: var(--ll-star);
-  color: var(--ll-on-star);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.conv-unread:empty {
-  visibility: hidden;
 }
 /* 有新用户消息进来的行，整行亮一下（1.4 秒，强调色的底和外圈淡出） */
 @keyframes lit {
@@ -2686,32 +2421,15 @@ button {
 }
 .sess-win-head .sess-back {
   display: inline-flex;
-  align-items: center;
-  gap: 5px;
   flex: none;
-  width: auto;
-  height: 28px;
-  padding: 0 10px 0 8px;
   margin-left: -4px;
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-.sess-win-head .sess-back span {
-  font-size: 17px;
-  line-height: 1;
-  transform: translateY(-1px);
 }
 .sess-win-head h3 {
   max-width: none;
 }
-.pchip {
-  font-size: 11px;
-  line-height: 18px;
-  padding: 0 8px;
-  border-radius: 999px;
-  color: var(--ll-fg-2);
-  box-shadow: inset 0 0 0 1px var(--ll-line-hi);
-  white-space: nowrap;
+/* 标签（库的 Tag）放在标题那一行里不缩 */
+.sess-main-head .ll-tag,
+.task-gh .ll-tag {
   flex: none;
 }
 
@@ -2966,16 +2684,13 @@ button {
   gap: 6px;
   max-width: 100%;
 }
-.fold.is-think summary,
-.fold-tag {
+.fold.is-think summary {
   color: var(--ll-fg-3);
   padding: 0 9px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--ll-accent) 14%, transparent);
 }
 .fold-tag {
-  display: inline-flex;
-  align-items: center;
   font-style: italic;
 }
 .fold.is-tool summary {
@@ -3411,27 +3126,12 @@ a.hl-url:focus-visible {
 .log-pill.is-err {
   color: var(--ll-danger);
 }
-.log-retry {
-  all: unset;
-  cursor: pointer;
+/* 提示条、提示块里的「重试」（库的 Button）：只留位置 */
+.log-pill .ll-btn {
   margin-left: 8px;
-  color: var(--ll-fg);
-  font-size: 12px;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--ll-ctl-bg);
 }
-.log-retry:hover {
-  background: var(--ll-ctl-bg-hover);
-}
-.empty .log-retry {
-  display: inline-block;
+.empty .ll-btn {
   margin: 8px 0 0;
-  padding: 2px 12px;
-}
-.log-retry:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: 2px;
 }
 /* 段的分隔线（会话开始、空闲后新的一段、压缩）和摘要 */
 .seg {
@@ -3470,23 +3170,6 @@ a.hl-url:focus-visible {
 .seg-line.is-new::before,
 .seg-line.is-new::after {
   background: color-mix(in srgb, var(--ll-star) 30%, transparent);
-}
-.seg-btn {
-  all: unset;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--ll-fg-2);
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--ll-ctl-bg);
-}
-.seg-btn:hover {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
-}
-.seg-btn:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: 2px;
 }
 .seg-sum {
   max-width: 560px;
@@ -3762,8 +3445,6 @@ a.hl-url:focus-visible {
 /* 出错的回复下面的「重试」 */
 .msg .chat-retry {
   margin: 4px 4px 0;
-  padding: 2px 14px;
-  font-size: 12.5px;
 }
 .att button {
   position: absolute;
@@ -3807,24 +3488,7 @@ a.hl-url:focus-visible {
 /* 发送：强调色的胶囊；生成中、输入框空着时是「中止」 */
 .chat-send {
   flex: none;
-  height: 28px;
   min-width: 52px;
-  padding: 0 13px;
-  border-radius: 999px;
-  cursor: pointer;
-  font-size: 12.5px;
-  font-weight: 600;
-  border: 0;
-  background: var(--ll-accent);
-  color: var(--ll-on-accent);
-}
-.chat-send:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-.chat-send.is-stop {
-  background: color-mix(in srgb, var(--ll-danger) 24%, transparent);
-  color: var(--ll-danger-pale);
 }
 /* 输入框下面的提示：始终只占一行，高度不随「生成中」那段出现、消失、变长而变（它一变，底部浮层的高度跟着变，时间线整块上下挪）。
    左边是按键的提示，右边是生成中的提示（生成中才有，有字时多一句「发出的会排队」）。
@@ -3879,7 +3543,7 @@ a.hl-url:focus-visible {
 .chat-live .spin {
   margin-left: 0;
 }
-.chat-live .log-retry {
+.chat-live .ll-btn {
   margin-left: auto;
 }
 
@@ -3971,9 +3635,6 @@ a.hl-url:focus-visible {
   white-space: nowrap;
 }
 .task-cancel {
-  height: 22px;
-  padding: 0 10px;
-  font-size: 11.5px;
   transition:
     background-color var(--ll-dur-hover),
     color var(--ll-dur-hover),
@@ -3995,9 +3656,6 @@ a.hl-url:focus-visible {
   margin-top: 6px;
   font-size: 12.5px;
   color: var(--ll-fg-2);
-}
-.task-ask .chip {
-  height: 24px;
 }
 .task-err {
   grid-column: 1 / -1;
@@ -4046,23 +3704,6 @@ a.hl-url:focus-visible {
   position: relative;
   flex: none;
   margin-left: auto;
-}
-.task-count {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.task-count:hover,
-.task-count[aria-expanded='true'] {
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg);
-}
-.task-count .chev {
-  margin: 0 0 0 0.45em;
 }
 .chat-menu.task-pop {
   --hr: 9px;
@@ -4146,8 +3787,8 @@ a.hl-url:focus-visible {
   font-size: 12.5px;
   color: var(--ll-fg-2);
 }
-.skel-live .set-field .seg-ctl,
-.skel-live .set-field .chip {
+.skel-live .set-field .ll-seg,
+.skel-live .set-field .ll-btn {
   align-self: center;
 }
 .skel-live .set-hint {
@@ -4221,12 +3862,12 @@ a.hl-url:focus-visible {
   font-size: 12px;
   color: var(--ll-fg-3);
 }
-.set-field .seg-ctl,
-.set-field .chip {
+.set-field .ll-seg,
+.set-field .ll-btn {
   align-self: flex-start;
   max-width: 100%;
 }
-.set-field .seg-ctl button {
+.set-field .ll-seg > button {
   padding: 0 12px;
 }
 .set-hint,
@@ -4239,10 +3880,6 @@ a.hl-url:focus-visible {
 .set-hint {
   min-height: 1.5em;
 }
-.set-field .chip {
-  height: 30px;
-  padding: 0 14px;
-}
 .set-input {
   height: 34px;
   border-radius: 10px;
@@ -4254,11 +3891,6 @@ a.hl-url:focus-visible {
 }
 .ribbon {
   align-self: flex-start;
-  font-size: 12px;
-  padding: 3px 11px;
-  border-radius: 999px;
-  background: var(--ll-ctl-bg);
-  color: color-mix(in srgb, var(--ll-star) 75%, var(--ll-fg-2));
 }
 
 /* ---------- 今日概况 ---------- */
@@ -4474,14 +4106,17 @@ a.hl-url:focus-visible {
   .top-state {
     display: none;
   }
-  .tbtn {
+  .top .ll-btn {
     padding: 0 10px;
   }
-  .tbtn .tlabel {
+  .top .ll-btn .tlabel {
     display: none;
   }
-  .tswitch {
+  .top .ll-switch[data-boxed] {
     padding: 0 8px;
+  }
+  .top .ll-switch-label {
+    display: none;
   }
   .fs-win {
     top: calc(env(safe-area-inset-top, 0px) + 8px);
@@ -4539,7 +4174,7 @@ a.hl-url:focus-visible {
     display: none;
   }
   .sess-back {
-    display: inline-flex;
+    display: inline-grid;
   }
   /* 设置：分组导航是窗口标题下面横着的一条（标题加一行按钮那么高），下面是内容；导航那一栏带上面两个角，内容带下面两个 */
   .set-full {

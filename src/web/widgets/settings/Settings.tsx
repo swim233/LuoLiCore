@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
-import { Star4, IconSettings } from '../../components/icons';
-import { Seg } from '../../components/Seg';
+import { useState } from 'react';
+import { IconSettings } from '../../components/icons';
 import { Pane } from '../../components/Pane';
+import { ConfirmButton, Seg, Tag } from '@luoli/ui/controls';
+import { Star4 } from '@luoli/ui/icons';
 import { useMotionOn } from '@luoli/ui/motion';
 import { chooseMotion, usePrefs } from '../../lib/prefs';
 import type { Prefs } from '../../lib/prefs';
@@ -52,44 +53,6 @@ const COLLAPSE_ITEMS: [string, string][] = [
   ['30', '30 秒'],
   ['5', '5 秒'],
 ];
-
-/* 恢复默认布局：两步点击。第一次点，按钮变成「再点一次恢复」；3 秒内再点才真的恢复，
-   超时、点了别处或焦点离开，按钮恢复原样 */
-const CONFIRM_MS = 3000;
-function ResetLayoutButton() {
-  const [armed, setArmed] = useState(false);
-  const ref = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), CONFIRM_MS);
-    const away = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setArmed(false);
-    };
-    document.addEventListener('pointerdown', away, true);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('pointerdown', away, true);
-    };
-  }, [armed]);
-  return (
-    <button
-      ref={ref}
-      className={'chip' + (armed ? ' is-armed' : '')}
-      type="button"
-      onBlur={() => setArmed(false)}
-      onClick={() => {
-        if (!armed) {
-          setArmed(true);
-          return;
-        }
-        setArmed(false);
-        resetLayoutToDefault();
-      }}
-    >
-      {armed ? '再点一次恢复' : '恢复默认布局'}
-    </button>
-  );
-}
 
 function Field({
   label,
@@ -165,7 +128,9 @@ function AppearanceFields() {
         />
       </Field>
       <Field label="布局" hint="部件的排列、大小和显示都恢复成默认。点一下后要再点一次才会恢复">
-        <ResetLayoutButton />
+        <ConfirmButton onConfirm={resetLayoutToDefault} armedLabel="再点一次恢复">
+          恢复默认布局
+        </ConfirmButton>
       </Field>
     </>
   );
@@ -178,7 +143,7 @@ function SettingsView({ mode }: ViewProps) {
       <Pane>
         <div className="skel pane-sc">
           <div className="skel-note">
-            <Star4 />
+            <Star4 className="st4" />
             <span>外观可以改，其余还不能在这里修改设置</span>
           </div>
           <section className="skel-live" aria-label={APPEARANCE}>
@@ -213,7 +178,9 @@ function SettingsView({ mode }: ViewProps) {
           <h3>{name}</h3>
           {fields ? (
             <>
-              <span className="ribbon">还不能在这里修改设置：这里以后放表单</span>
+              <Tag variant="soft" tone="star" size="md" className="ribbon">
+                还不能在这里修改设置：这里以后放表单
+              </Tag>
               {fields.map(([label, tall]) => (
                 <div className="set-field" key={label}>
                   <label>{label}</label>

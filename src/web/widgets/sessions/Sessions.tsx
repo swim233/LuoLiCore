@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { IconSessions } from '../../components/icons';
 import { BakedGlass } from '../../components/Bubble';
 import { Pane } from '../../components/Pane';
+import { Button, IconButton, Tag } from '@luoli/ui/controls';
 import { DUR_LAYER, EASE_OUT_CSS, LAYER_SHIFT } from '@luoli/ui/easing';
+import { IconChevronLeft } from '@luoli/ui/icons';
 import { SLOW } from '../../lib/debug';
 import { useNarrow } from '@luoli/ui/env';
 import { glassMode } from '../../lib/glass';
@@ -164,17 +166,18 @@ function WindowView({ handle }: { handle: ViewProps['handle'] }) {
             className="sess-main"
             top={
               <div className="sess-main-head sess-win-head">
-                <button
-                  className="w-btn sess-back"
-                  type="button"
+                <Button
+                  variant="ghost"
+                  className="sess-back"
                   title="返回列表"
                   aria-label="返回列表"
                   onClick={backToList}
                 >
-                  <span aria-hidden="true">‹</span>返回
-                </button>
+                  <IconChevronLeft />
+                  返回
+                </Button>
                 <h3>{c.title}</h3>
-                <span className="pchip">{KIND_LABEL[c.kind]}</span>
+                <Tag>{KIND_LABEL[c.kind]}</Tag>
                 <TaskChip convId={c.id} />
               </div>
             }
@@ -251,9 +254,8 @@ function FullView({ params }: { params: FullParams }) {
         className="sess-main is-main"
         top={
           <div className="sess-main-head">
-            <button
-              className="w-btn sess-back"
-              type="button"
+            <IconButton
+              className="sess-back"
               title="返回列表"
               aria-label="返回列表"
               onClick={() => {
@@ -261,10 +263,10 @@ function FullView({ params }: { params: FullParams }) {
                 backToList();
               }}
             >
-              ‹
-            </button>
+              <IconChevronLeft />
+            </IconButton>
             <h3>{c ? c.title : '没有选中的会话'}</h3>
-            {c && <span className="pchip">{KIND_LABEL[c.kind]}</span>}
+            {c && <Tag>{KIND_LABEL[c.kind]}</Tag>}
             <span className="sess-meta">
               {c
                 ? `${c.messages} 条消息 · ${c.segments} 段${c.platformConversationId ? ' · id ' + c.platformConversationId : ''}`

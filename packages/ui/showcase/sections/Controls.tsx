@@ -1,18 +1,15 @@
 import { useState } from 'react';
-import '../legacy/controls.css';
 import { Seg } from '../components/Seg';
 import { SectionHead } from '../components/SectionHead';
 import type { StageKind } from '../components/Stage';
 import { ButtonBlock, IconButtonBlock } from './controls/ButtonBlocks';
-import { ChangesTable } from './controls/ChangesTable';
 import { IconsBlock } from './controls/IconsBlock';
 import { BadgeBlock, ChevronBlock, DotBlock, SpinnerBlock, TagBlock } from './controls/MarkBlocks';
 import { StageCtx } from './controls/shared';
 import { ConfirmBlock, SegBlock, SwitchBlock } from './controls/ToggleBlocks';
 
-/* 第四节「基础控件」（第 4 步）：按钮、图标按钮、开关、分段选择、两步确认的按钮、标签、数字徽标、状态点、转圈、小箭头、图标。
-   每个控件一块：所有样子 × 尺寸、各种状态（悬停和键盘焦点强制显示）、能点的演示、和面板现在写法的对比；
-   最后一块是「面板上会变的地方」（请用户点头的清单）。左边的「现在」用的旧样式抄在 legacy/ 下（4b 结束时删掉）。 */
+/* 第四节「基础控件」：按钮、图标按钮、开关、分段选择、两步确认的按钮、标签、数字徽标、状态点、转圈、小箭头、图标。
+   每个控件一块：所有样子 × 尺寸、各种状态（悬停和键盘焦点强制显示）、能点的演示。 */
 const INDEX: readonly (readonly [string, string])[] = [
   ['ctl-button', '按钮'],
   ['ctl-icon-button', '图标按钮'],
@@ -25,7 +22,6 @@ const INDEX: readonly (readonly [string, string])[] = [
   ['ctl-spin', '转圈'],
   ['ctl-chev', '小箭头'],
   ['ctl-icons', '图标'],
-  ['ctl-changes', '面板上会变的地方'],
 ];
 
 export function Controls() {
@@ -33,9 +29,8 @@ export function Controls() {
   return (
     <StageCtx.Provider value={kind}>
       <SectionHead title="基础控件">
-        第 4
-        步的第一段（4a）：控件在库里做好了，面板还没有换；你看过、点头以后才会换到面板上。每个控件下面有和面板现在的对比（左边是面板里的旧样式原样，右边是库的组件），
-        最后一块是「面板上会变的地方」的清单。
+        面板里的按钮、开关、分段选择、标签、状态点这些小控件，现在用的就是这一节的。每个控件一块：所有样子
+        × 尺寸、 各种状态（悬停和键盘焦点是强制显示的）、能点的演示。
       </SectionHead>
       <div className="sc-ctl-bar">
         <div className="sc-bar-group">
@@ -55,7 +50,6 @@ export function Controls() {
             <button
               key={id}
               type="button"
-              className={id === 'ctl-changes' ? 'is-key' : undefined}
               onClick={() =>
                 document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
               }
@@ -76,7 +70,6 @@ export function Controls() {
       <SpinnerBlock />
       <ChevronBlock />
       <IconsBlock />
-      <ChangesTable />
     </StageCtx.Provider>
   );
 }

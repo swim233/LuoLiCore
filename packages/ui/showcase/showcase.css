@@ -6,15 +6,12 @@
 :root {
   --sc-bar-h: 52px;
 }
-/* 展示页自己的版面一律 border-box。放在库的 ll.base 层里：不在层里的话会盖过库的控件自己写的 box-sizing，
-   展示页里画出来的控件就和一个没有这条规则的项目（面板）里画出来的不一样了。这是展示页为了和旧样式对比的权宜做法：
-   4b 删掉 legacy 以后，把它挪出层、改成只管展示页自己的版面（.sc-*）。 */
-@layer ll.base {
-  *,
-  *::before,
-  *::after {
-    box-sizing: border-box;
-  }
+/* 展示页自己的版面一律 border-box；库的控件（类名以 ll- 开头的）自己写了 box-sizing（比如小箭头是 content-box），不去动它：
+   这条不在层里，写成全选的话会盖过库里层里的那些。 */
+:where(:not([class^='ll-']):not([class*=' ll-'])),
+:where(:not([class^='ll-']):not([class*=' ll-']))::before,
+:where(:not([class^='ll-']):not([class*=' ll-']))::after {
+  box-sizing: border-box;
 }
 html {
   background: var(--ll-bg);
@@ -49,12 +46,17 @@ a {
   outline: 2px solid var(--ll-accent);
   outline-offset: 2px;
 }
-/* 动画关掉（含「减少动态效果」）：展示页自己的过渡和动画都收掉；曲线的「播放」另外看 motionOn() */
+/* 动画关掉（含「减少动态效果」）：展示页自己的动画收掉，过渡缩短到 0.12 秒（照面板 .still * 的约定）；曲线的「播放」另外看 motionOn()。
+   库的控件（类名以 ll- 开头的，加上分段选择里没写类名的按钮）的过渡不在这里管，由库自己的 still.css 管，展示页里看到的就是库单独用时的样子。 */
 .still *,
 .still *::before,
 .still *::after {
   animation-duration: 0.001s !important;
-  transition-duration: 0.001s !important;
+}
+.still :not([class^='ll-'], [class*=' ll-'], .ll-seg > button),
+.still :not([class^='ll-'], [class*=' ll-'], .ll-seg > button)::before,
+.still :not([class^='ll-'], [class*=' ll-'], .ll-seg > button)::after {
+  transition-duration: 0.12s !important;
   transition-delay: 0s !important;
 }
 
@@ -998,9 +1000,6 @@ a {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 640px), 1fr));
   gap: 14px;
 }
-.sc-cmps > .sc-cmp.is-wide {
-  grid-column: 1 / -1;
-}
 .sc-cmp {
   min-width: 0;
   margin: 0;
@@ -1501,9 +1500,6 @@ a {
   background: var(--ll-ctl-bg-hover);
   color: var(--ll-fg);
 }
-.sc-ctl-index button.is-key {
-  color: var(--ll-star-pale);
-}
 .sc-row {
   display: flex;
   flex-wrap: wrap;
@@ -1568,10 +1564,6 @@ a {
   color: var(--ll-fg-2);
   cursor: pointer;
 }
-/* 设置里分段选择的按钮左右内边距 12px：面板在 .set-field 里改的，留在面板里；对比块里的「归并后」一边照样子写 */
-.sc-ctx .set-field .ll-seg > button {
-  padding: 0 var(--ll-space-12);
-}
 /* 图标 */
 .sc-icons {
   display: grid;
@@ -1620,35 +1612,6 @@ a {
 }
 .sc-stroke[data-source='Lucide'] em {
   color: var(--ll-star-pale);
-}
-/* 面板上会变的地方：一张表，行按部件分组 */
-.sc-table-wrap {
-  overflow-x: auto;
-}
-.sc-table.sc-changes td {
-  white-space: normal;
-  vertical-align: top;
-  line-height: 1.5;
-}
-.sc-table.sc-changes td:nth-child(2) {
-  min-width: 220px;
-}
-.sc-table.sc-changes td:nth-child(3) {
-  min-width: 130px;
-}
-.sc-table.sc-changes td:nth-child(n + 4) {
-  min-width: 170px;
-}
-.sc-changes tr.is-first td {
-  border-top: 1px solid var(--ll-line-hi);
-}
-.sc-changes .sc-part {
-  color: var(--ll-star-pale);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sc-changes .sc-after {
-  color: var(--ll-fg);
 }
 .sc-list {
   margin: 0 0 8px;

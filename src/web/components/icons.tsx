@@ -1,13 +1,6 @@
-/* 小四角星、各部件的图标、标题栏按钮的图标：内联 SVG，各平台长得一样，不靠字体里的 ✦ */
-export const STAR_PATH = 'M0-42C3-14 14-3 42 0C14 3 3 14 0 42C-3 14-14 3-42 0C-14-3-3-14 0-42Z';
-
-export function Star4({ className = 'st4' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="-50 -50 100 100" aria-hidden="true" focusable="false">
-      <path d={STAR_PATH} />
-    </svg>
-  );
-}
+/* 各部件的图标（此刻、会话、对话、设置、今日概况、任务）：内联 SVG，各平台长得一样，不靠字体里的 ✦。
+   四角星、标题栏按钮、整理、拖动把手这些通用图标在组件库（@luoli/ui/icons） */
+import { STAR_PATH } from '@luoli/ui/icons';
 const lineIcon = {
   viewBox: '0 0 20 20',
   fill: 'none',
@@ -54,61 +47,5 @@ export const IconTasks = (
     <circle cx="10" cy="10.5" r="6.6" />
     <path d="M10 6.8v4l2.6 1.6" />
     <path d="M4.6 3.4 2.9 5M15.4 3.4 17.1 5" />
-  </svg>
-);
-export const ICON_MIN = (
-  <svg
-    viewBox="0 0 16 16"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.6}
-    strokeLinecap="round"
-    aria-hidden="true"
-  >
-    <path d="M3.5 8h9" />
-  </svg>
-);
-export const ICON_MAX = (
-  <svg
-    viewBox="0 0 16 16"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.4}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9" />
-  </svg>
-);
-export const ICON_RESTORE = (
-  <svg
-    viewBox="0 0 16 16"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.4}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14" />
-  </svg>
-);
-export const ICON_ARRANGE = (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.4} aria-hidden="true">
-    <rect x="1.5" y="1.5" width="5" height="5" rx="1.2" />
-    <rect x="9.5" y="1.5" width="5" height="5" rx="1.2" />
-    <rect x="1.5" y="9.5" width="5" height="5" rx="1.2" />
-    <rect x="9.5" y="9.5" width="5" height="5" rx="1.2" />
-  </svg>
-);
-export const GripIcon = (
-  <svg className="grip-ico" viewBox="0 0 10 16" aria-hidden="true">
-    <circle cx="2.5" cy="3" r="1.4" />
-    <circle cx="7.5" cy="3" r="1.4" />
-    <circle cx="2.5" cy="8" r="1.4" />
-    <circle cx="7.5" cy="8" r="1.4" />
-    <circle cx="2.5" cy="13" r="1.4" />
-    <circle cx="7.5" cy="13" r="1.4" />
   </svg>
 );

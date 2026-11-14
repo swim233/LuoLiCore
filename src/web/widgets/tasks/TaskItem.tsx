@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Button } from '@luoli/ui/controls';
 import { fmtWhen } from '../../lib/zone';
 import { getSource } from '../../model/source';
 import { END_TEXT, endKind, scheduleLine, serverZone } from '../../model/tasks';
@@ -94,9 +95,9 @@ export function TaskItem({
               {next ? fmtWhen(next, tz, now) : ''}
             </span>
             {ask === 'idle' && (
-              <button className="task-cancel" type="button" onClick={() => setAsk('confirm')}>
+              <Button size="sm" className="task-cancel" onClick={() => setAsk('confirm')}>
                 取消
-              </button>
+              </Button>
             )}
           </>
         )}
@@ -104,22 +105,18 @@ export function TaskItem({
       {ask !== 'idle' && (
         <div className="task-ask" role="group" aria-label="取消这个任务？">
           <span>取消这个任务？</span>
-          <button
-            className="chip is-armed"
-            type="button"
+          <Button
+            size="sm"
+            variant="danger"
+            data-armed
             disabled={ask === 'busy'}
             onClick={() => void cancel()}
           >
             {ask === 'busy' ? '取消中…' : '确认'}
-          </button>
-          <button
-            className="chip"
-            type="button"
-            disabled={ask === 'busy'}
-            onClick={() => setAsk('idle')}
-          >
+          </Button>
+          <Button size="sm" disabled={ask === 'busy'} onClick={() => setAsk('idle')}>
             算了
-          </button>
+          </Button>
         </div>
       )}
       {err && (

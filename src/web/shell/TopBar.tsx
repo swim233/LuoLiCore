@@ -1,6 +1,7 @@
 import { Badge } from '../components/Badge';
-import { ICON_ARRANGE } from '../components/icons';
+import { Button, Switch } from '@luoli/ui/controls';
 import { useNarrow } from '@luoli/ui/env';
+import { IconArrange } from '@luoli/ui/icons';
 import { useMotionOn } from '@luoli/ui/motion';
 import { chooseMotion } from '../lib/prefs';
 import { STATE_TEXT, useStatus } from '../model/status';
@@ -61,29 +62,25 @@ export function TopBar() {
           {islandOn && <Cap id="now" island />}
         </div>
         <div className="top-right">
-          <button
-            className="tbtn"
+          <Button
+            size="lg"
             id="btn-arrange"
-            type="button"
-            aria-pressed={arranging}
+            pressed={arranging}
             title="整理桌面（Esc 退出）"
             onClick={() => setArranging(!arranging)}
           >
-            {ICON_ARRANGE}
+            <IconArrange />
             <span className="tlabel">整理</span>
-          </button>
-          <button
-            className="tbtn tswitch"
+          </Button>
+          <Switch
+            boxed
+            size="lg"
             id="btn-motion"
-            type="button"
-            role="switch"
-            aria-checked={motion}
+            checked={motion}
             title="装饰性的动画"
-            onClick={() => chooseMotion(!motion)}
-          >
-            <span className="tswitch-track" aria-hidden="true" />
-            <span className="tlabel">动画</span>
-          </button>
+            onChange={chooseMotion}
+            label="动画"
+          />
         </div>
       </div>
     </header>

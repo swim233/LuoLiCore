@@ -1,6 +1,5 @@
 import { Fragment, memo } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { motionOn } from '@luoli/ui/motion';
 import { cpLen, makeCuts } from '../lib/typing';
 import type { Batch } from '../lib/typing';
 import { linkHref, splitUrlTail } from '@luoli/ui/url';
@@ -142,38 +141,5 @@ export function Thumb({
     <span className="thumb" role="img" aria-label={'图片 ' + d.label} style={style}>
       <span>{d.label}</span>
     </span>
-  );
-}
-
-/* 转圈的符号：一个计时器带动所有的转圈 */
-const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-const spinSet = new Set<HTMLElement>();
-let spinI = 0,
-  spinTimer: ReturnType<typeof setInterval> | 0 = 0;
-const spinTick = () => {
-  spinI = (spinI + 1) % SPIN.length;
-  spinSet.forEach((el) => {
-    if (!el.isConnected) spinSet.delete(el);
-    else el.textContent = SPIN[spinI];
-  });
-  if (!spinSet.size && spinTimer) {
-    clearInterval(spinTimer);
-    spinTimer = 0;
-  }
-};
-export function Spin() {
-  return (
-    <span
-      className="spin"
-      aria-hidden="true"
-      ref={(el) => {
-        if (!el) return;
-        if (motionOn()) {
-          el.textContent = SPIN[spinI];
-          spinSet.add(el);
-          if (!spinTimer) spinTimer = setInterval(spinTick, 80);
-        } else el.textContent = '⋯';
-      }}
-    />
   );
 }

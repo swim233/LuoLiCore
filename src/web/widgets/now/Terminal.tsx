@@ -1,12 +1,13 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Hl, Spin } from '../../components/Hl';
-import { Star4 } from '../../components/icons';
+import { Hl } from '../../components/Hl';
 import { Markdown } from '../../components/Markdown';
 import { Pic } from '../../components/Pic';
 import { Typed } from '../../components/Typed';
+import { Button, Chevron, Spinner } from '@luoli/ui/controls';
 import { EASE_OUT_CSS } from '@luoli/ui/easing';
+import { Star4 } from '@luoli/ui/icons';
 import { motionOn } from '@luoli/ui/motion';
 import { cancelWheel, isWheeling } from '@luoli/ui/wheel';
 import { fmtTime } from '@luoli/ui/util';
@@ -48,7 +49,7 @@ function Head({ line, pad }: { line: Line; pad?: boolean }) {
       )}
       {line.kind === 'luoli' || pad ? (
         <span className="tl-sym">
-          <Star4 />
+          <Star4 className="st4" />
         </span>
       ) : (
         <span className="tl-sym">{SYM[line.kind]}</span>
@@ -109,7 +110,7 @@ function ThinkBody({ line }: { line: Line }) {
         }}
       >
         {label}
-        <span className="chev" aria-hidden="true" />
+        <Chevron />
       </button>
       <span className="tl-think-text" hidden={!open}>
         {line.text}
@@ -177,7 +178,7 @@ const TermLine = memo(function TermLine({
         <span>
           正在调用 {name} {line.label}…
         </span>
-        <Spin />
+        <Spinner className="spin" />
       </span>
     ) : (
       <span className="tl-body">
@@ -540,10 +541,10 @@ export function Terminal({ session }: { session: Session }) {
         away &&
         createPortal(
           <div className="term-jump-wrap">
-            <button className="term-jump" type="button" onClick={toLatest}>
+            <Button variant="glass" className="term-jump" onClick={toLatest}>
               回到最新
-              <span className="chev" aria-hidden="true" />
-            </button>
+              <Chevron dir="down" />
+            </Button>
           </div>,
           host,
         )}

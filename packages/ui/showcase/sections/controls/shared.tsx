@@ -1,88 +1,13 @@
 import { createContext, useContext } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
-import { Compare } from '../../components/Compare';
-import type { CompareMode } from '../../components/Compare';
+import type { ReactNode } from 'react';
 import { Stage } from '../../components/Stage';
 import type { StageKind } from '../../components/Stage';
 
 /* 「基础控件」一节各块共用的零件 */
 
-/** 摆在舞台上的东西垫哪种底：整节的「舞台的底」选的（对比块自己另有一个开关） */
+/** 摆在舞台上的东西垫哪种底：整节的「舞台的底」选的 */
 export const StageCtx = createContext<StageKind>('sky');
 export const useStageKind = () => useContext(StageCtx);
-
-/** 对比块里被量的元素：QA 的脚本按 data-probe（now 现在 / merged 归并后）、data-item（哪一处）、data-state（哪种状态）把两边配对，
-    读计算样式；页面上「面板上会变的地方」那张表的行也用同样的 item 和 state 对应 */
-export const probe = (side: 'now' | 'merged', item: string, state = 'normal') => ({
-  'data-probe': side,
-  'data-item': item,
-  'data-state': state,
-});
-
-/** 对比块里放控件的那一层：两边都套 .sc-ctx（字体、字号、行高照面板的 body），「现在」那边再套 .sc-legacy（旧样式只在这里生效） */
-export function Ctx({
-  legacy,
-  className = '',
-  style,
-  children,
-}: {
-  legacy?: boolean;
-  className?: string;
-  style?: CSSProperties;
-  children: ReactNode;
-}) {
-  return (
-    <div className={`sc-ctx ${legacy ? 'sc-legacy' : ''} ${className}`} style={style}>
-      {children}
-    </div>
-  );
-}
-
-/** 一个对比项：left 是面板现在的写法（旧样式），right 是换成库的组件以后 */
-export interface Item {
-  id: string;
-  title: string;
-  now: ReactNode;
-  merged: ReactNode;
-  /** 下面写变了什么（没变的写「不变」） */
-  note: ReactNode;
-  stage?: StageKind;
-  mode?: CompareMode;
-  /** 内容一行放不下的，独占一整行（免得「现在」「归并后」有一边折行，折行本身变成看得见的差别） */
-  wide?: boolean;
-  /** 外层的版面（两边一样）：className 和 style */
-  ctxClass?: string;
-  ctxStyle?: CSSProperties;
-}
-
-export function Items({ items }: { items: Item[] }) {
-  return (
-    <div className="sc-cmps">
-      {items.map((it) => (
-        <Compare
-          key={it.id}
-          title={it.title}
-          stage={it.stage ?? 'sky'}
-          mode={it.mode ?? 'side'}
-          className={it.wide ? 'is-wide' : ''}
-          nowLabel="现在（面板里的旧样式）"
-          mergedLabel="归并后（库的组件）"
-          now={
-            <Ctx legacy className={it.ctxClass} style={it.ctxStyle}>
-              {it.now}
-            </Ctx>
-          }
-          merged={
-            <Ctx className={it.ctxClass} style={it.ctxStyle}>
-              {it.merged}
-            </Ctx>
-          }
-          note={it.note}
-        />
-      ))}
-    </div>
-  );
-}
 
 /** 每个控件一块：标题、一句说明、里面的内容 */
 export function Group({

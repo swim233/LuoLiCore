@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
-import { lastOnlineText, STATE_TEXT, status, useStatus } from '../model/status';
+import { Button, Dot } from '@luoli/ui/controls';
+import { lastOnlineText, STATE_TEXT, STATE_TONE, status, useStatus } from '../model/status';
 import { useAssistantName } from '../model/who';
 import { clamp } from '@luoli/ui/util';
 import { lastReplyText } from '../lib/util';
@@ -37,26 +38,26 @@ export function Pop() {
       </div>
       {s.state === 'offline' && (
         <div className="pop-row">
-          <span className="sdot" data-s="offline" />
+          <Dot tone={STATE_TONE.offline} />
           <b>{lastOnlineText()}</b>
         </div>
       )}
       {s.state !== 'offline' && !s.count && (
         <div className="pop-row">
-          <span className="sdot" data-s="idle" />
+          <Dot tone={STATE_TONE.idle} />
           <b>{status.lastReplyAt ? lastReplyText(status.lastReplyAt) : '今天还没有新的回复'}</b>
         </div>
       )}
       {s.list.map((x) => (
         <div className="pop-row" key={x.id}>
-          <span className="sdot" data-s={x.state} />
+          <Dot tone={STATE_TONE[x.state]} />
           <b>{x.title}</b>
           <span>{x.state === 'tool' ? '调用 ' + (x.tool || '工具') : STATE_TEXT[x.state]}</span>
         </div>
       ))}
       {!s.tgEnabled && (
         <div className="pop-row">
-          <span className="sdot" data-s="offline" />
+          <Dot tone={STATE_TONE.offline} />
           <b>Telegram 服务未启动</b>
         </div>
       )}
@@ -118,9 +119,9 @@ export function ArrangeBar({ onDone }: { onDone: () => void }) {
       <span>
         <b>整理中</b>：拖动部件换位置，点尺寸调大小，拖进收纳盒隐藏
       </span>
-      <button className="chip" id="arrange-done" type="button" aria-pressed="true" onClick={onDone}>
+      <Button pressed id="arrange-done" onClick={onDone}>
         完成
-      </button>
+      </Button>
     </div>
   );
 }

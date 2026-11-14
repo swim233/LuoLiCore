@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Ref } from 'react';
 import { IncrementalLexer } from '../lib/markdown';
+import { Star4 } from '@luoli/ui/icons';
 import { motionOn } from '@luoli/ui/motion';
 import { hiddenTail, linkTailSpans, settleMarkdown } from '../lib/stream-md';
 import { advanceCp, cpLen, cpSpans, DROP_MS, Pacer, Spans, trimBatches } from '../lib/typing';
 import type { Batch } from '../lib/typing';
-import { Star4 } from './icons';
 import { Markdown } from './Markdown';
 
 /* 正在逐字输出的回复：光标打字。对话部件的气泡、「此刻」终端里洛璃正在说的那一行用的是同一个。
@@ -49,7 +49,7 @@ export function Cursor({
       aria-hidden="true"
       ref={elRef}
     >
-      <Star4 />
+      <Star4 className="st4" />
     </span>
   );
 }

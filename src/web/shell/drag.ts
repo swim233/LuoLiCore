@@ -148,7 +148,7 @@ export function dragStart(
   const e0 = 'nativeEvent' in ev ? ev.nativeEvent : ev;
   if (!desk.get().arranging || e0.button !== 0) return;
   const target = e0.target as Element;
-  if (target.closest('.chip, .cap-x')) return;
+  if (target.closest('.ll-btn, .cap-x')) return;
   /* 触屏上卡片只认拖动柄，其余地方留给页面滚动 */
   if (e0.pointerType === 'touch' && kind === 'card' && !target.closest('.w-grip')) return;
   const f = faces(id);

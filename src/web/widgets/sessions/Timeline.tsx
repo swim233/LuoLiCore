@@ -3,6 +3,7 @@ import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { MsgBubble, useGlass } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
+import { Button, Chevron } from '@luoli/ui/controls';
 import { EASE_OUT_CSS } from '@luoli/ui/easing';
 import { motionOn } from '@luoli/ui/motion';
 import { fmtDay } from '../../lib/util';
@@ -45,15 +46,10 @@ function SegView({ seg }: { seg: Segment }) {
       <div className="seg-line">
         <span>{`${SEG_REASON[seg.startReason]} · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
         {seg.priorSummary && (
-          <button
-            className="seg-btn"
-            type="button"
-            aria-expanded={open}
-            onClick={() => setOpen(!open)}
-          >
+          <Button size="xs" aria-expanded={open} onClick={() => setOpen(!open)}>
             摘要
-            <span className="chev" aria-hidden="true" />
-          </button>
+            <Chevron />
+          </Button>
         )}
       </div>
       {seg.priorSummary && open && (
@@ -274,13 +270,9 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
     return note(
       '这个会话的消息没取到',
       info.error,
-      <button
-        className="log-retry"
-        type="button"
-        onClick={() => getSource().openConversation(convId)}
-      >
+      <Button size="sm" onClick={() => getSource().openConversation(convId)}>
         重试
-      </button>,
+      </Button>,
     );
 
   const rows = db.msgs(convId);
@@ -317,13 +309,9 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
     ) : info.older === 'error' ? (
       <span className="log-pill is-err">
         更早的消息没取到
-        <button
-          className="log-retry"
-          type="button"
-          onClick={() => getSource().loadOlder(convId, true)}
-        >
+        <Button size="xs" onClick={() => getSource().loadOlder(convId, true)}>
           重试
-        </button>
+        </Button>
       </span>
     ) : null;
   return (

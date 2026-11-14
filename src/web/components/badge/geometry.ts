@@ -1,4 +1,4 @@
-import { STAR_PATH } from '../icons';
+import { STAR_PATH } from '@luoli/ui/icons';
 
 /* 徽记的几何：弯月、四角星、小卫星的形状（viewBox -50..50），绕星星转的椭圆轨道 */
 export { STAR_PATH };

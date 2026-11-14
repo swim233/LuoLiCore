@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { bus } from './bus';
 import type { BusEventName } from './bus';
+import type { DotTone } from '@luoli/ui/controls';
 import { fmtTime } from '@luoli/ui/util';
 import { db } from './db';
 
@@ -18,6 +19,17 @@ export const STATE_TEXT: Record<State, string> = {
   tool: '调用工具',
   retry: '重试中',
   error: '出错',
+};
+/** 状态点（组件库的 Dot）的色调：库里只认色调，洛璃的八种状态对到色调在这里；离线不写，是灰点 */
+export const STATE_TONE: Record<State, DotTone | undefined> = {
+  offline: undefined,
+  idle: 'ok',
+  waiting: 'accent',
+  thinking: 'quote',
+  replying: 'star',
+  tool: 'tool',
+  retry: 'warning',
+  error: 'danger',
 };
 const BUSY_ORDER: State[] = ['error', 'retry', 'tool', 'replying', 'thinking', 'waiting'];
 /** 一个会话是怎么离开「进行中」的：正常完成、中止、等待被放弃、出错后的 3.6 秒到了、别的原因（会话被删） */

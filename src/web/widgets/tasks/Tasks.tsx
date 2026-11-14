@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { useGlide } from '../../components/glide';
 import { IconTasks } from '../../components/icons';
 import { Pane } from '../../components/Pane';
+import { Button, Chevron, Tag } from '@luoli/ui/controls';
 import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
 import { useMotionOn } from '@luoli/ui/motion';
 import { db, defaultTitle } from '../../model/db';
@@ -85,7 +86,7 @@ function Ended({
         onClick={() => setOpen(!open)}
       >
         {`已结束（${list.length}）`}
-        <span className="chev" aria-hidden="true" />
+        <Chevron />
       </button>
       <AnimatePresence initial={false}>
         {open && (
@@ -142,9 +143,9 @@ function TasksView({ mode }: ViewProps) {
       <div className="empty">
         <b>{problem.title}</b>
         {problem.detail && <div>{problem.detail}</div>}
-        <button className="log-retry" type="button" onClick={() => void refreshTasks()}>
+        <Button size="sm" onClick={() => void refreshTasks()}>
           重试
-        </button>
+        </Button>
       </div>
     );
   else if (!active.length)
@@ -176,7 +177,7 @@ function TasksView({ mode }: ViewProps) {
             >
               <div className="task-gh">
                 <span className="task-gt">{convTitleOf(grp.conv)}</span>
-                <span className="pchip">{KIND_LABEL[grp.conv.kind]}</span>
+                <Tag>{KIND_LABEL[grp.conv.kind]}</Tag>
               </div>
               <div role="list">
                 <AnimatePresence initial={false}>

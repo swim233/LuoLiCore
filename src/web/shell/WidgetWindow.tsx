@@ -1,9 +1,10 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
+import { Button, IconButton } from '@luoli/ui/controls';
 import { env } from '@luoli/ui/env';
+import { IconGrip, IconMax, IconMin, IconRestore } from '@luoli/ui/icons';
 import { SLOW } from '../lib/debug';
 import { MiniSky } from '../components/MiniSky';
-import { GripIcon, ICON_MAX, ICON_MIN, ICON_RESTORE } from '../components/icons';
 import {
   desk,
   getDef,
@@ -114,35 +115,25 @@ export const WidgetWindow = memo(function WidgetWindow({
       {fresh && !full && <span className="w-new">新</span>}
       <span className="w-sub">{sub}</span>
       <div className="w-btns">
-        <button
-          className="w-btn"
-          type="button"
-          title="缩小到缩略"
-          aria-label="缩小到缩略"
-          onClick={() => minimize(id)}
-        >
-          {ICON_MIN}
-        </button>
+        <IconButton title="缩小到缩略" aria-label="缩小到缩略" onClick={() => minimize(id)}>
+          <IconMin />
+        </IconButton>
         {full ? (
-          <button
-            className="w-btn"
-            type="button"
+          <IconButton
             title="还原（双击标题栏、按 Esc 或点窗口外面）"
             aria-label="还原"
             onClick={() => closeFull()}
           >
-            {ICON_RESTORE}
-          </button>
+            <IconRestore />
+          </IconButton>
         ) : (
-          <button
-            className="w-btn"
-            type="button"
+          <IconButton
             title="放大到全屏（也可以双击标题栏）"
             aria-label="放大到全屏"
             onClick={() => openFull(id)}
           >
-            {ICON_MAX}
-          </button>
+            <IconMax />
+          </IconButton>
         )}
       </div>
     </header>
@@ -150,26 +141,17 @@ export const WidgetWindow = memo(function WidgetWindow({
   const arr = !full && (
     <div className="w-arr">
       <span className="w-grip" title="按住拖动换位置">
-        {GripIcon}
+        <IconGrip className="grip-ico" />
         <span>按住这里拖动</span>
       </span>
       <div className="w-sizes" role="group" aria-label="普通大小">
         {(Object.keys(SIZES) as SizeKey[]).map((k) => (
-          <button
-            key={k}
-            className="chip"
-            type="button"
-            data-size={k}
-            aria-pressed={k === sz}
-            onClick={() => setSize(id, k)}
-          >
+          <Button key={k} pressed={k === sz} data-widget-size={k} onClick={() => setSize(id, k)}>
             {SIZE_LABEL[k]}
-          </button>
+          </Button>
         ))}
       </div>
-      <button className="chip w-hide" type="button" onClick={() => hideWidget(id)}>
-        收进收纳盒
-      </button>
+      <Button onClick={() => hideWidget(id)}>收进收纳盒</Button>
     </div>
   );
   const body = (

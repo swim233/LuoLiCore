@@ -2,7 +2,7 @@ import { isWork, lookView, setManualLook, getLook } from '../components/badge/ap
 import type { Look, Main } from '../components/badge/appearance';
 import { setTimeRate, timeRate } from '../components/badge/timescale';
 import { Badge } from '../components/Badge';
-import { Seg } from '../components/Seg';
+import { Seg } from '@luoli/ui/controls';
 import { createStore, useStore } from '@luoli/ui/store';
 import type { EndKind } from '../model/status';
 

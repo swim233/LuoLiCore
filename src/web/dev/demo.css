@@ -161,9 +161,10 @@
   white-space: nowrap;
   flex: none;
 }
-.demo-row .seg-ctl {
+.demo-row .ll-seg {
   flex: 1 1 auto;
-  max-width: 196px;
+  /* 库的分段选择是 border-box（外框连内边距算 200）；原来的是 content-box，写 196 再加 4 的内边距，外框也是 200 */
+  max-width: 200px;
   min-width: 0;
 }
 /* 全屏时，演示控制挪到右上角（全屏窗口上方那一行的空处），不压住全屏窗口的内容。

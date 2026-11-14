@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Button, Chevron } from '@luoli/ui/controls';
 import { useGlide } from '../../components/glide';
 import { useLinkPhase } from '../../model/link';
 import { useBusRev } from '../../model/rev';
@@ -61,18 +62,18 @@ export function TaskChip({ convId }: { convId: string }) {
   if (!list.length) return null;
   return (
     <span className="task-chip" ref={wrap}>
-      <button
-        className="pchip task-count"
+      <Button
+        variant="ghost"
+        size="xs"
         ref={btn}
-        type="button"
         aria-haspopup="dialog"
         aria-expanded={shown}
         title="这个会话进行中的任务"
         onClick={() => setOpen(!shown)}
       >
         {list.length} 个任务
-        <span className="chev" aria-hidden="true" />
-      </button>
+        <Chevron />
+      </Button>
       {shown && <TaskPop list={list} now={now} />}
     </span>
   );

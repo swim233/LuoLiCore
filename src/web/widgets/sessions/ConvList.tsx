@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useState } from 'react';
+import { Badge } from '@luoli/ui/controls';
 import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
 import { motionOn as motionNow, useMotionOn } from '@luoli/ui/motion';
 import { morphStore } from '../../shell/morph';
@@ -68,7 +69,7 @@ const ConvRow = memo(function ConvRow({
         >
           {time}
         </span>
-        <span className="conv-unread">{n ? (n > 99 ? '99+' : String(n)) : ''}</span>
+        <Badge>{n ? (n > 99 ? '99+' : String(n)) : ''}</Badge>
       </span>
     </button>
   );

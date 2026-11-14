@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Badge, ToolName } from '../../components/Badge';
 import { Pane } from '../../components/Pane';
 import { IconNow } from '../../components/icons';
+import { Button, Dot } from '@luoli/ui/controls';
 import { env } from '@luoli/ui/env';
 import { pulse } from '../../lib/fx-dom';
 import { lastReplyText, recentReply, relTime } from '../../lib/util';
@@ -10,7 +11,7 @@ import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { nowModel } from '../../model/nowModel';
 import type { Session } from '../../model/nowModel';
-import { lastOnlineText, STATE_TEXT, status, useStatus } from '../../model/status';
+import { lastOnlineText, STATE_TEXT, STATE_TONE, status, useStatus } from '../../model/status';
 import { useAssistantName } from '../../model/who';
 import { nowCtl } from '../../state/actions';
 import { pop } from '../../state/ui';
@@ -147,7 +148,7 @@ function NowView({ mode, handle }: ViewProps) {
               key={sessKey(s)}
               top={
                 <div className="now-col-head">
-                  <span className="sdot" data-s={x ? x.state : 'idle'} />
+                  <Dot tone={STATE_TONE[x ? x.state : 'idle']} />
                   <b>{s.title}</b>
                   <span className="st">
                     {x
@@ -158,13 +159,12 @@ function NowView({ mode, handle }: ViewProps) {
                         ? ''
                         : '已回复'}
                   </span>
-                  <button
+                  <Button
                     className="now-open"
-                    type="button"
                     onClick={() => handle.openFull('sessions', { convId: s.convId })}
                   >
                     在会话中打开
-                  </button>
+                  </Button>
                 </div>
               }
             >
@@ -199,7 +199,7 @@ function NowView({ mode, handle }: ViewProps) {
                   aria-selected={ss.convId === curId}
                   onClick={() => setSel(ss.convId)}
                 >
-                  <span className="sdot" data-s={st ? st.state : 'idle'} />
+                  <Dot tone={STATE_TONE[st ? st.state : 'idle']} />
                   {ss.title}
                 </button>
               );
