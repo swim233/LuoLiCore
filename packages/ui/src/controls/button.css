@@ -61,8 +61,8 @@
   .ll-btn[data-variant='glass'] {
     background: var(--ll-glass-bg);
     color: var(--ll-fg);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: var(--ll-glass-blur);
+    backdrop-filter: var(--ll-glass-blur);
     box-shadow:
       var(--ll-glass-edge),
       0 8px 20px -8px color-mix(in srgb, var(--ll-black) 70%, transparent);
@@ -73,6 +73,11 @@
   /* ghost 当「点开一个东西」的按钮用：展开着的时候保持亮着的底 */
   .ll-btn[data-variant='ghost'][aria-expanded='true'] {
     background: var(--ll-ctl-bg);
+    color: var(--ll-fg);
+  }
+  /* soft 也一样：当「点开一个东西」的按钮用（展开的菜单、弹出框、折叠的摘要）时，展开着保持亮着的底，和悬停一样 */
+  .ll-btn:where(:not([data-variant]), [data-variant='soft'])[aria-expanded='true'] {
+    background: var(--ll-ctl-bg-hover);
     color: var(--ll-fg);
   }
   /* 两步确认等待时：危险的样子加一圈红光 */

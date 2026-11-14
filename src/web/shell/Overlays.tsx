@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
-import { Button, Dot } from '@luoli/ui/controls';
+import { Button, Dot, Notice } from '@luoli/ui/controls';
 import { lastOnlineText, STATE_TEXT, STATE_TONE, status, useStatus } from '../model/status';
 import { useAssistantName } from '../model/who';
 import { clamp } from '@luoli/ui/util';
@@ -80,7 +80,7 @@ export function ArrangeBar({ onDone }: { onDone: () => void }) {
   const arranging = useDesk((s) => s.arranging);
   const leaving = useDesk((s) => s.arrLeaving);
   const barPos = useDesk((s) => s.barPos);
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLSpanElement>(null);
   const shown = arranging || leaving;
   /* 进入：先渲染成隐藏的样子，下一帧再加 is-on，过渡才会播 */
   const onRef = useRef(false);
@@ -110,19 +110,21 @@ export function ArrangeBar({ onDone }: { onDone: () => void }) {
           position: 'fixed' as const,
           top: barPos.top,
           left: barPos.left,
+          /* 库的提示条是 border-box，量到的整条宽原样写回，淡出时宽度不变。
+             要改回换库之前的样子（content-box，淡出时宽 24px、字右挪 12px）：写 barPos.width + 24 */
           width: barPos.width,
           margin: 0,
         }
       : undefined;
   return (
-    <div className="arrange-bar" id="arrange-bar" ref={ref} style={style}>
+    <Notice size="lg" className="arrange-bar" id="arrange-bar" ref={ref} style={style}>
       <span>
         <b>整理中</b>：拖动部件换位置，点尺寸调大小，拖进收纳盒隐藏
       </span>
       <Button pressed id="arrange-done" onClick={onDone}>
         完成
       </Button>
-    </div>
+    </Notice>
   );
 }
 
@@ -134,7 +136,10 @@ export function Tray() {
   const over = useUi((s) => s.trayOver);
   const hidden = L.order.filter((id) => getDef(id) && L.hidden[id]);
   return (
-    <div className={'tray' + (arranging ? ' is-on' : '') + (over ? ' is-over' : '')} id="tray">
+    <div
+      className={'tray ll-glass' + (arranging ? ' is-on' : '') + (over ? ' is-over' : '')}
+      id="tray"
+    >
       <span className="tray-label">收纳盒</span>
       <div className="tray-items" id="tray-items">
         {!hidden.length && (
@@ -143,10 +148,10 @@ export function Tray() {
         {hidden.map((id) => {
           const def = getDef(id)!;
           return (
-            <button
+            <Button
               key={id}
+              size="lg"
               className="tray-item"
-              type="button"
               data-id={id}
               title="拖回桌面，或单击放回原处"
               onPointerDown={(ev) => dragStart(ev, id, 'tray')}
@@ -157,7 +162,7 @@ export function Tray() {
             >
               <span className="cap-icon">{def.icon}</span>
               {def.name}
-            </button>
+            </Button>
           );
         })}
       </div>

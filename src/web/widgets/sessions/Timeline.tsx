@@ -3,7 +3,7 @@ import { VirtualLog } from '../../components/VirtualLog';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { MsgBubble, useGlass } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
-import { Button, Chevron } from '@luoli/ui/controls';
+import { Button, Chevron, Empty, Notice } from '@luoli/ui/controls';
 import { EASE_OUT_CSS } from '@luoli/ui/easing';
 import { motionOn } from '@luoli/ui/motion';
 import { fmtDay } from '../../lib/util';
@@ -53,7 +53,7 @@ function SegView({ seg }: { seg: Segment }) {
         )}
       </div>
       {seg.priorSummary && open && (
-        <div className="seg-sum" ref={sumRef}>
+        <div className="seg-sum ll-inset" ref={sumRef}>
           <b>这一段开始时的摘要</b>
           {seg.priorSummary}
         </div>
@@ -150,12 +150,7 @@ function entriesOf(convId: string, web: boolean, unreadSeq: number | null): Entr
   if (!list.length)
     out.push({
       key: 'empty',
-      node: (
-        <div className="empty">
-          <b>还没有消息</b>
-          {web ? '在下面说点什么吧' : '有人发言后会出现在这里'}
-        </div>
-      ),
+      node: <Empty title="还没有消息">{web ? '在下面说点什么吧' : '有人发言后会出现在这里'}</Empty>,
     });
   if (!web && status.conv.has(convId)) out.push({ key: 'typing', node: <TypingView /> });
   return out;
@@ -254,11 +249,9 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
 
   const note = (title: string, text?: string, action?: React.ReactNode) => (
     <div className="tline pane-sc" role="log" aria-label="时间线">
-      <div className="empty">
-        <b>{title}</b>
+      <Empty title={title} action={action}>
         {text}
-        {action}
-      </div>
+      </Empty>
     </div>
   );
   if (!convId || !conv) return note('没有选中的会话', '从左边选一个');
@@ -303,16 +296,20 @@ export function Timeline({ convId, web = false }: { convId: string | null; web?:
   const anchorKey = dividerSeq !== null ? 'new-divider' : (o?.anchorId ?? null);
   const topNotice =
     phase === 'down' ? (
-      <span className="log-pill is-err">连不上洛璃服务，连上后会自动恢复</span>
+      <Notice tone="danger" className="log-pill">
+        连不上洛璃服务，连上后会自动恢复
+      </Notice>
     ) : info.older === 'loading' ? (
-      <span className="log-pill">加载中…</span>
+      <Notice role="status" className="log-pill">
+        加载中…
+      </Notice>
     ) : info.older === 'error' ? (
-      <span className="log-pill is-err">
+      <Notice tone="danger" className="log-pill">
         更早的消息没取到
         <Button size="xs" onClick={() => getSource().loadOlder(convId, true)}>
           重试
         </Button>
-      </span>
+      </Notice>
     ) : null;
   return (
     <VirtualLog

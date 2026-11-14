@@ -6,7 +6,7 @@ import { linkHref, splitUrlTail } from '@luoli/ui/url';
 import type { ImagePart } from '../model/types';
 import { assistant, useAssistant } from '../model/who';
 import { freshNodes } from './Fresh';
-import { Link } from './Link';
+import { Link } from '@luoli/ui/controls';
 
 /* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由服务告诉面板）、数字。
    @提及里认名字、唤醒词和 bot 的 @用户名：提到她的 @ 加亮 */
@@ -93,7 +93,7 @@ export const Hl = memo(function Hl({
           if (href)
             return (
               <Fragment key={i}>
-                <Link href={href} className="hl-url">
+                <Link href={href} variant="auto" className="hl-url">
                   {piece(url)}
                 </Link>
                 {piece(tail)}

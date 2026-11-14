@@ -43,7 +43,8 @@ export function FullscreenLayer() {
               /* 当前项变了就重建按钮（和第 4.1 版一样）：原地改 aria-current 会触发颜色、边线、阴影的 CSS 过渡，那是主线程逐帧重绘，切换时的头 200 ms 会掉帧 */
               <button
                 key={id + (id === curId ? '*' : '')}
-                className="fs-tab"
+                className="fs-tab ll-tab"
+                data-size="md"
                 type="button"
                 aria-current={id === curId}
                 title={def.name}

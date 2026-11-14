@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Energy, Roll } from '../../components/Roll';
+import { Empty, Meter, Roll, Stat } from '@luoli/ui/controls';
 import { bus } from '../../model/bus';
 import { db } from '../../model/db';
 import { link, useLinkPhase } from '../../model/link';
@@ -26,15 +26,11 @@ function Notice({ phase }: { phase: 'loading' | 'down' }) {
   return (
     <Pane>
       <div className="today pane-sc">
-        <div className="empty">
-          {phase === 'down' ? (
-            <>
-              <b>连不上洛璃服务</b>连上后会自动恢复
-            </>
-          ) : (
-            <b>加载中…</b>
-          )}
-        </div>
+        {phase === 'down' ? (
+          <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>
+        ) : (
+          <Empty title="加载中…" />
+        )}
       </div>
     </Pane>
   );
@@ -81,44 +77,48 @@ function TodayView({ mode, handle }: ViewProps) {
     return (
       <Pane>
         <div className="today pane-sc">
-          <div className="today-hero">
-            <Roll value={s.replies} />
-            <span>次回复</span>
-          </div>
-          <div className="stat-row">
-            <span>token</span>
-            <span>
-              输入{' '}
-              <b>
-                <Roll value={s.input} />
-              </b>{' '}
-              · 输出{' '}
-              <b>
-                <Roll value={s.output} />
-              </b>
-            </span>
-          </div>
-          <div className="stat">
-            <div className="stat-row">
-              <span>缓存命中率</span>
+          <Stat variant="hero" value={<Roll value={s.replies} />} unit="次回复" />
+          <Stat
+            variant="row"
+            label="token"
+            value={
+              <>
+                输入{' '}
+                <b>
+                  <Roll value={s.input} />
+                </b>{' '}
+                · 输出{' '}
+                <b>
+                  <Roll value={s.output} />
+                </b>
+              </>
+            }
+          />
+          <Stat
+            variant="row"
+            label="缓存命中率"
+            value={
               <b>
                 <Roll value={hit * 100} fmt={(v) => v.toFixed(1) + '%'} />
               </b>
-            </div>
-            <Energy value={hit} label="缓存命中率" />
-          </div>
-          <div className="stat">
-            <div className="stat-row">
-              <span>失败</span>
-              <span>
+            }
+          >
+            <Meter value={hit} label="缓存命中率" />
+          </Stat>
+          <Stat
+            variant="row"
+            label="失败"
+            value={
+              <>
                 <b>
                   <Roll value={s.failed} />
                 </b>{' '}
                 次
-              </span>
-            </div>
-            <Energy value={failRate} bad label="失败率" />
-          </div>
+              </>
+            }
+          >
+            <Meter value={failRate} tone="danger" label="失败率" />
+          </Stat>
         </div>
       </Pane>
     );
@@ -129,41 +129,31 @@ function TodayView({ mode, handle }: ViewProps) {
     <Pane>
       <div className="today is-full pane-sc">
         <div className="today-grid">
-          <div className="tile">
-            <small>今天的回复</small>
-            <Roll value={s.replies} />
-          </div>
-          <div className="tile">
-            <small>输入 token</small>
-            <Roll value={s.input} />
-          </div>
-          <div className="tile">
-            <small>输出 token</small>
-            <Roll value={s.output} />
-          </div>
-          <div className="tile">
-            <small>缓存命中率</small>
-            <Roll value={hit * 100} fmt={(v) => v.toFixed(1) + '%'} />
-            <Energy value={hit} label="缓存命中率" />
-          </div>
-          <div className="tile">
-            <small>失败</small>
-            <Roll value={s.failed} />
-            <Energy value={failRate} bad label="失败率" />
-          </div>
+          <Stat label="今天的回复" value={<Roll value={s.replies} />} />
+          <Stat label="输入 token" value={<Roll value={s.input} />} />
+          <Stat label="输出 token" value={<Roll value={s.output} />} />
+          <Stat
+            label="缓存命中率"
+            value={<Roll value={hit * 100} fmt={(v) => v.toFixed(1) + '%'} />}
+          >
+            <Meter value={hit} label="缓存命中率" />
+          </Stat>
+          <Stat label="失败" value={<Roll value={s.failed} />}>
+            <Meter value={failRate} tone="danger" label="失败率" />
+          </Stat>
         </div>
         <div className="stat">
-          <div className="stat-row">
+          <div className="ll-stat-line">
             <b>各会话今天的回复</b>
           </div>
           <div className="per-conv">
-            {!rows.length && <div className="empty is-flat">今天还没有回复</div>}
+            {!rows.length && <Empty flat>今天还没有回复</Empty>}
             {rows.map((c) => {
               const title = c.title || db.conv(c.id)?.title || '会话';
               return (
                 <div className="per-row" key={c.id}>
                   <span>{title}</span>
-                  <Energy value={c.replies / max} label={title} />
+                  <Meter value={c.replies / max} label={title} />
                   <span>
                     <Roll value={c.replies} />
                   </span>

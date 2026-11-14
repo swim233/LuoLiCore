@@ -1566,13 +1566,6 @@ a:not(.ll-link) {
   min-width: 0;
   padding: 2px;
 }
-.sc-dots {
-  display: grid;
-  gap: 6px;
-}
-.sc-dots .sc-row {
-  gap: 8px;
-}
 .sc-chev-demo {
   display: inline-flex;
   align-items: center;
@@ -1640,27 +1633,11 @@ a:not(.ll-link) {
 .sc-stroke[data-source='Lucide'] em {
   color: var(--ll-star-pale);
 }
-.sc-list {
-  margin: 0 0 8px;
-  padding-left: 1.4em;
-  max-width: 100ch;
-  color: var(--ll-fg-3);
-}
-.sc-list li {
-  margin: 4px 0;
-}
 
-/* ---------- 第 5 步的对比块：面板里的环境，和「归并后」那边要带上的、留在面板里的布局 ----------
-   「现在」那边的规则是 legacy/step5.css 原样抄来的（连环境一起带着）；「归并后」那边用库的类，
-   面板里换完以后还会留着的布局（位置、对齐、外边距、最大宽、层级）在这里写一份，两边才是面板里的真样子。
-   每条前面写的是它在面板里是哪条规则、b 段要在面板里留着什么。 */
-/* 环境（两边的外层都套）：面板里的容器怎么排，会影响里面东西的大小 */
-.sc-env-center {
-  /* .log-top：提示条放在一个居中的 flex 横排里 */
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-}
+/* ---------- 演示用的版面：面板里这些控件所在的环境，和面板里留着的那些布局 ----------
+   控件的外观归库；位置、对齐、外边距、最大宽、层级是用的地方（面板）自己写的版面，演示里照面板的样子写一份，
+   看到的才是放进真页面里的样子。每条前面写的是它对应面板里的哪条规则。 */
+
 .sc-env-col {
   /* .list、.tasks：竖排的 flex 列，空状态在里面上下居中（margin: auto） */
   display: flex;
@@ -1687,11 +1664,6 @@ a:not(.ll-link) {
   width: 300px;
   max-width: 100%;
 }
-.sc-env-grid {
-  /* .desk-empty 所在的桌面网格 */
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
 .sc-env-text {
   /* 气泡里的正文（13.5px、行高 1.6、长串到边就断）：链接放在一段话里 */
   max-width: 420px;
@@ -1699,15 +1671,10 @@ a:not(.ll-link) {
   font-size: var(--ll-bubble-text);
   line-height: var(--ll-bubble-leading);
 }
-.sc-env-wc {
-  /* .w-card 的外层 .w：给一个固定的高 */
-  position: relative;
-  height: 150px;
-}
-/* 归并后留在面板里的布局 */
+/* 面板里留着的版面 */
 .sc-m-ab {
-  /* .arrange-bar：贴顶、居中、最宽、进出场（这里只留静态的居中和最宽）。最宽现在写的是 calc(100% - 32px)，那是内容宽（content-box），
-     加上左右内边距 24 才是整个条的宽；库的提示条是 border-box，要一样得写成 calc(100% - 8px)（b 段在面板里这样写） */
+  /* .arrange-bar：贴顶、居中、最宽、进出场（这里只留静态的居中和最宽）。库的提示条是 border-box，
+     整个条最宽就是 100% 减 8（用 content-box 写的话要减 32，再加上左右内边距 24） */
   margin: 0 auto 8px;
   width: fit-content;
   max-width: calc(100% - 8px);
@@ -1715,11 +1682,6 @@ a:not(.ll-link) {
 .sc-m-ab b {
   color: var(--ll-fg);
   font-weight: 500;
-}
-.sc-env-w320 {
-  /* 窄窗口：320px 宽的容器（窗口再窄时跟着缩） */
-  width: 320px;
-  max-width: 100%;
 }
 .sc-env-leave {
   /* 整理提示条退出时：面板里这时是 position: fixed，百分比的最大宽以窗口为准，不会夹住；这里给够宽 */
@@ -1729,7 +1691,7 @@ a:not(.ll-link) {
   position: relative;
 }
 /* 重放整理提示条退出：条淡出、上滑 14px，时长和曲线照面板的 .arrange-bar（透明度 0.26 秒 ease、位移 0.34 秒 --ll-ease-out），
-   --sc-slow 是慢放的倍数；条在「现在」那边带着旧样式的 is-on 时由 React 去掉它（和面板一样），库的条没有 is-on，这里直接写 */
+   --sc-slow 是慢放的倍数；库的提示条没有 is-on 之类的状态类，淡出的样子由用的地方写（和面板的 .arrange-bar 一样） */
 .sc-ctx .sc-leave-go {
   z-index: 5;
   opacity: 0;
@@ -1750,13 +1712,6 @@ a:not(.ll-link) {
 .sc-ctx .sc-leave-flex {
   /* 面板里的 .arrange-bar 是 display: flex（块级，所以 margin: 0 auto 能居中）；库的提示条是 inline-flex，演示里写成和面板一样才会居中 */
   display: flex;
-}
-.sc-twin {
-  /* 量宽用的、看不见的提示条（不占版面、不挡鼠标） */
-  position: absolute;
-  visibility: hidden;
-  pointer-events: none;
-  white-space: nowrap;
 }
 .sc-env-leave + .sc-env-leave {
   margin-top: 14px;
@@ -1813,21 +1768,6 @@ a:not(.ll-link) {
   flex: 1 1 auto;
   min-width: 0;
 }
-.sc-m-seg-sum {
-  /* .seg-sum：最大宽、内边距、字 */
-  max-width: 560px;
-  padding: 10px 14px;
-  color: var(--ll-fg-2);
-  font-size: 13px;
-}
-.sc-m-seg-sum > b {
-  display: block;
-  color: var(--ll-fg-3);
-  font-weight: 500;
-  font-size: 12px;
-  margin-bottom: 2px;
-  letter-spacing: 0.06em;
-}
 .sc-m-grid {
   /* .today-grid */
   display: grid;
@@ -1878,61 +1818,9 @@ a:not(.ll-link) {
     0 0 36px color-mix(in srgb, var(--ll-accent) 22%, transparent),
     var(--ll-sky-shadow);
 }
-/* 「现在」那边里不能固定在屏幕上或藏起来的：只有这几条是展示页自己改的（摆得下，别的一个字没动），量的时候不量这些属性 */
-.sc-legacy .tray,
-.sc-legacy .tray.is-on,
-.sc-legacy .ghost {
-  position: relative;
-  left: auto;
-  bottom: auto;
-  z-index: auto;
-  width: auto;
-  opacity: 1;
-  visibility: visible;
-  transform: none;
-}
-.sc-legacy .tray,
-.sc-legacy .tray.is-on {
-  transition: none;
-}
 .sc-pill-row {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
   align-items: flex-start;
-}
-/* 玻璃按钮的模糊：右边那一侧临时用新的变量盖一下（库里的按钮第二段才改） */
-.sc-glass16 .ll-btn[data-variant='glass'] {
-  -webkit-backdrop-filter: var(--ll-glass-blur);
-  backdrop-filter: var(--ll-glass-blur);
-}
-
-/* ---------- 「面板上会变的地方」的表 ---------- */
-.sc-table-wrap {
-  overflow-x: auto;
-}
-.sc-table.sc-changes td {
-  white-space: normal;
-  vertical-align: top;
-  line-height: 1.5;
-}
-.sc-table.sc-changes td:nth-child(2) {
-  min-width: 220px;
-}
-.sc-table.sc-changes td:nth-child(3) {
-  min-width: 130px;
-}
-.sc-table.sc-changes td:nth-child(n + 4) {
-  min-width: 170px;
-}
-.sc-changes tr.is-first td {
-  border-top: 1px solid var(--ll-line-hi);
-}
-.sc-changes .sc-part {
-  color: var(--ll-star-pale);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sc-changes .sc-after {
-  color: var(--ll-fg);
 }

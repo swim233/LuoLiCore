@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { Badge, Button, Row, RowButton } from '../../../src/controls';
-import { Compare } from '../../components/Compare';
 import { Stage } from '../../components/Stage';
-import { Group, Matrix, Merged, Now, useStageKind } from './shared';
+import { Group, Matrix, PanelEnv, useStageKind } from './shared';
 
-/* 「列表行」一块（带和面板现在写法的对比）：会话列表的行、任务的行。悬停高亮（glide）在特效那一步，这里的行自己没有悬停的样子 */
+/* 「列表行」一块：会话列表的行、任务的行。悬停高亮（glide）在特效那一步，这里的行自己没有悬停的样子 */
 
 interface Conv {
   id: string;
@@ -38,50 +37,12 @@ const CONVS: Conv[] = [
   },
 ];
 
-/** 现在：会话的行（.conv-item，一层 .li-wrap 包着，放在 .list 里） */
-function LegacyConv({ c, st, sel }: { c: Conv; st: string; sel?: boolean }) {
-  return (
-    <div className="li-wrap">
-      <button
-        type="button"
-        className={`conv-item ${st === 'focus' ? 'sc-focus' : ''}`}
-        aria-current={sel ?? false}
-        data-item="conv"
-        data-state={st}
-      >
-        <span className="conv-ico" data-p={c.p} aria-hidden="true">
-          {c.ico}
-        </span>
-        <span className="conv-main">
-          <span className="conv-title" data-item="conv-title" data-state={st}>
-            {c.title}
-          </span>
-          <span
-            className={`conv-last ${c.event ? 'is-event' : ''}`}
-            data-item="conv-last"
-            data-state={st}
-          >
-            {c.last}
-          </span>
-        </span>
-        <span className="conv-side">
-          <span className="conv-time" data-item="conv-time" data-state={st}>
-            {c.time}
-          </span>
-          <Badge>{c.n ? String(c.n) : ''}</Badge>
-        </span>
-      </button>
-    </div>
-  );
-}
-function MergedConv({ c, st, sel, big }: { c: Conv; st: string; sel?: boolean; big?: boolean }) {
+function MergedConv({ c, st, sel }: { c: Conv; st: string; sel?: boolean }) {
   return (
     <div className="sc-m-liwrap">
       <RowButton
-        className={`sc-m-conv ${st === 'focus' ? 'sc-focus' : ''} ${big ? 'sc-m-big' : ''}`}
+        className={`sc-m-conv ${st === 'focus' ? 'sc-focus' : ''}`}
         selected={sel ?? false}
-        data-item={big ? 'conv-15' : 'conv'}
-        data-state={st}
         lead={
           <span className="conv-ico" data-p={c.p} aria-hidden="true">
             {c.ico}
@@ -116,84 +77,13 @@ const TASKS = [
   },
   { id: 't2', action: '提醒交周报', meta: '周五 18:00 · 小红 让建的', next: '周五 18:00' },
 ];
-function LegacyTask({ st, ended, ask }: { st: string; ended?: boolean; ask?: boolean }) {
-  const t = TASKS[st === 'long' ? 0 : 1];
-  return (
-    <div className="task-wrap">
-      <div
-        className={`task-row ${ended ? 'is-ended' : 'is-live'}`}
-        data-item="task"
-        data-state={st}
-      >
-        <div className="task-main" data-item="task-main" data-state={st}>
-          <div className="task-action" data-item="task-action" data-state={st}>
-            {t.action}
-          </div>
-          <div className="task-meta" data-item="task-meta" data-state={st}>
-            {t.meta}
-          </div>
-        </div>
-        <div className="task-side" data-item="task-side" data-state={st}>
-          {ended ? (
-            <>
-              <span className="task-state" data-item="task-state" data-state={st}>
-                已完成
-              </span>
-              <span className="task-at" data-item="task-at" data-state={st}>
-                昨天 08:00
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="task-next" data-item="task-next" data-state={st}>
-                {t.next}
-              </span>
-              {!ask && (
-                <Button size="sm" className="task-cancel">
-                  取消
-                </Button>
-              )}
-            </>
-          )}
-        </div>
-        {ask && (
-          <div
-            className="task-ask"
-            role="group"
-            aria-label="取消这个任务？"
-            data-item="task-ask"
-            data-state={st}
-          >
-            <span>取消这个任务？</span>
-            <Button size="sm" variant="danger" data-armed>
-              确认
-            </Button>
-            <Button size="sm">算了</Button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-function MergedTask({
-  st,
-  ended,
-  ask,
-  big,
-}: {
-  st: string;
-  ended?: boolean;
-  ask?: boolean;
-  big?: boolean;
-}) {
+function MergedTask({ st, ended, ask }: { st: string; ended?: boolean; ask?: boolean }) {
   const t = TASKS[st === 'long' ? 0 : 1];
   return (
     <div className="sc-m-liwrap">
       <Row
         wrap
-        className={`sc-m-task ${ended ? 'is-ended' : ''} ${big ? 'sc-m-big' : ''}`}
-        data-item={big ? 'task-15' : 'task'}
-        data-state={st}
+        className={`sc-m-task ${ended ? 'is-ended' : ''}`}
         title={t.action}
         sub={t.meta}
         side={
@@ -250,8 +140,7 @@ export function RowBlock() {
         能折行（顶对齐、行高 1.55，任务的行）。 选中（<code>aria-current="true"</code>
         ）：左边一道强调色的光条加向右淡出的底，标题变白。 根可以是 button（<code>RowButton</code>
         ，整行能点、手型）也可以是 div（<code>Row</code>，行里另有按钮）。
-        键盘焦点环画在行里面。字号：标题 13（现在 14）、次要文字 12（12.5）、右边的小字
-        11（11.5）；头、主区、右列之间隔 12。
+        键盘焦点环画在行里面。字号：标题 13、次要文字 12、右边的小字 11；头、主区、右列之间隔 12。
         <b>
           {' '}
           悬停高亮（跟着鼠标滑的那块）在「特效」那一步
@@ -374,73 +263,32 @@ export function RowBlock() {
           </div>
         )}
       />
-      <h4 className="sc-h4">和面板现在的对比</h4>
-      <Compare
-        id="row-conv"
-        title="列表行：会话的行（.conv-item），平常、有新消息、选中、键盘焦点、标题很长"
-        note="换成库的 RowButton：标题 14 → 13、预览 12.5 → 12、右边的时间 11.5 → 11，头、主区、右列之间隔 11 → 12，所以主区矮 2.33px（标题行高少 1.55、预览少 0.78）；行高由比主区还高的右列（时间加徽标）定，所以每行矮 2.01px，下面各行依次上移；标题、预览右移 1px；左边的圆形图标、未读数用现在的（面板自己的内容，留在面板）。右边「标题 15」那一组是另一种选择（建议 13，因为 14 不在刻度里、取最近的一档，一样近取小；15 也在刻度里，字更大一档）。选中的样子（光条、淡出的底、标题变白）、焦点环画在行里面都不变。悬停高亮在特效那一步。"
-        now={
-          <Now>
-            <div className="sc-env-list">
-              <div className="list">
-                {CONV_STATES.map(([st, c, sel]) => (
-                  <LegacyConv key={st} c={c} st={st} sel={sel} />
-                ))}
-              </div>
+      <h4 className="sc-h4">
+        列表行：会话的行（.conv-item），平常、有新消息、选中、键盘焦点、标题很长
+      </h4>
+      <Stage kind={kind}>
+        <PanelEnv>
+          <div className="sc-env-list">
+            <div className="sc-m-list">
+              {CONV_STATES.map(([st, c, sel]) => (
+                <MergedConv key={st} c={c} st={st} sel={sel} />
+              ))}
             </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-list">
-              <div className="sc-m-list">
-                {CONV_STATES.map(([st, c, sel]) => (
-                  <MergedConv key={st} c={c} st={st} sel={sel} />
-                ))}
-              </div>
-              <p className="sc-stage-tag sc-m-bigtag">
-                标题 15px 的版本（只看标题的大小，别的和上面一样）
-              </p>
-              <div className="sc-m-list">
-                {CONV_STATES.slice(0, 3).map(([st, c, sel]) => (
-                  <MergedConv key={st} c={c} st={st} sel={sel} big />
-                ))}
-              </div>
+          </div>
+        </PanelEnv>
+      </Stage>
+      <h4 className="sc-h4">列表行：任务的行（.task-row），进行中、标题很长、已结束、取消确认</h4>
+      <Stage kind={kind}>
+        <PanelEnv>
+          <div className="sc-env-list">
+            <div className="sc-m-list">
+              {TASK_STATES.map(([st, ended, ask]) => (
+                <MergedTask key={st} st={st} ended={ended} ask={ask} />
+              ))}
             </div>
-          </Merged>
-        }
-      />
-      <Compare
-        id="row-task"
-        title="列表行：任务的行（.task-row），进行中、标题很长、已结束、取消确认"
-        note="换成库的 Row（wrap）：同样每行矮一点（标题 14 → 13、次要文字 12.5 → 12）；「下次到点」12.5 → 12、「已结束」的时间 11.5 → 11、确认那一行 12.5 → 12（面板自己的小字，b 段换成刻度变量）。已结束的行变淡（opacity .6）、悬停才出现的「取消」、确认和出错的两行都是面板的，留在面板。行的圆角在浮层里是 9（面板的覆盖，留着）。"
-        now={
-          <Now>
-            <div className="sc-env-list">
-              <div className="tasks">
-                {TASK_STATES.map(([st, ended, ask]) => (
-                  <LegacyTask key={st} st={st} ended={ended} ask={ask} />
-                ))}
-              </div>
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-list">
-              <div className="sc-m-list">
-                {TASK_STATES.map(([st, ended, ask]) => (
-                  <MergedTask key={st} st={st} ended={ended} ask={ask} />
-                ))}
-              </div>
-              <p className="sc-stage-tag sc-m-bigtag">标题 15px 的版本</p>
-              <div className="sc-m-list">
-                <MergedTask st="live" big />
-              </div>
-            </div>
-          </Merged>
-        }
-      />
+          </div>
+        </PanelEnv>
+      </Stage>
     </Group>
   );
 }

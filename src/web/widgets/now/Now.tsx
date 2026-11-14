@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Badge, ToolName } from '../../components/Badge';
 import { Pane } from '../../components/Pane';
 import { IconNow } from '../../components/icons';
-import { Button, Dot } from '@luoli/ui/controls';
+import { Button, Dot, Empty, Tab, TabList, Tabs } from '@luoli/ui/controls';
 import { env } from '@luoli/ui/env';
 import { pulse } from '../../lib/fx-dom';
 import { lastReplyText, recentReply, relTime } from '../../lib/util';
@@ -67,16 +67,15 @@ function useNowTop() {
   }, []);
 }
 
-function Empty() {
+function NowEmpty() {
   const name = useAssistantName();
   return (
     <div className="now-empty pane-sc">
-      <div>
-        <div className="now-empty-t">{status.online ? '现在很安静' : `${name}离线了`}</div>
+      <Empty flat title={status.online ? '现在很安静' : `${name}离线了`}>
         {status.online
           ? `有人叫${name}时，这里会实时显示那个会话的对话`
           : '连上 Telegram 后，这里会实时显示进行中的对话'}
-      </div>
+      </Empty>
     </div>
   );
 }
@@ -129,7 +128,7 @@ function NowView({ mode, handle }: ViewProps) {
   let host: React.ReactNode;
   if (!full) {
     const s = sessionFor(curId);
-    host = <Pane>{s ? <Terminal key={sessKey(s)} session={s} /> : <Empty />}</Pane>;
+    host = <Pane>{s ? <Terminal key={sessKey(s)} session={s} /> : <NowEmpty />}</Pane>;
   } else {
     let cols: Session[] = list.slice(-3);
     if (!cols.length && last) cols = [last];
@@ -137,7 +136,7 @@ function NowView({ mode, handle }: ViewProps) {
       <div className="now-cols" style={{ '--n': Math.max(1, cols.length) }}>
         {!cols.length && (
           <Pane className="now-col">
-            <Empty />
+            <NowEmpty />
           </Pane>
         )}
         {cols.map((s) => {
@@ -187,24 +186,19 @@ function NowView({ mode, handle }: ViewProps) {
           <div className="now-where">{where}</div>
         </div>
         {!full && list.length >= 2 && (
-          <div className="now-tabs" role="tablist" aria-label="进行中的对话">
-            {list.map((ss) => {
-              const st = status.conv.get(ss.convId);
-              return (
-                <button
-                  key={ss.convId}
-                  className="now-tab"
-                  role="tab"
-                  type="button"
-                  aria-selected={ss.convId === curId}
-                  onClick={() => setSel(ss.convId)}
-                >
-                  <Dot tone={STATE_TONE[st ? st.state : 'idle']} />
-                  {ss.title}
-                </button>
-              );
-            })}
-          </div>
+          <Tabs value={curId} onValueChange={(v) => setSel(String(v))}>
+            <TabList className="now-tabs" aria-label="进行中的对话" activateOnFocus>
+              {list.map((ss) => {
+                const st = status.conv.get(ss.convId);
+                return (
+                  <Tab key={ss.convId} value={ss.convId}>
+                    <Dot tone={STATE_TONE[st ? st.state : 'idle']} />
+                    {ss.title}
+                  </Tab>
+                );
+              })}
+            </TabList>
+          </Tabs>
         )}
       </div>
       {host}

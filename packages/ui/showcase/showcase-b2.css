@@ -1,6 +1,6 @@
-/* 展示页「基础控件」一节第二批（折叠、标签页、列表行、几样小件）的版面：
-   两边的对比块都要套的「环境」（面板里的容器怎么排，会影响里面东西的大小），和「归并后」那边换完以后还留在面板里的布局（.sc-m-…）。
-   每条前面写的是它在面板里是哪条规则、b 段要在面板里留着什么。不在层里，所以能盖过库的样式（和面板的做法一样）。 */
+/* 展示页「基础控件」一节里折叠、标签页、列表行、几样小件的版面：
+   演示套的「环境」（面板里的容器怎么排，会影响里面东西的大小），和面板里留在库的控件外面的布局（.sc-m-…）。
+   每条前面写的是它在面板里是哪条规则。不在层里，所以能盖过库的样式（和面板的做法一样）。 */
 
 /* 面板里 shell 的 .w-icon、对话的 .msg-meta：两边都用的上下文 */
 .sc-ctx .w-icon {
@@ -43,18 +43,8 @@
   font-size: var(--ll-text-sm);
   color: var(--ll-fg-3);
 }
-/* 对比块的外壳（展示页自己的版面，不是面板的东西）两边都是 border-box：
-   「现在」那边的旧样式里有一条「面板没有全局 box-sizing」的重置（legacy/step5.css），不能把这些外壳也改成 content-box（会让它们宽出内边距那么多） */
-.sc-ctx
-  :is(
-    .sc-env-bar,
-    .sc-env-ended,
-    .sc-env-ended-live,
-    .sc-env-list,
-    .sc-env-setnav,
-    .sc-env-setnav-narrow,
-    .sc-env-whead
-  ) {
+/* 演示的外壳（展示页自己的版面，不是面板的东西）都是 border-box */
+.sc-ctx :is(.sc-env-bar, .sc-env-ended, .sc-env-ended-live, .sc-env-list, .sc-env-whead) {
   box-sizing: border-box;
 }
 .sc-env-ended,
@@ -81,7 +71,7 @@
   white-space: normal;
 }
 .sc-m-think-head {
-  /* .fold.is-think summary：旧的药丸就是 summary，键盘焦点环跟着它的全圆角；归并后焦点环画在头上，头也写全圆角，环还是圆的 */
+  /* .fold.is-think 的头：焦点环画在头上，头也写全圆角，环才是圆的 */
   border-radius: var(--ll-radius-full);
 }
 .sc-m-tag-gap {
@@ -187,29 +177,9 @@
   border-radius: var(--ll-radius-md);
   background: var(--ll-side-bg);
 }
-.sc-env-setnav {
-  /* 设置全屏左边那一栏（宽 220，暗一档的底） */
-  width: 220px;
-  max-width: 100%;
-  background: var(--ll-side-bg);
-}
 .sc-m-setnav {
   /* .set-nav：左右留 10 */
   padding-inline: 10px;
-}
-.sc-env-setnav-narrow {
-  /* 窄屏：这一栏是窗口标题下面横着的一条，只横向滚 */
-  width: 320px;
-}
-.sc-env-setnav-narrow .set-nav,
-.sc-env-setnav-narrow .sc-m-setnav {
-  flex-direction: row;
-  align-items: center;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.sc-env-setnav-narrow .set-nav button {
-  white-space: nowrap;
 }
 
 /* ---------- 列表行 ---------- */
@@ -253,13 +223,6 @@
   /* .conv-last.is-event：事件的预览更暗一档 */
   color: var(--ll-fg-dim);
 }
-.sc-m-big .ll-row-title {
-  /* 标题 15 的版本（给用户挑） */
-  font-size: var(--ll-text-lg);
-}
-.sc-m-bigtag {
-  margin: 12px 0 4px;
-}
 .sc-m-task {
   /* .task-row：行与行之间 1px */
   margin-bottom: 1px;
@@ -268,7 +231,7 @@
   opacity: 0.6;
 }
 .sc-m-next {
-  /* .task-next：字号 12.5 → 12（刻度的一档，b 段换成变量） */
+  /* .task-next：字号用刻度的一档 */
   font-size: var(--ll-text-sm);
   font-weight: 600;
   color: var(--ll-accent);
@@ -323,14 +286,6 @@
   margin-left: auto;
   flex: none;
   white-space: nowrap;
-}
-/* 归并要在库的 button.css 里加的一条（b 段改库的按钮时加，现在不改库，所以这里用展示页自己的规则演示，b 段加进库以后整条删）：
-   soft 的按钮（不写样子、或 data-variant='soft'）aria-expanded='true' 时，底和字色和悬停一样亮着（ghost 本来就有这个样子）。
-   只管「归并后」这一边（.sc-ctx 但不是 .sc-legacy）：「现在」那一边的库按钮用库现在的样子，对比块里两边的差别就是这条带来的。 */
-.sc-ctx:not(.sc-legacy)
-  .ll-btn:where(:not([data-variant]), [data-variant='soft'])[aria-expanded='true'] {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
 }
 .sc-env-seg {
   /* .seg-line：时间线里分段的那一行（flex 横排，间隔 12，字 12 暗色），这里只留字和按钮 */

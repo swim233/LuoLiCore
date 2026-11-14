@@ -1,4 +1,4 @@
-import type { HTMLAttributes } from 'react';
+import type { HTMLAttributes, Ref } from 'react';
 import { cx } from './cx';
 
 export interface NoticeProps extends HTMLAttributes<HTMLSpanElement> {
@@ -6,6 +6,7 @@ export interface NoticeProps extends HTMLAttributes<HTMLSpanElement> {
   tone?: 'danger';
   /** sm（默认，小提示）或 lg（整理模式那样的提示条） */
   size?: 'sm' | 'lg';
+  ref?: Ref<HTMLSpanElement>;
 }
 
 /* 提示条：玻璃的小药丸，一句话，后面可以放一个按钮（<Button size="xs">重试</Button>）。

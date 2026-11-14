@@ -8,7 +8,7 @@ import { Pane } from '../../components/Pane';
 import { useGlide } from '../../components/glide';
 import type { LogItem, ScrollState } from '../../components/VirtualLog';
 import { IconChat } from '../../components/icons';
-import { Button, IconButton, Spinner } from '@luoli/ui/controls';
+import { Button, Chevron, Empty, IconButton, Notice, Spinner } from '@luoli/ui/controls';
 import { IconChevronLeft } from '@luoli/ui/icons';
 import { useStore } from '@luoli/ui/store';
 import { fmtDay, fmtShort } from '../../lib/util';
@@ -198,20 +198,14 @@ function SegLine({ convId }: { convId: string }) {
 
 const note = (title: string, text?: string, action?: React.ReactNode) => (
   <div className="tline pane-sc" role="log" aria-live="polite" aria-label="对话">
-    <div className="empty">
-      <b>{title}</b>
+    <Empty title={title} action={action}>
       {text}
-      {action}
-    </div>
+    </Empty>
   </div>
 );
 const emptyItem = (): LogItem => ({
   key: 'empty',
-  node: (
-    <div className="empty">
-      <b>还没有消息</b>在下面说点什么吧
-    </div>
-  ),
+  node: <Empty title="还没有消息">在下面说点什么吧</Empty>,
 });
 
 /* 这个会话里发出了消息、点了重试：时间线要滚到最底下（窗口里的和全屏里的两份都收到）。返回的数交给 VirtualLog 的 jumpKey */
@@ -404,16 +398,20 @@ function ChatLog({ convId }: { convId: string }) {
   });
   const topNotice =
     phase === 'down' ? (
-      <span className="log-pill is-err">连不上洛璃服务，连上后会自动恢复</span>
+      <Notice tone="danger" className="log-pill">
+        连不上洛璃服务，连上后会自动恢复
+      </Notice>
     ) : info.older === 'loading' ? (
-      <span className="log-pill">加载更早的消息…</span>
+      <Notice role="status" className="log-pill">
+        加载更早的消息…
+      </Notice>
     ) : info.older === 'error' ? (
-      <span className="log-pill is-err">
+      <Notice tone="danger" className="log-pill">
         更早的消息没取到
         <Button size="xs" onClick={() => getSource().loadOlder(convId, true)}>
           重试
         </Button>
-      </span>
+      </Notice>
     ) : null;
   return (
     <VirtualLog
@@ -671,27 +669,26 @@ function ChatView({ mode }: ViewProps) {
         className="chat"
         top={
           <div className="chat-bar" ref={barRef}>
-            <button
+            <Button
               className="chat-pick"
               ref={pickRef}
-              type="button"
               aria-haspopup="true"
               aria-expanded={menu}
               title="切换对话"
               onClick={() => setMenu(!menu)}
             >
-              <span>{title}</span>
-            </button>
-            <button
+              <span className="chat-pick-label">{title}</span>
+              <Chevron dir="down" />
+            </Button>
+            <Button
               className="chat-new"
-              type="button"
               onClick={() => {
                 newWebConv();
                 setTimeout(() => document.getElementById('chat-input')?.focus());
               }}
             >
               ＋ 新对话
-            </button>
+            </Button>
             {menu && <ChatMenu convs={convs} cur={cur} close={() => setMenu(false)} />}
           </div>
         }
@@ -711,9 +708,8 @@ function ChatView({ mode }: ViewProps) {
               <span>网页对话</span>
               <span>{convs.length} 个</span>
             </div>
-            <button
+            <Button
               className="chat-new is-side"
-              type="button"
               onClick={() => {
                 newWebConv();
                 setDetail(true);
@@ -721,7 +717,7 @@ function ChatView({ mode }: ViewProps) {
               }}
             >
               ＋ 新对话
-            </button>
+            </Button>
           </>
         }
       >

@@ -212,27 +212,17 @@ body::before {
   flex: none;
 }
 
-/* ---------- 整理模式提示条 ---------- */
+/* ---------- 整理模式提示条（样子是库的 .ll-notice，lg） ---------- */
 .arrange-bar {
   position: sticky;
   top: calc(env(safe-area-inset-top, 0px) + var(--top-h));
   z-index: 45;
   margin: 0 auto 8px;
   width: fit-content;
-  max-width: calc(100% - 32px);
+  /* 库的提示条是 border-box：整条的最宽是 100% 减 8（原来内容宽 100% - 32 加两边的内边距 24） */
+  max-width: calc(100% - 8px);
+  /* 库的提示条是 inline-flex，margin: 0 auto 对它不居中：这里要 flex */
   display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: center;
-  padding: 8px 8px 8px 16px;
-  border-radius: 999px;
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--ll-glass-edge);
-  color: var(--ll-fg-2);
-  font-size: 13px;
   /* 进出整理模式：从顶栏下面滑下来、滑回去（退出时先脱离文档流，固定在原处淡出） */
   opacity: 0;
   transform: translateY(-14px);
@@ -305,8 +295,6 @@ body::before {
 }
 .desk-empty {
   grid-column: 1 / -1;
-  color: var(--ll-fg-3);
-  text-align: center;
   padding: 48px 0;
 }
 
@@ -343,12 +331,7 @@ body::before {
   position: relative;
   height: 100%;
   box-sizing: border-box;
-  border-radius: var(--ll-radius-window);
   border: 0;
-  background: var(--ll-sky-bg);
-  box-shadow: var(--ll-sky-shadow);
-  overflow: hidden;
-  isolation: isolate;
   transition:
     box-shadow var(--ll-dur-card),
     transform 0.18s ease-out;
@@ -365,16 +348,9 @@ body::before {
     0 30px 70px -18px rgba(0, 0, 0, 0.85),
     0 0 34px color-mix(in srgb, var(--ll-accent) 16%, transparent);
 }
-/* 四周的细线和向内压暗的暗边：画在窗格的模糊上面，不跟着被糊开。「此刻」浮起时细线换成金色 */
+/* 四周的细线和向内压暗的暗边（库的 .ll-sky-vig 画）：画在窗格的模糊上面，不跟着被糊开，这里只定它在第几层。「此刻」浮起时细线换成金色 */
 .w-vig {
-  position: absolute;
-  inset: 0;
   z-index: 3;
-  border-radius: inherit;
-  pointer-events: none;
-  box-shadow:
-    inset 0 0 0 1px var(--ll-sky-line),
-    var(--ll-sky-vignette);
 }
 .w.is-float .w-vig,
 .w.is-island .w-vig {
@@ -425,16 +401,6 @@ body::before {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-}
-.w-new {
-  font-size: 11px;
-  line-height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: var(--ll-accent);
-  color: var(--ll-on-accent);
-  font-weight: 600;
-  letter-spacing: 0.1em;
 }
 .w-btns {
   margin-left: auto;
@@ -674,16 +640,9 @@ body::before {
   max-width: 100%;
   box-sizing: border-box;
   padding: 0 18px 0 7px;
-  border-radius: 999px;
   border: 0;
-  background: var(--ll-sky-bg);
-  box-shadow:
-    inset 0 0 0 1px var(--ll-sky-line-cap),
-    var(--ll-sky-shadow);
   cursor: pointer;
   text-align: left;
-  overflow: hidden;
-  isolation: isolate;
   transition: box-shadow var(--ll-dur-hover);
 }
 .cap:hover {
@@ -879,13 +838,10 @@ body::before {
 .ghost {
   position: fixed;
   box-sizing: border-box;
-  border-radius: var(--ll-radius-window);
-  background: var(--ll-sky-bg);
   box-shadow:
     inset 0 0 0 1px var(--ll-sky-line),
     0 0 36px color-mix(in srgb, var(--ll-accent) 22%, transparent),
     var(--ll-sky-shadow);
-  overflow: hidden;
 }
 .ghost::after {
   content: '';
@@ -1096,12 +1052,7 @@ body::before {
   width: min(720px, calc(100% - 32px));
   box-sizing: border-box;
   padding: 10px 14px;
-  border-radius: 18px;
   border: 0;
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--ll-glass-edge);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1152,19 +1103,11 @@ body::before {
   font-size: 12px;
   color: var(--ll-fg-3);
 }
+/* 收纳盒里的一个部件是库的 Button（lg）：这里只留左右内边距（左边给图标）和拖动的手型 */
 .tray-item {
-  height: 32px;
   padding: 0 12px 0 6px;
-  border-radius: 999px;
   cursor: grab;
   touch-action: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  font-size: 13px;
 }
 .tray-item .cap-icon {
   width: 22px;
@@ -1318,34 +1261,14 @@ body::before {
 .fs-switch::-webkit-scrollbar {
   display: none;
 }
+/* 切换栏里的一项只换样子，用库的 .ll-tab（md）：平常、悬停、选中（aria-current）的底和字色都是库的 */
 .fs-tab {
-  height: 34px;
-  padding: 0 14px 0 10px;
-  border-radius: 999px;
-  cursor: pointer;
   flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  font-size: 13px;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
 }
+/* 图标 14：.w-icon svg（15）写在层外，盖过库层里的 .ll-tab svg，这里要自己写 */
 .fs-tab svg {
   width: 14px;
   height: 14px;
-}
-.fs-tab:hover {
-  color: var(--ll-fg);
-  background: var(--ll-ctl-bg-hover);
-}
-.fs-tab[aria-current='true'] {
-  color: var(--ll-fg);
-  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
 }
 .fs-stage {
   position: relative;
@@ -1744,40 +1667,14 @@ body::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 会话标签（库的 Tabs，药丸）：只留换行 */
 .now-tabs {
-  display: flex;
-  gap: 6px;
   flex-wrap: wrap;
-}
-.now-tab {
-  height: 26px;
-  padding: 0 11px;
-  border-radius: 999px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-}
-.now-tab[aria-selected='true'] {
-  color: var(--ll-fg);
-  background: color-mix(in srgb, var(--ll-accent) 22%, var(--ll-ctl-bg));
 }
 .now-empty {
   display: grid;
   place-items: center;
-  text-align: center;
-  color: var(--ll-fg-3);
-  font-size: 13px;
   padding-inline: 16px;
-}
-.now-empty-t {
-  color: var(--ll-fg-2);
-  font-size: 14px;
-  margin-bottom: 4px;
 }
 .now-cols {
   position: relative;
@@ -1861,7 +1758,7 @@ body::before {
   overflow-wrap: anywhere;
   word-break: normal;
 }
-/* 往上翻着、下面来了新内容时，窗格的下浮层里浮出来的「回到最新」：玻璃小药丸（同 .log-pill），在内容和底部渐进模糊的上面 */
+/* 往上翻着、下面来了新内容时，窗格的下浮层里浮出来的「回到最新」：玻璃小药丸（样子和库的提示条 .ll-notice 一样），在内容和底部渐进模糊的上面 */
 .term-jump-wrap {
   position: absolute;
   left: 0;
@@ -2013,8 +1910,7 @@ body::before {
   border-radius: 3px;
 }
 /* 文字按钮里的小箭头：和字之间的空隙是版面的事（库的 Chevron 自己不带 margin） */
-.tl-think .ll-chev,
-.task-more .ll-chev {
+.tl-think .ll-chev {
   margin: 0 0.2em 0 0.5em;
 }
 .tl-think-text {
@@ -2025,13 +1921,7 @@ body::before {
   color: var(--ll-fg-dim);
   font-style: normal;
 }
-/* 正文高亮：网址、数字用淡的强调色；@ 某人是强调色的底；提到洛璃（名字、唤醒词、@bot）是金色 */
-.hl-url {
-  color: var(--ll-accent);
-  text-decoration: underline dashed;
-  text-underline-offset: 3px;
-  text-decoration-thickness: 1px;
-}
+/* 正文高亮：网址（库的 .ll-link，auto）、数字用淡的强调色；@ 某人是强调色的底；提到洛璃（名字、唤醒词、@bot）是金色 */
 .hl-num {
   color: color-mix(in srgb, var(--ll-accent) 60%, var(--ll-fg));
 }
@@ -2150,39 +2040,14 @@ body::before {
   flex: none;
   overflow: hidden;
 }
+/* 会话的一行是库的 RowButton：这里只留行与行的间隔 */
 .conv-item {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
-  gap: 11px;
-  align-items: center;
-  padding: 9px 10px;
   margin-bottom: 1px;
-  border-radius: 12px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  color: var(--ll-fg);
 }
-/* 键盘焦点环画在行里面（行外面一圈会被 .li-wrap 的 overflow: hidden 裁掉）；悬停高亮不替代它 */
+/* 键盘焦点环画在行里面（行外面一圈会被 .li-wrap 的 overflow: hidden 裁掉）；悬停高亮不替代它。
+   面板的全局焦点环写在层外，会盖过库层里 .ll-row:focus-visible 的偏移，所以这里要自己留一条 */
 .conv-item:focus-visible {
   outline-offset: -2px;
-}
-/* 选中的那行（全屏里正打开的会话）：左边一道强调色的光条，往右淡掉，标题变白；和悬停的那块叠在一起时都看得清 */
-.conv-item[aria-current='true'] {
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--ll-accent) 20%, transparent),
-    transparent 75%
-  );
-  box-shadow: inset 3px 0 0 var(--ll-accent);
-  border-radius: 4px 12px 12px 4px;
-}
-.conv-item[aria-current='true'] .conv-title {
-  color: var(--ll-white);
 }
 .conv-ico {
   width: 34px;
@@ -2199,40 +2064,9 @@ body::before {
 .conv-ico[data-p='cli'] {
   font-family: var(--ll-font-mono);
 }
-.conv-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.conv-title {
-  color: var(--ll-fg);
-  font-weight: 600;
-  font-size: 14px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.conv-last {
-  color: var(--ll-fg-3);
-  font-size: 12.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.conv-last.is-event {
+/* 事件那一行的预览（任务到点、超时）：暗一档 */
+.ll-row-sub .is-event {
   color: var(--ll-fg-dim);
-}
-.conv-side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-}
-.conv-time {
-  font-size: 11.5px;
-  color: var(--ll-fg-dim);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 /* 有新用户消息进来的行，整行亮一下（1.4 秒，强调色的底和外圈淡出） */
 @keyframes lit {
@@ -2325,24 +2159,7 @@ body::before {
 .arranging .glide {
   opacity: 0 !important;
 }
-.empty {
-  margin: auto;
-  padding: 24px 16px;
-  text-align: center;
-  color: var(--ll-fg-3);
-  font-size: 13px;
-}
-.empty.is-flat {
-  margin: 0;
-  padding: 0;
-}
-.empty b {
-  display: block;
-  color: var(--ll-fg-2);
-  font-weight: 500;
-  margin-bottom: 4px;
-}
-.list > .empty {
+.list > .ll-empty {
   margin-block: auto;
 }
 
@@ -2469,15 +2286,6 @@ body::before {
 }
 .msg-meta time {
   font-variant-numeric: tabular-nums;
-}
-/* 排队中：生成中又发的消息，洛璃正在回复上一条，这条还没被她看到 */
-.msg-meta .queued {
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  font-size: 11px;
-  line-height: 16px;
 }
 /* 气泡：毛玻璃，没有边，圆角 16，靠近说话人的那个下角收尖（5）；群友在左，自己和洛璃在右。
    毛玻璃是「气泡后面的星空被糊开」，有两种做法（lib/glass.ts：正式页面里用实时模糊，预先糊好只在下面说的一处用到，
@@ -2655,40 +2463,19 @@ body::before {
   color: var(--ll-danger);
 }
 /* 思考、工具调用：折叠。思考是一颗强调色的小胶囊（「思考了 3 秒」），工具是一行等宽字（「◇ fetch · 网址 ✓ 0.6s」） */
+/* （折叠的展开收起、头、小箭头是库的 Fold：展开收起时气泡外框每帧跟着内容变，时间线贴着底部时 VirtualLog 每帧跟到底） */
 .fold {
   margin: 0 0 5px;
   font-size: 11.5px;
   color: var(--ll-fg-3);
   white-space: normal;
-  interpolate-size: allow-keywords;
 }
-/* 展开、收起：折叠的内容自己缓缓撑开、收起（高度从 0 到 auto 的过渡，约 0.2 秒），它下面的字、气泡、下面的消息每帧跟着挪。
-   不在折叠里做补间：气泡的外框平时就是内容的大小，会跟着变；时间线贴着底部时 VirtualLog 每帧跟到底。
-   display: flow-root：里面 .fold-body 的上外边距不会漏到外面。关掉动画时（.still）直接到位 */
-.fold::details-content {
-  display: flow-root;
-  height: 0;
-  overflow: clip;
-  transition:
-    height 0.2s var(--ll-ease-out),
-    content-visibility 0.2s allow-discrete;
-}
-.fold[open]::details-content {
-  height: auto;
-}
-.fold summary {
-  cursor: pointer;
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-}
-.fold.is-think summary {
-  color: var(--ll-fg-3);
-  padding: 0 9px;
+/* 思考的头是一颗标签（库的 Tag）：键盘焦点环跟着药丸的全圆角，里面字和箭头隔 6 */
+.fold.is-think > summary {
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ll-accent) 14%, transparent);
+}
+.fold.is-think .ll-tag {
+  gap: 6px;
 }
 .fold-tag {
   font-style: italic;
@@ -2701,30 +2488,9 @@ body::before {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.fold summary::-webkit-details-marker {
-  display: none;
-}
-.fold summary::after {
-  content: '';
-  flex: none;
-  width: 0.38em;
-  height: 0.38em;
-  margin-left: 0.1em;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  opacity: 0.7;
-  transition: transform 0.2s;
-}
-.fold[open] summary::after {
-  transform: translateY(-0.1em) rotate(45deg);
-}
 .fold-body {
   margin-top: 6px;
   padding: 8px 10px;
-  border-radius: 10px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
   color: var(--ll-fg-2);
   font-size: 12.5px;
 }
@@ -2946,38 +2712,6 @@ body::before {
   border: 0;
   background: color-mix(in srgb, var(--ll-fg) 14%, transparent);
 }
-/* 链接：强调色加细下划线；自动认出的网址（.hl-url）还是原来的虚线 */
-.md-a,
-a.hl-url {
-  cursor: pointer;
-}
-.md-a {
-  color: var(--ll-accent);
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
-  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
-  overflow-wrap: anywhere;
-}
-/* 逐字时还没写完的链接（只有方括号里的字，网址还没到）：链接色，不能点 */
-.md-a.is-pending {
-  cursor: inherit;
-}
-.md-a.is-pending:hover {
-  color: var(--ll-accent);
-  text-decoration-color: color-mix(in srgb, var(--ll-accent) 55%, transparent);
-}
-.md-a:hover,
-a.hl-url:hover {
-  color: color-mix(in srgb, var(--ll-accent) 70%, var(--ll-white));
-  text-decoration-color: currentColor;
-}
-.md-a:focus-visible,
-a.hl-url:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: 1px;
-  border-radius: 3px;
-}
 /* 「此刻」里的洛璃：等宽字、行距 1.6，排版跟着收紧 */
 .tl-body .md-p {
   margin-bottom: 0.2em;
@@ -3112,26 +2846,9 @@ a.hl-url:focus-visible {
   align-items: flex-start;
   pointer-events: none;
 }
+/* 时间线、对话顶上的小提示（样子是库的 .ll-notice）：外层 .pane-ov 不收鼠标事件，这里要收，「重试」才点得到 */
 .log-pill {
-  padding: 3px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: var(--ll-fg-2);
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  box-shadow: var(--ll-glass-edge);
   pointer-events: auto;
-}
-.log-pill.is-err {
-  color: var(--ll-danger);
-}
-/* 提示条、提示块里的「重试」（库的 Button）：只留位置 */
-.log-pill .ll-btn {
-  margin-left: 8px;
-}
-.empty .ll-btn {
-  margin: 8px 0 0;
 }
 /* 段的分隔线（会话开始、空闲后新的一段、压缩）和摘要 */
 .seg {
@@ -3174,9 +2891,6 @@ a.hl-url:focus-visible {
 .seg-sum {
   max-width: 560px;
   padding: 10px 14px;
-  border-radius: 12px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
   color: var(--ll-fg-2);
   font-size: 13px;
 }
@@ -3232,63 +2946,20 @@ a.hl-url:focus-visible {
   min-width: 0;
   position: relative;
 }
+/* 选会话的按钮、「＋ 新对话」是库的 Button（md）：这里只留版面（选会话的标题太长时省略，「新对话」靠右）。
+   选会话的菜单开着时按钮保持亮着：库的 soft 按钮 aria-expanded='true' 时亮着 */
 .chat-pick {
   min-width: 0;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 999px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
 }
-.chat-pick:hover,
-.chat-pick[aria-expanded='true'] {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
-}
-.chat-pick span {
+.chat-pick-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.chat-pick::after {
-  content: '';
-  flex: none;
-  width: 0.4em;
-  height: 0.4em;
-  margin: 0 0.15em 0 0.1em;
-  border-right: 1.5px solid var(--ll-fg-3);
-  border-bottom: 1.5px solid var(--ll-fg-3);
-  transform: translateY(-0.15em) rotate(45deg);
-}
 .chat-new {
   margin-left: auto;
-  height: 28px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 0;
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg-2);
-  cursor: pointer;
-  font-size: 12.5px;
-  white-space: nowrap;
   flex: none;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.chat-new:hover {
-  background: var(--ll-ctl-bg-hover);
-  color: var(--ll-fg);
 }
 .chat-new.is-side {
   margin: 6px 16px 6px;
@@ -3562,12 +3233,8 @@ a.hl-url:focus-visible {
 .tasks.is-full {
   padding-inline: max(16px, calc((100% - 760px) / 2));
 }
-.tasks > .empty {
+.tasks > .ll-empty {
   margin-block: auto;
-}
-.task-none {
-  padding: 18px 10px 6px;
-  text-align: center;
 }
 .task-group {
   flex: none;
@@ -3592,43 +3259,12 @@ a.hl-url:focus-visible {
 .task-wrap {
   overflow: hidden;
 }
+/* 任务的一行是库的 Row（wrap）：这里只留行与行的间隔和各小件自己的内容 */
 .task-row {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 2px 12px;
   margin-bottom: 1px;
-  padding: 9px 10px;
-  border-radius: 12px;
-  color: var(--ll-fg);
-}
-.task-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.task-action {
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-.task-meta {
-  color: var(--ll-fg-3);
-  font-size: 12.5px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-.task-side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
 }
 .task-next {
-  font-size: 12.5px;
+  font-size: var(--ll-text-sm);
   font-weight: 600;
   color: var(--ll-accent);
   font-variant-numeric: tabular-nums;
@@ -3649,16 +3285,14 @@ a.hl-url:focus-visible {
 }
 /* 取消在这一行里确认：「取消这个任务？」「确认」「算了」 */
 .task-ask {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 6px;
-  font-size: 12.5px;
+  font-size: var(--ll-text-sm);
   color: var(--ll-fg-2);
 }
 .task-err {
-  grid-column: 1 / -1;
   margin-top: 4px;
   font-size: 12px;
   color: var(--ll-danger);
@@ -3667,12 +3301,12 @@ a.hl-url:focus-visible {
   opacity: 0.6;
 }
 .task-state {
-  font-size: 12px;
+  font-size: var(--ll-text-sm);
   color: var(--ll-fg-3);
   white-space: nowrap;
 }
 .task-at {
-  font-size: 11.5px;
+  font-size: var(--ll-text-xs);
   color: var(--ll-fg-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -3680,23 +3314,12 @@ a.hl-url:focus-visible {
 .task-ended {
   margin-top: 8px;
 }
+/* 「已结束（n）」的头是库的 Fold 的头（.ll-fold-head）：这里只留位置；键盘焦点环的圆角只写在 :focus-visible 上（平常没有圆角） */
 .task-more {
-  all: unset;
-  box-sizing: border-box;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
   margin: 2px 10px;
   padding: 4px 0;
-  font-size: 12px;
-  color: var(--ll-fg-dim);
-}
-.task-more:hover {
-  color: var(--ll-fg-2);
 }
 .task-more:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: 2px;
   border-radius: 4px;
 }
 /* 全屏会话头部的「N 个任务」和它的浮层 */
@@ -3749,9 +3372,6 @@ a.hl-url:focus-visible {
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
 }
 .skel-group b {
   font-weight: 600;
@@ -3765,9 +3385,6 @@ a.hl-url:focus-visible {
   flex-direction: column;
   gap: 8px;
   padding: 8px 12px 10px;
-  border-radius: 12px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
 }
 .skel-live > b {
   font-weight: 600;
@@ -3775,29 +3392,12 @@ a.hl-url:focus-visible {
   color: var(--ll-fg-2);
   padding: 2px 0;
 }
-/* 桌面卡片里紧凑一些：标签在左、选项在右，放不下就换行；说明文字不占地方（悬停时看 title，全屏里有） */
-.skel-live .set-field {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px 12px;
-}
-.skel-live .set-field .set-label {
-  font-size: 12.5px;
-  color: var(--ll-fg-2);
-}
+/* 桌面卡片里的表单项是横排（库的 Field layout=row）：控件在竖直方向居中 */
 .skel-live .set-field .ll-seg,
 .skel-live .set-field .ll-btn {
   align-self: center;
 }
-.skel-live .set-hint {
-  display: none;
-}
 .skel-bar {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--ll-line);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -3813,30 +3413,6 @@ a.hl-url:focus-visible {
   --sc-pt: 4px;
   --sc-pb: 12px;
   padding-inline: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.set-nav button {
-  flex: none;
-  text-align: left;
-  padding: 8px 12px;
-  border-radius: 10px;
-  border: 0;
-  background: transparent;
-  color: var(--ll-fg-2);
-  cursor: pointer;
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.set-nav button:hover {
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg);
-}
-.set-nav button[aria-current='true'] {
-  background: color-mix(in srgb, var(--ll-accent) 15%, transparent);
-  color: var(--ll-fg);
 }
 .set-main {
   --sc-pt: 6px;
@@ -3852,15 +3428,7 @@ a.hl-url:focus-visible {
   font-weight: 600;
 }
 .set-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
   max-width: 520px;
-}
-.set-field label,
-.set-field .set-label {
-  font-size: 12px;
-  color: var(--ll-fg-3);
 }
 .set-field .ll-seg,
 .set-field .ll-btn {
@@ -3870,24 +3438,11 @@ a.hl-url:focus-visible {
 .set-field .ll-seg > button {
   padding: 0 12px;
 }
-.set-hint,
 .set-note {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--ll-fg-3);
-}
-.set-hint {
-  min-height: 1.5em;
-}
-.set-input {
-  height: 34px;
-  border-radius: 10px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
-}
-.set-input.is-tall {
-  height: 120px;
 }
 .ribbon {
   align-self: flex-start;
@@ -3908,74 +3463,16 @@ a.hl-url:focus-visible {
   padding-inline: 28px;
   gap: 22px;
 }
-.today-hero {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding-bottom: 2px;
-}
-.today-hero .roll {
-  font-size: 42px;
-  font-weight: 600;
-  line-height: 1.1;
-  color: var(--ll-fg);
-  letter-spacing: -0.01em;
-}
-.today-hero span {
-  color: var(--ll-fg-3);
-  font-size: 13px;
-}
+/* 「各会话今天的回复」：标题行（库的 .ll-stat-line）加下面的列表 */
 .stat {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.stat-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12.5px;
-  color: var(--ll-fg-2);
-  min-width: 0;
-  flex-wrap: wrap;
-  font-variant-numeric: tabular-nums;
-}
-.stat-row b {
-  font-weight: 600;
-  color: var(--ll-fg);
-}
-.roll {
-  font-variant-numeric: tabular-nums;
-  display: inline-block;
-}
-.roll.is-up {
-  color: var(--ll-white);
-}
 .today-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 14px;
-}
-.tile {
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: var(--ll-inset-bg);
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-.tile small {
-  font-size: 12px;
-  color: var(--ll-fg-3);
-  letter-spacing: 0.06em;
-}
-.tile .roll {
-  font-size: 28px;
-  font-weight: 600;
-  color: var(--ll-fg);
-  line-height: 1.1;
 }
 .per-conv {
   display: flex;
@@ -3997,58 +3494,6 @@ a.hl-url:focus-visible {
 }
 .per-row span:last-child {
   text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 能量槽：细的一条，强调色到金色；失败率是红色 */
-.energy {
-  position: relative;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--ll-ctl-bg);
-  overflow: hidden;
-}
-.energy-fill {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 0;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--ll-accent), var(--ll-star));
-  transition: width 0.9s var(--ll-ease-out);
-}
-.energy.is-bad .energy-fill {
-  background: var(--ll-danger);
-}
-.energy-ticks {
-  display: none;
-}
-@keyframes energy-shine {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(260%);
-  }
-}
-.energy-shine {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 40%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--ll-white) 35%, transparent),
-    transparent
-  );
-  transform: translateX(-100%);
-  pointer-events: none;
-}
-.motion .energy-shine.run {
-  animation: energy-shine 1s ease-out;
 }
 
 .toast {
@@ -4202,9 +3647,6 @@ a.hl-url:focus-visible {
     overflow-x: auto;
     overflow-y: hidden;
   }
-  .set-nav button {
-    white-space: nowrap;
-  }
   .set-main {
     --sc-pt: 14px;
     padding-inline: 16px;
@@ -4272,9 +3714,6 @@ a.hl-url:focus-visible {
 }
 .still .cur .st4 {
   animation: none !important;
-}
-.still .fold::details-content {
-  transition: none !important;
 }
 /* 「预先糊好」的气泡里垫的那层星空（.bubble-sky）：新挂上时先按默认的 --sk-x、--sk-y、--sk-w、--sk-h 算出第一份样式，脚本马上写进对好的值；
    上面统一的 0.12 秒过渡会让 background-position、background-size 从默认值滑到对好的位置，那几帧里星空和窗口对不齐（色差 1～3/255）。

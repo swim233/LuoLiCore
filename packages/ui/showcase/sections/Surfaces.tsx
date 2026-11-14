@@ -1,12 +1,10 @@
-import { Button } from '../../src/controls';
-import { Compare } from '../components/Compare';
 import { SectionHead } from '../components/SectionHead';
 import { Stage } from '../components/Stage';
 import { useSkyCheck } from '../lib/sky-check';
-import { Group, Merged, Now } from './controls/shared';
+import { Group } from './controls/shared';
 
 /* 第五节「面」：三种面（玻璃面板、半透明面板、夜空窗口的底），纯 CSS，没有 React 组件（直接写类名）。
-   玻璃要垫在有东西的底上才看得出模糊，所以摆在夜空窗口（带星点）上。每样都有和面板现在写法的对比。 */
+   玻璃要垫在有东西的底上才看得出模糊，所以摆在夜空窗口（带星点）上。 */
 
 const INDEX: readonly (readonly [string, string])[] = [
   ['surf-glass', '玻璃面板'],
@@ -47,45 +45,6 @@ function GlassBlock() {
           </div>
         </div>
       </Stage>
-      <h4 className="sc-h4">和面板现在的对比</h4>
-      <Compare
-        id="surf-tray"
-        title="玻璃面板：收纳盒（.tray）"
-        note="圆角 18 → 16（玻璃统一的 --ll-radius-xl）；底、边光、模糊（16px 加饱和度）、内边距 10 / 14 都一样。固定在窗口底部居中、进出场、拖进去时的高亮留在面板（「现在」那边只去掉了固定位置和藏起来的状态，别的一个字没动）。"
-        now={
-          <Now>
-            <div className="tray is-on" data-item="tray">
-              收纳盒：整理时把部件拖进来
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="ll-glass sc-m-tray" data-item="tray">
-              收纳盒：整理时把部件拖进来
-            </div>
-          </Merged>
-        }
-      />
-      <Compare
-        id="surf-glassbtn"
-        title="玻璃的模糊：现在库里的按钮 glass（blur 12px）和统一后的（--ll-glass-blur）"
-        note="库里的按钮 glass 样子这一段先不改（面板的「回到最新」正在用它，改了面板马上就变）；右边那一侧用展示页自己的样式临时盖成新变量，给你看会差多少：模糊从 12px 变成 16px 并加上 1.2 的饱和度。第二段再改库里的按钮。"
-        now={
-          <Now>
-            <Button variant="glass" data-item="glass-btn">
-              回到最新
-            </Button>
-          </Now>
-        }
-        merged={
-          <Merged className="sc-glass16">
-            <Button variant="glass" data-item="glass-btn">
-              回到最新
-            </Button>
-          </Merged>
-        }
-      />
     </Group>
   );
 }
@@ -119,28 +78,6 @@ function InsetBlock() {
           </div>
         </div>
       </Stage>
-      <h4 className="sc-h4">和面板现在的对比</h4>
-      <Compare
-        id="surf-segsum"
-        title="半透明面板：时间线里分段的摘要（.seg-sum）"
-        note="底、细线、圆角 12、内边距、字都一样（这一条没有差别）。设置里的两种分组外框（.skel-live、.skel-group）在「骨架条」「表单项」两块里对比，统计方格在「统计格」里对比。"
-        now={
-          <Now>
-            <div className="seg-sum" data-item="seg-sum">
-              <b data-item="seg-sum-b">之前的对话摘要</b>
-              小明和小红在讨论周末去哪里露营，最后定了周六早上八点在北门集合，小明负责订营地，小红带帐篷。
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="ll-inset sc-m-seg-sum" data-item="seg-sum">
-              <b data-item="seg-sum-b">之前的对话摘要</b>
-              小明和小红在讨论周末去哪里露营，最后定了周六早上八点在北门集合，小明负责订营地，小红带帐篷。
-            </div>
-          </Merged>
-        }
-      />
     </Group>
   );
 }
@@ -197,73 +134,6 @@ function SkyBlock() {
           </div>
         </div>
       </Stage>
-      <h4 className="sc-h4">和面板现在的对比</h4>
-      <Compare
-        id="surf-card"
-        title="夜空窗口：部件窗口（.w-card 和它里面的 .w-vig）"
-        note="底、外阴影、圆角 22、裁切、层叠上下文、暗边和细线都一样（没有差别）。位置、高、盒模型、暗边在第几层（z-index 3）留在面板；激活、浮起、全屏、整理、悬停的阴影和过渡也留在面板。形变时面板靠 background-color: transparent !important 去掉底色那一层，换成库的以后同样成立（底还是同一条多层背景，最后一层是颜色）。"
-        stage="page"
-        now={
-          <Now>
-            <div className="sc-env-wc">
-              <div className="w-card" data-item="card">
-                <div style={{ padding: 24 }}>窗口：夜空的底，加四周的暗边。</div>
-                <i className="w-vig" aria-hidden="true" data-item="vig" />
-              </div>
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-wc">
-              <div className="ll-sky sc-m-wcard" data-item="card">
-                <div style={{ padding: 24 }}>窗口：夜空的底，加四周的暗边。</div>
-                <i className="ll-sky-vig sc-m-vig" aria-hidden="true" data-item="vig" />
-              </div>
-            </div>
-          </Merged>
-        }
-      />
-      <Compare
-        id="surf-cap"
-        title="夜空窗口：胶囊（.cap）"
-        note="底、细线、阴影、圆角（999）、裁切、层叠上下文都一样；高 44、内边距、里面的排列、光标、悬停和呼唤时的光留在面板。"
-        stage="page"
-        now={
-          <Now>
-            <button type="button" className="cap" data-item="cap">
-              <span style={{ fontSize: 13, color: 'var(--ll-fg-2)' }}>此刻</span>
-            </button>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <button type="button" className="ll-sky sc-m-cap" data-shape="pill" data-item="cap">
-              <span style={{ fontSize: 13, color: 'var(--ll-fg-2)' }}>此刻</span>
-            </button>
-          </Merged>
-        }
-      />
-      <Compare
-        id="surf-ghost"
-        title="夜空窗口：部件消失时留下的空壳（.ghost）"
-        note="底、圆角、裁切一样；阴影比窗口多一圈光（状态带出来的），留在面板。"
-        stage="page"
-        now={
-          <Now>
-            <div className="ghost" style={{ width: 240, height: 100 }} data-item="ghost" />
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div
-              className="ll-sky sc-m-ghost"
-              style={{ width: 240, height: 100 }}
-              data-item="ghost"
-            />
-          </Merged>
-        }
-      />
     </Group>
   );
 }

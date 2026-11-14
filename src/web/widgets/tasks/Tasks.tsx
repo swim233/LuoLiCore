@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { useGlide } from '../../components/glide';
 import { IconTasks } from '../../components/icons';
 import { Pane } from '../../components/Pane';
-import { Button, Chevron, Tag } from '@luoli/ui/controls';
+import { Button, Chevron, Empty, Fold, Tag } from '@luoli/ui/controls';
 import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
 import { useMotionOn } from '@luoli/ui/motion';
 import { db, defaultTitle } from '../../model/db';
@@ -75,37 +75,28 @@ function Ended({
   open: boolean;
   setOpen: (v: boolean) => void;
 }) {
-  const c = useCollapse();
   if (!list.length) return null;
   return (
-    <div className="task-ended">
-      <button
-        className="task-more"
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        {`已结束（${list.length}）`}
-        <Chevron />
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            className="task-wrap"
-            {...c()}
-            key="list"
-            role="list"
-            aria-label="已结束的任务"
-          >
-            {list.map((t) => (
-              <div role="listitem" key={t.id}>
-                <TaskItem task={t} now={now} where={convTitleOf(t.conversation)} />
-              </div>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+    <Fold
+      className="task-ended"
+      headClassName="task-more"
+      open={open}
+      onOpenChange={setOpen}
+      head={
+        <>
+          {`已结束（${list.length}）`}
+          <Chevron />
+        </>
+      }
+    >
+      <div className="task-wrap" role="list" aria-label="已结束的任务">
+        {list.map((t) => (
+          <div role="listitem" key={t.id}>
+            <TaskItem task={t} now={now} where={convTitleOf(t.conversation)} />
+          </div>
+        ))}
+      </div>
+    </Fold>
   );
 }
 
@@ -127,35 +118,28 @@ function TasksView({ mode }: ViewProps) {
   const groups = groupTasks(active);
   let notice: React.ReactNode = null;
   if (phase === 'loading' || (phase === 'ready' && !ready && !problem))
-    notice = (
-      <div className="empty">
-        <b>加载中…</b>
-      </div>
-    );
-  else if (phase === 'down')
-    notice = (
-      <div className="empty">
-        <b>连不上洛璃服务</b>连上后会自动恢复
-      </div>
-    );
+    notice = <Empty title="加载中…" />;
+  else if (phase === 'down') notice = <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>;
   else if (problem)
     notice = (
-      <div className="empty">
-        <b>{problem.title}</b>
+      <Empty
+        title={problem.title}
+        action={
+          <Button size="sm" onClick={() => void refreshTasks()}>
+            重试
+          </Button>
+        }
+      >
         {problem.detail && <div>{problem.detail}</div>}
-        <Button size="sm" onClick={() => void refreshTasks()}>
-          重试
-        </Button>
-      </div>
+      </Empty>
     );
   else if (!active.length)
     notice = ended.length ? (
-      <div className="empty is-flat task-none">没有进行中的任务</div>
+      <Empty flat>没有进行中的任务</Empty>
     ) : (
-      <div className="empty">
-        <b>还没有任务</b>
+      <Empty title="还没有任务">
         在对话里跟{name}说「明早 9 点提醒我交周报」，任务就会出现在这里。
-      </div>
+      </Empty>
     );
   return (
     <Pane>

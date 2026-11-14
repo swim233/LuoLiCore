@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom';
 import { LayoutGroup } from 'motion/react';
+import { Empty } from '@luoli/ui/controls';
 import { useNarrow } from '@luoli/ui/env';
 import { useCols } from '../lib/useCols';
 import { hasDef, useDesk, useDefsRev } from '../state/desk';
@@ -32,11 +33,11 @@ export function DeskWrap() {
             <WidgetWindow key={id} id={id} variant="desk" cols={cols} />
           ))}
           {!deskIds.length && (
-            <div className="desk-empty">
+            <Empty flat className="desk-empty">
               {ids.length
                 ? '部件都缩成了上面的胶囊，单击胶囊展开'
                 : '桌面上没有部件。点「整理」，从收纳盒把部件拖回来'}
-            </div>
+            </Empty>
           )}
         </div>
       </LayoutGroup>

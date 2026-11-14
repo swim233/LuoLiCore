@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Button } from '@luoli/ui/controls';
+import { Button, Row } from '@luoli/ui/controls';
 import { fmtWhen } from '../../lib/zone';
 import { getSource } from '../../model/source';
 import { END_TEXT, endKind, scheduleLine, serverZone } from '../../model/tasks';
@@ -71,18 +71,16 @@ export function TaskItem({
   const meta = [scheduleLine(task, tz), `${task.requestedBy.name} 让建的`];
   if (where) meta.push(where);
   return (
-    <div
+    <Row
+      wrap
       className={
         'task-row' + (end ? ' is-ended' : ' is-live') + (ask !== 'idle' ? ' is-asking' : '')
       }
       data-id={task.id}
-    >
-      <div className="task-main">
-        <div className="task-action">{task.action}</div>
-        <div className="task-meta">{meta.join(' · ')}</div>
-      </div>
-      <div className="task-side">
-        {end ? (
+      title={task.action}
+      sub={meta.join(' · ')}
+      side={
+        end ? (
           <>
             <span className="task-state">{END_TEXT[end]}</span>
             {task.endedAt && (
@@ -100,10 +98,11 @@ export function TaskItem({
               </Button>
             )}
           </>
-        )}
-      </div>
+        )
+      }
+    >
       {ask !== 'idle' && (
-        <div className="task-ask" role="group" aria-label="取消这个任务？">
+        <div className="task-ask ll-row-full" role="group" aria-label="取消这个任务？">
           <span>取消这个任务？</span>
           <Button
             size="sm"
@@ -120,10 +119,10 @@ export function TaskItem({
         </div>
       )}
       {err && (
-        <div className="task-err" role="status">
+        <div className="task-err ll-row-full" role="status">
           没取消成功：{err}
         </div>
       )}
-    </div>
+    </Row>
   );
 }

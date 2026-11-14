@@ -3,8 +3,6 @@ import { Seg } from '../components/Seg';
 import { SectionHead } from '../components/SectionHead';
 import type { StageKind } from '../components/Stage';
 import { ButtonBlock, IconButtonBlock } from './controls/ButtonBlocks';
-import { ChangesTable } from './controls/ChangesTable';
-import { ChangesTable2 } from './controls/ChangesTable2';
 import { FieldBlock, LinkBlock } from './controls/FormBlocks';
 import { FoldBlock } from './controls/FoldBlocks';
 import { IconsBlock } from './controls/IconsBlock';
@@ -17,9 +15,9 @@ import { MeterBlock, RollBlock, StatBlock } from './controls/StatBlocks';
 import { TabsBlock } from './controls/TabBlocks';
 import { ConfirmBlock, SegBlock, SwitchBlock } from './controls/ToggleBlocks';
 
-/* 「基础控件」一节：第 4 步的按钮、图标按钮、开关、分段选择、两步确认的按钮、标签、数字徽标、状态点、转圈、小箭头、图标
-   （面板已经在用），第 5 步的提示条、空状态、骨架条、表单项、链接、统计格、数字滚动、能量槽（还没换进面板，有和面板现在写法的对比），
-   最后是「面板上会变的地方」的表。每个控件一块：所有样子 × 尺寸、各种状态（悬停和键盘焦点强制显示）、能点的演示。 */
+/* 「基础控件」一节：按钮、图标按钮、开关、分段选择、两步确认的按钮、标签、数字徽标、状态点、转圈、小箭头、图标，
+   提示条、空状态、骨架条、表单项、链接、统计格、数字滚动、能量槽，折叠、标签页、列表行、几样小件（面板都在用）。
+   每个控件一块：所有样子 × 尺寸、各种状态（悬停和键盘焦点强制显示）、能点的演示。 */
 const INDEX: readonly (readonly [string, string])[] = [
   ['ctl-button', '按钮'],
   ['ctl-icon-button', '图标按钮'],
@@ -44,8 +42,6 @@ const INDEX: readonly (readonly [string, string])[] = [
   ['ctl-tabs', '标签页'],
   ['ctl-row', '列表行'],
   ['ctl-small', '小件'],
-  ['ctl-changes', '面板上会变的地方'],
-  ['ctl-changes2', '面板上会变的地方（第二批）'],
 ];
 
 export function Controls() {
@@ -53,10 +49,7 @@ export function Controls() {
   return (
     <StageCtx.Provider value={kind}>
       <SectionHead title="基础控件">
-        前面十一块（按钮到图标）面板里已经在用。后面八块（提示条、空状态、骨架条、表单项、链接、统计格、数字滚动、能量槽）
-        是第 5
-        步新加的，面板还没换：每块下面有「和面板现在的对比」（左边是面板现在的写法原样搬来的样式，右边是库的），
-        最后一块是面板上会变的地方的表，等你点头以后面板才会换。每个控件一块：所有样子 ×
+        面板里用到的基础控件都在这里，一个控件一块：所有样子 ×
         尺寸、各种状态（悬停和键盘焦点是强制显示的）、能点的演示。
       </SectionHead>
       <div className="sc-ctl-bar">
@@ -109,8 +102,6 @@ export function Controls() {
       <TabsBlock />
       <RowBlock />
       <SmallBlock />
-      <ChangesTable />
-      <ChangesTable2 />
     </StageCtx.Provider>
   );
 }

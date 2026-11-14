@@ -148,7 +148,8 @@ export function dragStart(
   const e0 = 'nativeEvent' in ev ? ev.nativeEvent : ev;
   if (!desk.get().arranging || e0.button !== 0) return;
   const target = e0.target as Element;
-  if (target.closest('.ll-btn, .cap-x')) return;
+  /* 卡片、胶囊上按到里面的按钮不起拖动；收纳盒里的部件自己就是库的按钮（.ll-btn），整个按钮就是拖动的把手，放行 */
+  if (kind !== 'tray' && target.closest('.ll-btn, .cap-x')) return;
   /* 触屏上卡片只认拖动柄，其余地方留给页面滚动 */
   if (e0.pointerType === 'touch' && kind === 'card' && !target.closest('.w-grip')) return;
   const f = faces(id);

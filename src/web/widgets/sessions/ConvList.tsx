@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useState } from 'react';
-import { Badge } from '@luoli/ui/controls';
+import { Badge, RowButton } from '@luoli/ui/controls';
 import { DUR_VANISH, EASE_OUT } from '@luoli/ui/easing';
 import { motionOn as motionNow, useMotionOn } from '@luoli/ui/motion';
 import { morphStore } from '../../shell/morph';
@@ -46,32 +46,34 @@ const ConvRow = memo(function ConvRow({
   const st = status.conv.get(conv.id);
   const time = st ? (st.state === 'error' ? '出错' : '回复中…') : fmtShort(Date.parse(conv.lastAt));
   return (
-    <button
+    <RowButton
       className={'conv-item' + (n > 0 ? ' has-new' : '')}
-      type="button"
-      aria-current={selected === undefined ? undefined : selected}
+      selected={selected}
       aria-label={`${conv.title}，${n ? n + ' 条新消息，' : ''}${last}`}
       onClick={() => onPick(conv.id)}
-    >
-      <span className="conv-ico" data-p={conv.kind} aria-hidden="true">
-        {KIND_TEXT[conv.kind] || '群'}
-      </span>
-      <span className="conv-main">
-        <span className="conv-title">{conv.title}</span>
-        <span className={'conv-last' + (conv.last?.event ? ' is-event' : '')}>{last}</span>
-      </span>
-      <span className="conv-side">
-        <span
-          className="conv-time"
-          style={
-            st ? { color: st.state === 'error' ? 'var(--ll-danger)' : 'var(--ll-star)' } : undefined
-          }
-        >
-          {time}
+      lead={
+        <span className="conv-ico" data-p={conv.kind} aria-hidden="true">
+          {KIND_TEXT[conv.kind] || '群'}
         </span>
-        <Badge>{n ? (n > 99 ? '99+' : String(n)) : ''}</Badge>
-      </span>
-    </button>
+      }
+      title={conv.title}
+      sub={conv.last?.event ? <span className="is-event">{last}</span> : last}
+      side={
+        <>
+          <span
+            className="ll-row-meta"
+            style={
+              st
+                ? { color: st.state === 'error' ? 'var(--ll-danger)' : 'var(--ll-star)' }
+                : undefined
+            }
+          >
+            {time}
+          </span>
+          <Badge>{n ? (n > 99 ? '99+' : String(n)) : ''}</Badge>
+        </>
+      }
+    />
   );
 });
 

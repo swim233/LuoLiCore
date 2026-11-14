@@ -1,7 +1,7 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import { attachBubbleFrame } from './bubble-frame';
 import { attachBubbleSky } from './bubble-sky';
-import { Tag, Spinner } from '@luoli/ui/controls';
+import { Chevron, Fold, Spinner, Tag } from '@luoli/ui/controls';
 import { Hl } from './Hl';
 import { Typed } from './Typed';
 import type { CursorRef } from './Typed';
@@ -53,7 +53,8 @@ function ThinkBody({ text, follow }: { text: string; follow: boolean }) {
   }, [text, follow]);
   return (
     <div
-      className="fold-body"
+      className="fold-body ll-inset"
+      data-size="sm"
       ref={ref}
       onScroll={(e) => {
         const el = e.currentTarget;
@@ -88,7 +89,7 @@ function ThinkFold({
   /* 思考中和思考结束是同一个 <details>：思考中点开了，结束后仍是打开的，里面的内容和滚动位置也接着用，只有标题换成「思考了 N 秒」。
      思考中的内容随流增长；刚展开时（思考中）跳到底部 */
   return (
-    <details
+    <Fold
       className="fold is-think"
       onToggle={(e) => {
         const body = e.currentTarget.querySelector<HTMLElement>('.fold-body');
@@ -97,12 +98,15 @@ function ThinkFold({
           body.scrollTop = body.scrollHeight;
         }
       }}
+      head={
+        <Tag variant="soft" tone="accent">
+          {p.streaming ? '思考中…' : p.sec ? `思考了 ${p.sec} 秒` : '思考过程'}
+          <Chevron />
+        </Tag>
+      }
     >
-      <summary>
-        <span>{p.streaming ? '思考中…' : p.sec ? `思考了 ${p.sec} 秒` : '思考过程'}</span>
-      </summary>
       {p.text.trim() && <ThinkBody text={p.text} follow={p.streaming} />}
-    </details>
+    </Fold>
   );
 }
 
@@ -112,23 +116,28 @@ function ToolFold({ p, ended }: { p: Extract<BPart, { kind: 'tool' }>; ended: bo
   const done = p.state === 'ok';
   const one = p.summary ?? argsLine(p.input);
   return (
-    <details className="fold is-tool">
-      <summary>
-        <span>{`◇ ${p.name}${one ? ' · ' + one : ''}`}</span>
-        {running ? (
-          ended ? (
-            <span>…</span>
+    <Fold
+      className="fold is-tool"
+      head={
+        <>
+          <span>{`◇ ${p.name}${one ? ' · ' + one : ''}`}</span>
+          {running ? (
+            ended ? (
+              <span>…</span>
+            ) : (
+              <Spinner className="spin" />
+            )
           ) : (
-            <Spinner className="spin" />
-          )
-        ) : (
-          <span className={err ? 'bad' : 'ok'}>
-            {err ? '×' : '✓'}
-            {p.ms !== undefined ? ' ' + fmtMs(p.ms) : err ? ' 出错' : ''}
-          </span>
-        )}
-      </summary>
-      <div className="fold-body">
+            <span className={err ? 'bad' : 'ok'}>
+              {err ? '×' : '✓'}
+              {p.ms !== undefined ? ' ' + fmtMs(p.ms) : err ? ' 出错' : ''}
+            </span>
+          )}
+          <Chevron />
+        </>
+      }
+    >
+      <div className="fold-body ll-inset" data-size="sm">
         <div className="fold-k">参数</div>
         <pre className="fold-pre">{prettyInput(p.input) || '（无）'}</pre>
         {done && (
@@ -154,7 +163,7 @@ function ToolFold({ p, ended }: { p: Extract<BPart, { kind: 'tool' }>; ended: bo
         )}
         {running && <div>{ended ? '工具调用未完成' : '正在调用…'}</div>}
       </div>
-    </details>
+    </Fold>
   );
 }
 
@@ -320,9 +329,9 @@ export const MsgBubble = memo(function MsgBubble({
       <div className="msg-meta">
         <b>{name}</b>
         {queued ? (
-          <span className="queued" title="洛璃正在回复上一条，这条等她说完再回复">
+          <Tag variant="soft" title="洛璃正在回复上一条，这条等她说完再回复">
             排队中
-          </span>
+          </Tag>
         ) : (
           <time>{label}</time>
         )}

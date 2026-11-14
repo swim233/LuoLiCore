@@ -34,7 +34,8 @@ export const Cap = memo(function Cap({ id, island = false }: { id: string; islan
           btnRef.current = el;
           if (!island) setFace(id, 'capBtn')(el);
         }}
-        className={'cap' + (id === 'now' ? ' cap-now' : '') + (calling ? ' is-calling' : '')}
+        className={'cap ll-sky' + (id === 'now' ? ' cap-now' : '') + (calling ? ' is-calling' : '')}
+        data-shape="pill"
         type="button"
         title="单击展开"
         onClick={() => {

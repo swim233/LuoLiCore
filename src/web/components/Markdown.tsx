@@ -8,7 +8,7 @@ import type { Batch } from '../lib/typing';
 import { linkHref } from '@luoli/ui/url';
 import { freshNodes } from './Fresh';
 import { Hl } from './Hl';
-import { Link } from './Link';
+import { Link } from '@luoli/ui/controls';
 
 /* 洛璃的回复按 Markdown 画：marked 只管把文字拆成词元（lib/markdown.ts），这里把词元画成 React 元素。
    不用 marked 的 HTML 输出，不用 dangerouslySetInnerHTML；原始 HTML 当普通文字显示；图片不加载（面板不访问外网），画成链接。
@@ -96,7 +96,7 @@ function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: Tail)
         // 逐字时还没写完的链接：只有方括号里的字，链接色，不能点
         if (t.href === PENDING_HREF)
           return (
-            <span key={i} className="md-a is-pending">
+            <span key={i} className="ll-link">
               {inlines(t.tokens, c, true, into)}
             </span>
           );
@@ -104,7 +104,7 @@ function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: Tail)
         if (!href)
           return <Fragment key={i}>{inLink ? inlines(t.tokens, c, true) : t.raw}</Fragment>;
         return (
-          <Link key={i} href={href} className="md-a">
+          <Link key={i} href={href}>
             {t.autolink ? t.text : inlines(t.tokens, c, true, into)}
           </Link>
         );
@@ -113,14 +113,14 @@ function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: Tail)
         // 不加载图片：显示成链接，文字是说明，没有说明就写网址
         if (t.href === PENDING_HREF)
           return (
-            <span key={i} className="md-a is-pending">
+            <span key={i} className="ll-link">
               {t.text}
             </span>
           );
         const href = inLink ? null : linkHref(t.href ?? '');
         if (!href) return <Fragment key={i}>{t.raw}</Fragment>;
         return (
-          <Link key={i} href={href} className="md-a">
+          <Link key={i} href={href}>
             {t.text || t.href}
           </Link>
         );

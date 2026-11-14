@@ -139,7 +139,7 @@ function vanish(r: Rect, rad = 16) {
   const host = document.getElementById('ghosts');
   if (!host) return;
   const g = document.createElement('div');
-  g.className = 'ghost';
+  g.className = 'ghost ll-sky';
   Object.assign(g.style, {
     left: r.left + 'px',
     top: r.top + 'px',

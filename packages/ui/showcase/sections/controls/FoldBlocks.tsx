@@ -1,11 +1,9 @@
 import { useRef, useState } from 'react';
 import { Button, Chevron, Fold, Tag } from '../../../src/controls';
-import { LegacyEnded } from '../../legacy/step5b-parts';
-import { Compare } from '../../components/Compare';
 import { Stage } from '../../components/Stage';
-import { Group, Merged, Now, useStageKind } from './shared';
+import { Group, PanelEnv, useStageKind } from './shared';
 
-/* 「折叠」一块（带和面板现在写法的对比）：气泡里思考和工具调用的折叠、任务部件的「已结束」 */
+/* 「折叠」一块：气泡里思考和工具调用的折叠、任务部件的「已结束」 */
 
 const THINK = '先看一下群里刚才聊到哪儿了，再决定要不要查一下那个网址。';
 const ARGS = '{\n  "url": "https://example.com/post/42"\n}';
@@ -19,27 +17,12 @@ const FOLD_STATES: readonly (readonly [string, boolean, string])[] = [
   ['focus', false, 'sc-focus'],
 ];
 
-/** 现在：气泡里思考的折叠（原样：summary 里一枚强调色的小胶囊，箭头是 ::after） */
-function LegacyThink({ open, st, cls }: { open: boolean; st: string; cls: string }) {
-  return (
-    <details className="fold is-think" open={open} data-item="fold" data-state={st}>
-      <summary className={cls} data-item="pill" data-state={st}>
-        <span>思考了 3 秒</span>
-      </summary>
-      <div className="fold-body" data-item="body" data-state={st}>
-        {THINK}
-      </div>
-    </details>
-  );
-}
-/** 归并后：Fold，头是一枚 soft、accent 的 Tag（里面带 Chevron，箭头在胶囊里面，和现在一样），展开的框是 inset（sm） */
-function MergedThink({ open, st, cls }: { open: boolean; st: string; cls: string }) {
+/** 思考的折叠：Fold，头是一枚 soft、accent 的 Tag（里面带 Chevron，箭头在胶囊里面），展开的框是 inset（sm） */
+function MergedThink({ open, cls }: { open: boolean; cls: string }) {
   return (
     <Fold
       className="sc-m-fold sc-m-think"
       defaultOpen={open}
-      data-item="fold"
-      data-state={st}
       head={
         <Tag variant="soft" tone="accent" className="sc-m-tag-gap">
           思考了 3 秒
@@ -48,36 +31,18 @@ function MergedThink({ open, st, cls }: { open: boolean; st: string; cls: string
       }
       headClassName={`sc-m-think-head ${cls}`}
     >
-      <div className="ll-inset sc-m-foldbody" data-size="sm" data-item="body" data-state={st}>
+      <div className="ll-inset sc-m-foldbody" data-size="sm">
         {THINK}
       </div>
     </Fold>
   );
 }
-function LegacyTool({ open, st, cls }: { open: boolean; st: string; cls: string }) {
-  return (
-    <details className="fold is-tool" open={open} data-item="fold" data-state={st}>
-      <summary className={cls} data-item="head" data-state={st}>
-        <span>◇ fetch · https://example.com/post/42</span>
-        <span className="ok">✓ 0.8s</span>
-      </summary>
-      <div className="fold-body" data-item="body" data-state={st}>
-        <div className="fold-k">参数</div>
-        <pre className="fold-pre">{ARGS}</pre>
-        <div className="fold-k">结果 · 共 1,203 字符</div>
-        <pre className="fold-pre">{OUT}</pre>
-      </div>
-    </details>
-  );
-}
-function MergedTool({ open, st, cls }: { open: boolean; st: string; cls: string }) {
+function MergedTool({ open, cls }: { open: boolean; cls: string }) {
   return (
     <Fold
       className="sc-m-fold sc-m-tool"
       headClassName={cls}
       defaultOpen={open}
-      data-item="fold"
-      data-state={st}
       head={
         <>
           <span>◇ fetch · https://example.com/post/42</span>
@@ -86,7 +51,7 @@ function MergedTool({ open, st, cls }: { open: boolean; st: string; cls: string 
         </>
       }
     >
-      <div className="ll-inset sc-m-foldbody" data-size="sm" data-item="body" data-state={st}>
+      <div className="ll-inset sc-m-foldbody" data-size="sm">
         <div className="fold-k">参数</div>
         <pre className="fold-pre">{ARGS}</pre>
         <div className="fold-k">结果 · 共 1,203 字符</div>
@@ -98,7 +63,7 @@ function MergedTool({ open, st, cls }: { open: boolean; st: string; cls: string 
 
 const ENDED_ROWS = ['每天 08:00 说说天气', '周五提醒小明交周报', '下周一 09:00 开会前提醒'];
 /* 展开后的内容：几行任务（行的样子是下面「列表行」那一块的事，这里只用来撑出高度） */
-const legacyRows = () =>
+const endedRows = () =>
   ENDED_ROWS.map((t) => (
     <div role="listitem" key={t} className="sc-ended-row">
       {t}
@@ -241,122 +206,57 @@ export function FoldBlock() {
           </div>
         </div>
       </Stage>
-      <h4 className="sc-h4">和面板现在的对比</h4>
-      <Compare
-        id="fold-think"
-        title="折叠：气泡里的思考（.fold.is-think），收着、展开、悬停、键盘焦点"
-        note="换成库的 Fold：头里的小药丸换成库的 Tag（soft、accent，和中止时已经在用的 .fold-tag 同一个），里面放 Chevron（箭头还在药丸里面）；自己画的箭头（summary::after）换成 Chevron；展开的内容框换成 .ll-inset（sm）。机制不变（details）。思考内容框最高 240、跟到底、头上的字号等是聊天内容自己的，留在面板（第 9 步再搬）。"
-        now={
-          <Now>
-            <div className="sc-env-text">
-              {FOLD_STATES.map(([st, open, cls]) => (
-                <LegacyThink key={st} open={open} st={st} cls={cls} />
-              ))}
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-text">
-              {FOLD_STATES.map(([st, open, cls]) => (
-                <MergedThink key={st} open={open} st={st} cls={cls} />
-              ))}
-            </div>
-          </Merged>
-        }
-      />
-      <Compare
-        id="fold-tool"
-        title="折叠：气泡里的工具调用（.fold.is-tool），收着、展开、悬停、键盘焦点"
-        note="换成库的 Fold：头里的内容（等宽字、颜色、「✓ 0.8s」）是聊天内容自己的，留在面板；自己画的箭头换成 Chevron；展开的框换成 .ll-inset（sm）。头窄 1.15px（箭头少了左边距）；气泡是按内容收缩的，头是气泡里最宽的东西时，气泡、气泡里的时间、展开的内容框也各窄 1.14px（这里的舞台量不出来，变化表里写了）。"
-        now={
-          <Now>
-            <div className="sc-env-text">
-              {FOLD_STATES.map(([st, open, cls]) => (
-                <LegacyTool key={st} open={open} st={st} cls={cls} />
-              ))}
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-text">
-              {FOLD_STATES.map(([st, open, cls]) => (
-                <MergedTool key={st} open={open} st={st} cls={cls} />
-              ))}
-            </div>
-          </Merged>
-        }
-      />
-      <Compare
-        id="fold-ended"
-        title="折叠：任务部件的「已结束（3）」，收着、展开、悬停、键盘焦点（静止的样子）"
-        note="换成库的 Fold：头默认的样子就是现在这一行（12px、暗色、悬停变亮），外边距 2 10、内边距 4 0 是布局，留在面板。展开收起的动画变了，见下面「试试看」和变化表后面「量不出来」的那一条。"
-        now={
-          <Now>
-            <div className="sc-env-col sc-env-ended">
-              {ENDED_STATES.map(([st, open, cls]) => (
-                <div className="task-ended sc-m-ended" data-item="ended" data-state={st} key={st}>
-                  <button
-                    className={`task-more ${cls}`}
-                    type="button"
-                    aria-expanded={open}
-                    data-item="head"
-                    data-state={st}
-                  >
+      <h4 className="sc-h4">折叠：气泡里的思考（.fold.is-think），收着、展开、悬停、键盘焦点</h4>
+      <Stage kind={kind}>
+        <PanelEnv>
+          <div className="sc-env-text">
+            {FOLD_STATES.map(([st, open, cls]) => (
+              <MergedThink key={st} open={open} cls={cls} />
+            ))}
+          </div>
+        </PanelEnv>
+      </Stage>
+      <h4 className="sc-h4">折叠：气泡里的工具调用（.fold.is-tool），收着、展开、悬停、键盘焦点</h4>
+      <Stage kind={kind}>
+        <PanelEnv>
+          <div className="sc-env-text">
+            {FOLD_STATES.map(([st, open, cls]) => (
+              <MergedTool key={st} open={open} cls={cls} />
+            ))}
+          </div>
+        </PanelEnv>
+      </Stage>
+      <h4 className="sc-h4">
+        折叠：任务部件的「已结束（3）」，收着、展开、悬停、键盘焦点（静止的样子）
+      </h4>
+      <Stage kind={kind}>
+        <PanelEnv>
+          <div className="sc-env-col sc-env-ended">
+            {ENDED_STATES.map(([st, open, cls]) => (
+              <Fold
+                key={st}
+                className="task-ended sc-m-ended"
+                headClassName={`sc-m-more ${cls}`}
+                defaultOpen={open}
+                head={
+                  <>
                     已结束（3）
                     <Chevron />
-                  </button>
-                  {open && (
-                    <div className="task-wrap" role="list">
-                      {legacyRows()}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </Now>
-        }
-        merged={
-          <Merged>
-            <div className="sc-env-col sc-env-ended">
-              {ENDED_STATES.map(([st, open, cls]) => (
-                <Fold
-                  key={st}
-                  className="task-ended sc-m-ended"
-                  headClassName={`sc-m-more ${cls}`}
-                  defaultOpen={open}
-                  data-item="ended"
-                  data-state={st}
-                  head={
-                    <>
-                      已结束（3）
-                      <Chevron />
-                    </>
-                  }
-                >
-                  <div className="sc-m-wrap">{legacyRows()}</div>
-                </Fold>
-              ))}
-            </div>
-          </Merged>
-        }
-      />
-      <h4 className="sc-h4">试试看：「已结束」展开收起的动画（左边是仿的）</h4>
+                  </>
+                }
+              >
+                <div className="sc-m-wrap">{endedRows()}</div>
+              </Fold>
+            ))}
+          </div>
+        </PanelEnv>
+      </Stage>
+      <h4 className="sc-h4">试试看：任务部件的「已结束」（带内容，能点）</h4>
       <Stage kind={kind}>
         <div className="sc-fold-demos">
-          <div data-demo="ended-now">
-            <span className="sc-stage-tag">
-              现在（Motion：0.42 秒进、0.32 秒出，带淡入淡出；展示页用同样的时长和曲线仿的）
-            </span>
-            <div className="sc-ctx sc-legacy sc-env-col sc-env-ended-live">
-              <LegacyEnded label="已结束（3）">{legacyRows()}</LegacyEnded>
-            </div>
-          </div>
           <div data-demo="ended-merged">
             <span className="sc-stage-tag">
-              归并后（库的 Fold：展开收起都是 0.2
-              秒，没有淡入淡出；收起以后内容还留在页面里，只是不显示）
+              展开收起都是 0.2 秒的高度过渡，没有淡入淡出；收起以后内容还留在页面里，只是不显示
             </span>
             <div className="sc-ctx sc-env-col sc-env-ended-live">
               <Fold
@@ -370,7 +270,7 @@ export function FoldBlock() {
                   </>
                 }
               >
-                <div className="sc-m-wrap">{legacyRows()}</div>
+                <div className="sc-m-wrap">{endedRows()}</div>
               </Fold>
             </div>
           </div>

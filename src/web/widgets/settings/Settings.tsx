@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { IconSettings } from '../../components/icons';
 import { Pane } from '../../components/Pane';
-import { ConfirmButton, Seg, Tag } from '@luoli/ui/controls';
+import { ConfirmButton, Field, Seg, Skeleton, Tab, TabList, Tabs, Tag } from '@luoli/ui/controls';
+import { useNarrow } from '@luoli/ui/env';
 import { Star4 } from '@luoli/ui/icons';
 import { useMotionOn } from '@luoli/ui/motion';
 import { chooseMotion, usePrefs } from '../../lib/prefs';
@@ -54,27 +55,11 @@ const COLLAPSE_ITEMS: [string, string][] = [
   ['5', '5 秒'],
 ];
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="set-field" title={hint}>
-      <span className="set-label">{label}</span>
-      {children}
-      {hint && <p className="set-hint">{hint}</p>}
-    </div>
-  );
-}
-
 /* 「外观」的各项：桌面卡片和全屏里是同一份。改了立刻生效（顶栏的动画开关、帧率、悬停、「此刻」的缩回），
    状态在 lib/prefs.ts（动画开关在 @luoli/ui/motion，由 prefs.ts 存），开发模式的演示面板也是它，所以两处同步 */
-function AppearanceFields() {
+function AppearanceFields({ compact = false }: { compact?: boolean }) {
+  /* 桌面卡片里紧凑一些：标签在左、选项在右，说明不占地方（悬停看 title）；全屏里竖排、说明在下面 */
+  const layout = compact ? 'row' : undefined;
   const p = usePrefs((x) => x);
   const motion = useMotionOn();
   const name = useAssistantName();
@@ -82,6 +67,8 @@ function AppearanceFields() {
   return (
     <>
       <Field
+        className="set-field"
+        layout={layout}
         label="动画"
         hint="装饰性的动画，顶栏也有这个开关。没有拨过时，跟随系统的「减少动态效果」"
       >
@@ -92,7 +79,12 @@ function AppearanceFields() {
           onPick={(v) => chooseMotion(v === 'on')}
         />
       </Field>
-      <Field label="帧率显示" hint="在左下角显示当前帧率，以及最近一次转场的最长帧和掉帧数">
+      <Field
+        className="set-field"
+        layout={layout}
+        label="帧率显示"
+        hint="在左下角显示当前帧率，以及最近一次转场的最长帧和掉帧数"
+      >
         <Seg
           label="帧率显示"
           value={p.fps ? 'on' : 'off'}
@@ -100,7 +92,7 @@ function AppearanceFields() {
           onPick={(v) => setFps(v === 'on')}
         />
       </Field>
-      <Field label="悬停效果" hint={hint}>
+      <Field className="set-field" layout={layout} label="悬停效果" hint={hint}>
         <Seg
           label="悬停效果"
           value={p.hover}
@@ -109,6 +101,8 @@ function AppearanceFields() {
         />
       </Field>
       <Field
+        className="set-field"
+        layout={layout}
         label="有回复时自动展开「此刻」"
         hint={`有人叫${name}时，「此刻」自动浮起来显示这次回复；关掉后只在点开它时才展开。网页会话里的回复不自动展开`}
       >
@@ -119,7 +113,12 @@ function AppearanceFields() {
           onPick={(v) => setAutoNow(v === 'on')}
         />
       </Field>
-      <Field label="「此刻」自动缩回" hint="回复都结束后，浮起的「此刻」等这么久再自动缩回">
+      <Field
+        className="set-field"
+        layout={layout}
+        label="「此刻」自动缩回"
+        hint="回复都结束后，浮起的「此刻」等这么久再自动缩回"
+      >
         <Seg
           label="「此刻」自动缩回"
           value={String(p.collapse)}
@@ -127,7 +126,12 @@ function AppearanceFields() {
           onPick={(v) => setCollapse(Number(v) as Prefs['collapse'])}
         />
       </Field>
-      <Field label="布局" hint="部件的排列、大小和显示都恢复成默认。点一下后要再点一次才会恢复">
+      <Field
+        className="set-field"
+        layout={layout}
+        label="布局"
+        hint="部件的排列、大小和显示都恢复成默认。点一下后要再点一次才会恢复"
+      >
         <ConfirmButton onConfirm={resetLayoutToDefault} armedLabel="再点一次恢复">
           恢复默认布局
         </ConfirmButton>
@@ -138,6 +142,7 @@ function AppearanceFields() {
 
 function SettingsView({ mode }: ViewProps) {
   const [cur, setCur] = useState(0);
+  const narrow = useNarrow();
   if (mode !== 'full') {
     return (
       <Pane>
@@ -146,14 +151,14 @@ function SettingsView({ mode }: ViewProps) {
             <Star4 className="st4" />
             <span>外观可以改，其余还不能在这里修改设置</span>
           </div>
-          <section className="skel-live" aria-label={APPEARANCE}>
+          <section className="skel-live ll-inset" aria-label={APPEARANCE}>
             <b>{APPEARANCE}</b>
-            <AppearanceFields />
+            <AppearanceFields compact />
           </section>
           {SET_GROUPS.map(([g], i) => (
-            <div className="skel-group" key={g}>
+            <div className="skel-group ll-inset" key={g}>
               <b>{g}</b>
-              <span className="skel-bar" style={{ maxWidth: `${60 + ((i * 37) % 40)}%` }} />
+              <Skeleton className="skel-bar" style={{ maxWidth: `${60 + ((i * 37) % 40)}%` }} />
             </div>
           ))}
         </div>
@@ -163,15 +168,20 @@ function SettingsView({ mode }: ViewProps) {
   const name = NAV_GROUPS[cur];
   const fields = cur === 0 ? null : SET_GROUPS[cur - 1][1];
   return (
-    <div className="set-full">
+    <Tabs
+      className="set-full"
+      orientation={narrow ? 'horizontal' : 'vertical'}
+      value={String(cur)}
+      onValueChange={(v) => setCur(Number(v))}
+    >
       <Pane className="set-nav-pane is-side">
-        <nav className="set-nav pane-sc" aria-label="设置分组">
+        <TabList variant="side" className="set-nav pane-sc" aria-label="设置分组" activateOnFocus>
           {NAV_GROUPS.map((g, i) => (
-            <button key={g} type="button" aria-current={i === cur} onClick={() => setCur(i)}>
+            <Tab key={g} value={String(i)}>
               {g}
-            </button>
+            </Tab>
           ))}
-        </nav>
+        </TabList>
       </Pane>
       <Pane className="set-main-pane is-main">
         <div className="set-main pane-sc">
@@ -182,10 +192,9 @@ function SettingsView({ mode }: ViewProps) {
                 还不能在这里修改设置：这里以后放表单
               </Tag>
               {fields.map(([label, tall]) => (
-                <div className="set-field" key={label}>
-                  <label>{label}</label>
-                  <div className={'set-input' + (tall ? ' is-tall' : '')} aria-hidden="true" />
-                </div>
+                <Field className="set-field" key={label} label={label}>
+                  <Skeleton shape="block" style={tall ? { height: 120 } : undefined} />
+                </Field>
               ))}
             </>
           ) : (
@@ -196,7 +205,7 @@ function SettingsView({ mode }: ViewProps) {
           )}
         </div>
       </Pane>
-    </div>
+    </Tabs>
   );
 }
 export const SETTINGS_DEF: WidgetDef = {

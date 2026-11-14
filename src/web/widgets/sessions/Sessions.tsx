@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { IconSessions } from '../../components/icons';
 import { BakedGlass } from '../../components/Bubble';
 import { Pane } from '../../components/Pane';
-import { Button, IconButton, Tag } from '@luoli/ui/controls';
+import { Button, Empty, IconButton, Tag } from '@luoli/ui/controls';
 import { DUR_LAYER, EASE_OUT_CSS, LAYER_SHIFT } from '@luoli/ui/easing';
 import { IconChevronLeft } from '@luoli/ui/icons';
 import { SLOW } from '../../lib/debug';
@@ -24,23 +24,9 @@ import type { FullParams, ViewProps, WidgetDef } from '../types';
 
 /* 列表没有内容时显示什么：加载中、连不上服务、确实没有会话 */
 function emptyOf(phase: LinkPhase) {
-  if (phase === 'loading')
-    return (
-      <div className="empty">
-        <b>加载中…</b>
-      </div>
-    );
-  if (phase === 'down')
-    return (
-      <div className="empty">
-        <b>连不上洛璃服务</b>连上后会自动恢复
-      </div>
-    );
-  return (
-    <div className="empty">
-      <b>还没有会话</b>群里有人发言后，会话会出现在这里
-    </div>
-  );
+  if (phase === 'loading') return <Empty title="加载中…" />;
+  if (phase === 'down') return <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>;
+  return <Empty title="还没有会话">群里有人发言后，会话会出现在这里</Empty>;
 }
 const EVENTS: BusEventName[] = [
   'message',

@@ -1,6 +1,6 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
-import { Button, IconButton } from '@luoli/ui/controls';
+import { Badge, Button, IconButton } from '@luoli/ui/controls';
 import { env } from '@luoli/ui/env';
 import { IconGrip, IconMax, IconMin, IconRestore } from '@luoli/ui/icons';
 import { SLOW } from '../lib/debug';
@@ -112,7 +112,11 @@ export const WidgetWindow = memo(function WidgetWindow({
     >
       <span className="w-icon">{def.icon}</span>
       <h2 className="w-title">{def.name}</h2>
-      {fresh && !full && <span className="w-new">新</span>}
+      {fresh && !full && (
+        <Badge tone="accent" className="w-new">
+          新
+        </Badge>
+      )}
       <span className="w-sub">{sub}</span>
       <div className="w-btns">
         <IconButton title="缩小到缩略" aria-label="缩小到缩略" onClick={() => minimize(id)}>
@@ -156,7 +160,7 @@ export const WidgetWindow = memo(function WidgetWindow({
   );
   const body = (
     <div
-      className="w-card"
+      className="w-card ll-sky"
       ref={cardRef}
       style={ad != null ? { '--ad': ad + 'ms' } : undefined}
       {...hover}
@@ -170,7 +174,7 @@ export const WidgetWindow = memo(function WidgetWindow({
       <div className="w-body">
         <def.View mode={full ? 'full' : 'normal'} params={params || {}} handle={def._h!} />
       </div>
-      <i className="w-vig" aria-hidden="true" />
+      <i className="w-vig ll-sky-vig" aria-hidden="true" />
       {arr}
     </div>
   );

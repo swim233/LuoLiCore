@@ -1,7 +1,8 @@
-/* 夜空窗口里那层更深更密的星空：两张静态的星点贴图（同一组星，640×390 和 900×548 两种大小），所有窗口、胶囊共用。
-   启动时在主线程用 canvas 按固定的种子画一次，按 devicePixelRatio 画清楚；DPR 变了（浏览器缩放、换屏幕）重画。
-   画好的图写成 :root 的 --ll-sky-stars-a、--ll-sky-stars-b（data: 地址，不请求外部地址），写在 <head> 里一个 <style> 里，
-   和 easing.ts 一样不写 <html> 的行内样式。样式表里两个变量默认是 none，图还没画好时窗口只是没有这层星点。
+import { SKY_DOTS, SKY_H, SKY_TILES, SKY_W } from '@luoli/ui/sky-stars';
+
+/* 气泡里「预先糊好」的星空。窗口里那层更深更密的星空（两张星点贴图）归组件库：库的 startSkyStars()（@luoli/ui/sky-stars）启动时画好，
+   写进 :root 的 --ll-sky-stars-a、--ll-sky-stars-b，夜空窗口（.ll-sky）的底用它们；星点的位置、两张贴图的大小和起点（SKY_DOTS、SKY_W、SKY_H、SKY_TILES）也从库里引，
+   这里只管「把这两张星点贴图各糊一份」这一做法。
 
    气泡的毛玻璃用实时模糊（lib/glass.ts），气泡自己 backdrop-filter，不需要糊好的星空。「预先糊好」那一做法用的星空在这里画：同样这两张星点贴图各糊一份，
    气泡里垫的一层背景（app.css 的 .bubble-sky）用它们代替清楚的星点。这一整套（糊贴图、读颜色、写样式规则，一次约 15～20 毫秒，
@@ -10,61 +11,14 @@
    备好之前就有垫层挂上（开发模式里切过去）时，由挂上的那一刻（components/bubble-sky.ts 调）现做。
    贴图是平铺的，糊的时候要把它平铺着画（上下左右各一份）再取中间一块，接缝才是连续的。
    糊开以后没有细节，所以只画原来的 1/4 大小（背景铺的时候放大回去，放大一张糊开的图看不出来），模糊半径跟着缩小（20 像素 → 5 像素）：
-   图只有 1～2 KB，画起来不到一毫秒，也不随 DPR 变（上面的星点贴图 DPR 变了重画，糊好的这两张不用重画）。
+   图只有 1～2 KB，画起来不到一毫秒，也不随 DPR 变（库里的星点贴图 DPR 变了重画，糊好的这两张不用重画）。
    平铺只需要在四周多画模糊半径四倍的一圈（再远的星点对中间那一块没有影响），不用真的画 3×3 整份。
    这层背景写成一条样式规则放在自己的 <style id="bubble-sky-rule"> 里（skyRule），不放在 app.css：图和颜色都直接写在 background-image 里，没有 var()。
    气泡滚动时每帧要改这层的位移，样式每次重算，background-image 里要是有 var()，每次都得把整个值（含图片）重新代入、重新解析，
    十几个气泡每帧多花 1 毫秒多；写成字面的值就只剩位置和大小那几个短的 var()。颜色取自 app.css 里窗口背景用的那几个变量 */
-const W = 1280,
-  H = 780;
-/* 两层贴图的大小（CSS 像素）和起点（相对窗口左上角，和 app.css 的 --ll-sky-bg 一致）：同一组星按比例缩小，越小越密 */
-const TILES: [string, number, number, number, number][] = [
-  ['--ll-sky-stars-a', 640, 390, -40, -30],
-  ['--ll-sky-stars-b', 900, 548, -200, -90],
-];
-/** 糊好的贴图和上面的两张一一对应；模糊半径（CSS 像素，和实时的 blur(20px) 一样）；画的时候缩小到几分之一 */
+/** 糊好的贴图和库里的两张星点贴图一一对应；模糊半径（CSS 像素，和实时的 blur(20px) 一样）；画的时候缩小到几分之一 */
 const SKY_BLUR = 20;
 const SKY_SCALE = 0.25;
-
-interface Dot {
-  x: number;
-  y: number;
-  r: number;
-  a: number;
-}
-/* 固定的种子（和拷问演示页同一组星）：170 颗，九成是小星 */
-function dots(): Dot[] {
-  let seed = 7;
-  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  const out: Dot[] = [];
-  for (let i = 0; i < 170; i++) {
-    const x = rnd() * W,
-      y = rnd() * H;
-    const r = rnd() < 0.9 ? 0.5 + rnd() * 0.7 : 1.1 + rnd() * 0.6;
-    out.push({ x, y, r, a: 0.25 + rnd() * 0.6 });
-  }
-  return out;
-}
-const DOTS = dots();
-
-function tile(w: number, h: number, dpr: number) {
-  const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.round(w * dpr));
-  c.height = Math.max(1, Math.round(h * dpr));
-  const g = c.getContext('2d');
-  if (!g) return 'none';
-  /* 先换到贴图自己的 CSS 像素，再按整张图缩小：星的位置、大小和「整张 1280×780 的图缩到这么大」一样，只是画得清楚 */
-  g.scale(c.width / w, c.height / h);
-  g.scale(w / W, h / H);
-  g.fillStyle = '#fff';
-  for (const d of DOTS) {
-    g.globalAlpha = d.a;
-    g.beginPath();
-    g.arc(d.x, d.y, d.r, 0, Math.PI * 2);
-    g.fill();
-  }
-  return `url(${c.toDataURL('image/png')})`;
-}
 
 /* 糊好的贴图：星点画在 (w + 2m) × (h + 2m) 的画布上，四周各多画一圈邻居（平铺），整张糊开，再取中间 w × h 那一块 */
 function blurredTile(w: number, h: number) {
@@ -86,8 +40,8 @@ function blurredTile(w: number, h: number) {
     for (let j = -1; j <= 1; j++) {
       g.save();
       g.translate(m + i * cw, m + j * ch);
-      g.scale(cw / W, ch / H);
-      for (const d of DOTS) {
+      g.scale(cw / SKY_W, ch / SKY_H);
+      for (const d of SKY_DOTS) {
         g.globalAlpha = d.a;
         g.beginPath();
         g.arc(d.x, d.y, d.r, 0, Math.PI * 2);
@@ -102,7 +56,7 @@ function blurredTile(w: number, h: number) {
 let skyTiles: string[] | null = null;
 /** 糊好的贴图（画一次，之后一直用）；画不出来就是一层透明的 */
 const blurredTiles = () =>
-  (skyTiles ??= TILES.map(([, w, h]) => blurredTile(w, h)).map((u) =>
+  (skyTiles ??= SKY_TILES.map(([, w, h]) => blurredTile(w, h)).map((u) =>
     u === 'none' ? 'linear-gradient(transparent, transparent)' : u,
   ));
 
@@ -145,7 +99,7 @@ function skyRule() {
   if (!base || !dark || !glowA || !glowB) return '';
   const d = saturated(dark, true);
   const [a, b] = blurredTiles();
-  const [ta, tb] = TILES;
+  const [ta, tb] = SKY_TILES;
   const images = [
     `linear-gradient(${d}, ${d})`,
     a,
@@ -197,25 +151,4 @@ export function warmBubbleSky() {
       requestIdleCallback(() => void ensureBubbleSky(), { timeout: WARM_TIMEOUT });
     else void ensureBubbleSky();
   }, WARM_DELAY);
-}
-
-let style: HTMLStyleElement | null = null;
-let dprNow = 0;
-function draw() {
-  const dpr = window.devicePixelRatio || 1;
-  if (dpr === dprNow) return;
-  dprNow = dpr;
-  if (!style) {
-    style = document.createElement('style');
-    style.id = 'win-sky';
-    document.head.append(style);
-  }
-  style.textContent = `:root{${TILES.map(([v, w, h]) => `${v}:${tile(w, h, dpr)}`).join(';')}}`;
-  /* 盯着现在这个 DPR：一变就重画，再盯新的 */
-  window
-    .matchMedia(`(resolution: ${dpr}dppx)`)
-    .addEventListener('change', () => queueMicrotask(draw), { once: true });
-}
-export function startWinSky() {
-  draw();
 }
