@@ -19,6 +19,11 @@ export type TelegramConfig = {
   staleMs: number;
   /** Bot API 地址，LUOLI_TELEGRAM_API_URL，默认官方地址；测试时指向本地假接口 */
   apiUrl: string;
+  /**
+   * 回复发富文本消息（sendRichMessage），LUOLI_TELEGRAM_RICH。不设时打开；设成 off 时发普通消息，
+   * 和以前一样
+   */
+  rich: boolean;
 };
 
 export const defaultErrorText = '（出了点问题，稍后再试）';
@@ -60,6 +65,11 @@ export function parseTelegramConfig(
     return { ok: false, error: 'LUOLI_TELEGRAM_API_URL 不是合法的 URL' };
   }
 
+  const rich = env.LUOLI_TELEGRAM_RICH || undefined;
+  if (rich !== undefined && rich !== 'off') {
+    return { ok: false, error: 'LUOLI_TELEGRAM_RICH 只能是 off（发普通消息；不设时打开）' };
+  }
+
   return {
     ok: true,
     config: {
@@ -70,6 +80,7 @@ export function parseTelegramConfig(
       errorText: env.LUOLI_TELEGRAM_ERROR_TEXT || defaultErrorText,
       staleMs,
       apiUrl,
+      rich: rich !== 'off',
     },
   };
 }

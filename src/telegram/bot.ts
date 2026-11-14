@@ -21,21 +21,27 @@ import {
   isAllowedChat,
   type TelegramRaw,
 } from './message.js';
+import { plainRichMessage, RichMessageError, type InputRichMessage } from './rich.js';
 import { splitMessage } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
 /** 往哪个聊天发：论坛群里回到触发消息所在的话题 */
 export type ChatTarget = { chatId: number; messageThreadId?: number };
 
-/** 发往 Telegram 的两种操作；由 Chat SDK 的适配器实现，测试里可以换成假的 */
+/** 发往 Telegram 的几种操作；由 Chat SDK 的适配器实现，测试里可以换成假的 */
 export type Sender = {
   /** 显示「正在输入」，Telegram 几秒后自动消失 */
   typing(target: ChatTarget): Promise<void>;
   /**
-   * 发一条纯文本；replyTo 为被引用消息的 id。被引用的消息不在了（删了、id 不对）时照样发出，
-   * 只是不带引用（适配器带上 allow_sending_without_reply）
+   * 发一条纯文本的普通消息；replyTo 为被引用消息的 id。被引用的消息不在了（删了、id 不对）时
+   * 照样发出，只是不带引用（适配器带上 allow_sending_without_reply）
    */
   send(target: ChatTarget, text: string, replyTo?: number): Promise<void>;
+  /**
+   * 发一条富文本消息（sendRichMessage），引用的规则同 send。服务端不认识这个接口、Telegram 拒收
+   * 这一条时抛 RichMessageError（unsupported、rejected），由调用方改发普通消息；别的失败原样抛出
+   */
+  sendRich(target: ChatTarget, message: InputRichMessage, replyTo?: number): Promise<void>;
 };
 
 /** 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点 */
@@ -177,6 +183,7 @@ export function createTelegramBot({
   wakeWords,
   errorText,
   staleMs,
+  rich,
   typingIntervalMs = 4000,
   wait = { idleMs: waitMs, maxMs: maxWaitMs },
   onRound,
@@ -198,6 +205,8 @@ export function createTelegramBot({
   errorText: string;
   /** 触发消息的发送时间早于这么久之前（毫秒）时只记录、不回复 */
   staleMs: number;
+  /** 回复发富文本消息；false 时发普通消息，和以前一样 */
+  rich: boolean;
   /** 等待与生成期间每隔多久重发「正在输入」 */
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
@@ -211,6 +220,8 @@ export function createTelegramBot({
   const stopping = new AbortController();
   // 一开始关闭就置位：之后不再打开会话、不再开始新的一轮
   let closing = false;
+  // 回复先试富文本消息：开着富文本，而且这次运行里还没发现服务端不认识这个接口
+  let richAvailable = rich;
 
   function notify(type: RoundNotice['type'], session: Session): void {
     if (!onRound) return;
@@ -391,6 +402,7 @@ export function createTelegramBot({
    * 最后一步的文字在这一步结束时发。没有文字的步不发。每条都引用 quote（没有时不引用）。
    * 流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
    * 再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
+   * 文字照旧按 4096 拆段，每段先试富文本消息（见 deliver）；失败提示总是普通消息。
    * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）
    */
   async function reply(
@@ -414,7 +426,7 @@ export function createTelegramBot({
       const chunks = splitMessage(text).filter((chunk) => chunk.trim());
       for (const [index, chunk] of chunks.entries()) {
         // 第一段引用触发消息，后面的接着发
-        const sent = await send(target, chunk, index === 0 ? quote : undefined, fields);
+        const sent = await deliver(target, chunk, index === 0 ? quote : undefined, fields);
         if (!sent) break;
       }
     };
@@ -629,7 +641,45 @@ export function createTelegramBot({
     return session;
   }
 
-  /** 发送失败只记日志，不重试；返回是否发出 */
+  /**
+   * 发回复的一段文字。先试富文本消息（开着富文本、服务端也认识这个接口时），文字原样放进一个段落：
+   * - Telegram 拒收这一条：这一段改发普通消息，记 telegram.rich_fallback；下一段照常先试富文本；
+   * - 服务端不认识这个接口：这一段改发普通消息，之后都直接发普通消息，telegram.rich_unavailable
+   *   只记一次；
+   * - 别的失败：和普通消息发送失败一样只记日志，不改发、不重试。
+   * 日志不带正文。返回是否发出
+   */
+  async function deliver(
+    target: ChatTarget,
+    text: string,
+    replyTo: number | undefined,
+    fields: object,
+  ): Promise<boolean> {
+    if (richAvailable) {
+      try {
+        await sender.sendRich(target, plainRichMessage(text), replyTo);
+        return true;
+      } catch (error) {
+        if (!(error instanceof RichMessageError)) {
+          sendFailed('sendRichMessage', error, fields);
+          return false;
+        }
+        if (error.kind === 'rejected') {
+          logger.warn(
+            { ...fields, reason: 'rejected', error: describe(error.cause) },
+            'telegram.rich_fallback',
+          );
+        } else if (richAvailable) {
+          // 几个会话同时在发时可能都碰上，只有第一个记
+          richAvailable = false;
+          logger.warn({ ...fields, error: describe(error.cause) }, 'telegram.rich_unavailable');
+        }
+      }
+    }
+    return send(target, text, replyTo, fields);
+  }
+
+  /** 发一条普通消息。发送失败只记日志，不重试；返回是否发出 */
   async function send(
     target: ChatTarget,
     text: string,
@@ -640,12 +690,13 @@ export function createTelegramBot({
       await sender.send(target, text, replyTo);
       return true;
     } catch (error) {
-      logger.warn(
-        { ...fields, method: 'sendMessage', error: describe(error) },
-        'telegram.send_failed',
-      );
+      sendFailed('sendMessage', error, fields);
       return false;
     }
+  }
+
+  function sendFailed(method: string, error: unknown, fields: object): void {
+    logger.warn({ ...fields, method, error: describe(error) }, 'telegram.send_failed');
   }
 
   return {

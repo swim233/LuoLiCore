@@ -95,11 +95,14 @@ async function start(
     state,
     backlog,
     wait = { idleMs: 50, maxMs: 500 },
+    rich = true,
   }: {
     storage?: Storage;
     state?: StateAdapter;
     /** 等待合并的时长；默认调小 */
     wait?: { idleMs: number; maxMs: number };
+    /** 发富文本消息（LUOLI_TELEGRAM_RICH）；默认打开，和配置的默认值一样 */
+    rich?: boolean;
     /** 启动前就在假接口里的更新，相当于停机期间积压的 */
     backlog?: (api: FakeTelegram) => void;
   } = {},
@@ -118,6 +121,7 @@ async function start(
       wakeWords: ['nori'],
       errorText: '（出了点问题）',
       staleMs: 60 * 60_000,
+      rich,
     },
     // 洛璃服务里由会话管理提供；这里直接建
     open: async (conversationId, { checkIdleOnCreate }) =>
@@ -149,7 +153,20 @@ async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 30
   }
 }
 
-const sends = (api: FakeTelegram) => api.calls.filter((call) => call.method === 'sendMessage');
+/** 发消息的请求（sendMessage、sendRichMessage，含失败的），按发出先后 */
+const sends = (api: FakeTelegram) =>
+  api.calls.filter((call) => call.method === 'sendMessage' || call.method === 'sendRichMessage');
+
+/** 等到群里看到 count 条 bot 发的消息（普通消息、富文本消息都算） */
+const delivered = (api: FakeTelegram, count = 1, timeoutMs?: number) =>
+  waitUntil(() => api.delivered.length >= count, timeoutMs);
+
+/** 群里看到的：哪一种、文字、引用了哪条 */
+const shown = (api: FakeTelegram) =>
+  api.delivered.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }));
+
+/** 一个段落块的富文本消息 */
+const paragraph = (text: string) => ({ blocks: [{ type: 'paragraph', text }] });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -188,29 +205,81 @@ async function historyOf(storage: Storage, chatId: number) {
 }
 
 describe('Telegram 前端（本地假 Bot API）', () => {
-  it('群里含唤醒词：记录并回复，纯文本、引用触发消息，期间发「正在输入」', async () => {
-    const { api, app, storage } = await start(replying('你好呀'));
+  it('群里含唤醒词：记录并回复，发富文本消息（一个段落块，文字原样）、引用触发消息，期间发「正在输入」', async () => {
+    const reply = '你好呀\n**原样** <b>不解析</b>';
+    const { api, app, storage } = await start(replying(reply));
 
     const [id] = api.push({ chat: group, from: alice, text: 'Nori 在吗' });
-    await api.waitFor((calls) => calls.some((call) => call.method === 'sendMessage'));
+    await delivered(api);
     await app.bot.idle();
 
     expect(sends(api)).toEqual([
       {
-        method: 'sendMessage',
+        method: 'sendRichMessage',
         token,
         body: {
           chat_id: String(group.id),
-          text: '你好呀',
+          rich_message: paragraph(reply),
           reply_parameters: { message_id: id, allow_sending_without_reply: true },
         },
+      },
+    ]);
+    expect(api.delivered).toEqual([
+      {
+        kind: 'rich',
+        chatId: String(group.id),
+        messageId: expect.any(Number),
+        text: reply,
+        replyTo: id,
+        rich: paragraph(reply),
       },
     ]);
     expect(api.calls.some((call) => call.method === 'sendChatAction')).toBe(true);
     expect(await historyOf(storage, group.id)).toEqual([
       { role: 'user', text: 'Nori 在吗' },
-      { role: 'assistant', text: '你好呀' },
+      { role: 'assistant', text: reply },
     ]);
+  });
+
+  it('论坛话题里：富文本消息发到触发消息所在的话题（带 message_thread_id）', async () => {
+    const { api, app } = await start(replying('话题里回'));
+
+    const [id] = api.push({
+      chat: group,
+      from: alice,
+      text: 'nori 在吗',
+      is_topic_message: true,
+      message_thread_id: 77,
+    });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => [call.method, call.body])).toEqual([
+      [
+        'sendRichMessage',
+        {
+          chat_id: String(group.id),
+          message_thread_id: 77,
+          rich_message: paragraph('话题里回'),
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      ],
+    ]);
+  });
+
+  it('被引用的消息已经删了：富文本消息照样发出，只是不带引用', async () => {
+    const { api, app, entries } = await start(replying('还是回你'));
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    api.deleteMessage(group.id, id!);
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => [call.method, call.body.reply_parameters])).toEqual([
+      ['sendRichMessage', { message_id: id, allow_sending_without_reply: true }],
+    ]);
+    expect(shown(api)).toEqual([{ kind: 'rich', text: '还是回你', replyTo: undefined }]);
+    expect(entries.filter((e) => e.level !== 'info')).toEqual([]);
   });
 
   it('群里普通消息只记录：不回复，也不发「正在输入」；发言人、时间、消息 id 写入', async () => {
@@ -249,15 +318,11 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     const { api, app, storage } = await start(replying('收到'));
 
     const [id] = api.push(message);
-    await api.waitFor((calls) => calls.some((call) => call.method === 'sendMessage'));
+    await delivered(api);
     await app.bot.idle();
 
-    expect(sends(api).map((call) => call.body)).toEqual([
-      {
-        chat_id: String(message.chat.id),
-        text: '收到',
-        reply_parameters: { message_id: id, allow_sending_without_reply: true },
-      },
+    expect(api.delivered).toMatchObject([
+      { chatId: String(message.chat.id), text: '收到', replyTo: id },
     ]);
     expect((await historyOf(storage, message.chat.id)).map((m) => m.role)).toEqual([
       'user',
@@ -270,16 +335,13 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     const { api, app } = await start(replying(long));
 
     const [id] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
-    await api.waitFor(() => sends(api).length >= 2);
+    await delivered(api, 2);
     await app.bot.idle();
 
-    const texts = sends(api).map((call) => String(call.body.text));
+    const texts = api.delivered.map((message) => message.text);
     expect(texts.every((text) => text.length <= 4096)).toBe(true);
     expect(texts.join('')).toBe(long);
-    expect(sends(api).map((call) => call.body.reply_parameters)).toEqual([
-      { message_id: id, allow_sending_without_reply: true },
-      undefined,
-    ]);
+    expect(api.delivered.map((message) => message.replyTo)).toEqual([id, undefined]);
   });
 
   it('离线积压：2 小时前的触发只记录，不回复也不发「正在输入」，记 telegram.stale；30 分钟前的照常回复', async () => {
@@ -290,12 +352,10 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       { chat: group, from: alice, text: 'nori 两小时前问的', date: minutesAgo(120) },
       { chat: group, from: bob, text: 'nori 半小时前问的', date: minutesAgo(30) },
     );
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
-    expect(sends(api).map((call) => call.body.reply_parameters)).toEqual([
-      { message_id: recent, allow_sending_without_reply: true },
-    ]);
+    expect(api.delivered.map((message) => message.replyTo)).toEqual([recent]);
     expect(api.calls.filter((call) => call.method === 'sendChatAction')).toHaveLength(1);
     expect(entries.filter((e) => e.msg === 'telegram.stale').map((e) => e.fields)).toEqual([
       {
@@ -315,7 +375,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
   it('回复 bot 的消息触发回复', async () => {
     const { api, app } = await start(replying('第一句', '第二句'));
     api.push({ chat: group, from: alice, text: 'nori 早' });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
     const botMessage = {
       message_id: 5001,
@@ -326,12 +386,9 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     };
 
     const [id] = api.push({ chat: group, from: bob, text: '为什么', reply_to_message: botMessage });
-    await api.waitFor(() => sends(api).length === 2);
+    await delivered(api, 2);
 
-    expect(sends(api)[1]?.body).toMatchObject({
-      text: '第二句',
-      reply_parameters: { message_id: id },
-    });
+    expect(api.delivered[1]).toMatchObject({ text: '第二句', replyTo: id });
   });
 
   it('白名单外的群与私聊：不记录、不回复，日志只有聊天类型、chat id 与发送者 id', async () => {
@@ -366,12 +423,12 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     const [last] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
     await waitUntil(async () => (await historyOf(storage, group.id)).length === 4);
     release();
-    await api.waitFor(() => sends(api).length === 2);
+    await delivered(api, 2);
     await app.bot.idle();
 
-    expect(sends(api).map((call) => call.body)).toMatchObject([
-      { text: '慢慢说', reply_parameters: { message_id: first } },
-      { text: '再说', reply_parameters: { message_id: last } },
+    expect(api.delivered).toMatchObject([
+      { text: '慢慢说', replyTo: first },
+      { text: '再说', replyTo: last },
     ]);
     for (const text of ['nori 我也要听', '期间的闲聊', 'nori 讲长一点', '慢慢说']) {
       expect(promptText(model, 1)).toContain(text);
@@ -380,23 +437,86 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(entries.filter((e) => e.level !== 'info').map((e) => e.msg)).toEqual([]);
   });
 
-  it('模型调用失败：引用触发消息发固定提示；不写入助手消息', async () => {
+  it('模型调用失败：引用触发消息发固定提示，是普通消息（富文本开着也一样）；不写入助手消息', async () => {
     const { api, app, storage } = await start(replying(unauthorized()));
 
     const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
-    expect(sends(api)[0]?.body).toEqual({
-      chat_id: String(group.id),
-      text: '（出了点问题）',
-      reply_parameters: { message_id: id, allow_sending_without_reply: true },
-    });
+    expect(sends(api).map((call) => [call.method, call.body])).toEqual([
+      [
+        'sendMessage',
+        {
+          chat_id: String(group.id),
+          text: '（出了点问题）',
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      ],
+    ]);
     expect((await historyOf(storage, group.id)).map((m) => m.role)).toEqual(['user']);
   });
 
-  it('发送失败：记 telegram.send_failed，不重试，之后的消息照常', async () => {
+  it.each([
+    [500, 'Internal Server Error', 'NetworkError'],
+    [429, 'Too Many Requests: retry after 5', 'AdapterRateLimitError'],
+    [401, 'Unauthorized', 'AuthenticationError'],
+  ])(
+    'Bot API 对 sendRichMessage 回 %i：不改发 sendMessage、不重试，记 telegram.send_failed；之后的消息照常',
+    async (status, description, type) => {
+      const { api, app, entries } = await start(replying('第一句', '第二句'));
+      api.failRichSends({ status, description });
+
+      api.push({ chat: group, from: alice, text: 'nori 一' });
+      await waitUntil(() => entries.some((e) => e.msg === 'telegram.send_failed'));
+      await app.bot.idle();
+      const [second] = api.push({ chat: group, from: alice, text: 'nori 二' });
+      await delivered(api);
+      await app.bot.idle();
+
+      expect(sends(api).map((call) => call.method)).toEqual(['sendRichMessage', 'sendRichMessage']);
+      expect(shown(api)).toEqual([{ kind: 'rich', text: '第二句', replyTo: second }]);
+      expect(entries.filter((e) => e.msg === 'telegram.send_failed').map((e) => e.fields)).toEqual([
+        {
+          conversationId: expect.any(String),
+          method: 'sendRichMessage',
+          error: { type, message: expect.any(String) },
+        },
+      ]);
+      expect(entries.map((e) => e.msg)).not.toContain('telegram.rich_fallback');
+    },
+  );
+
+  it('sendRichMessage 拒收、改发的 sendMessage 也失败：记 telegram.send_failed（sendMessage），不重试；之后的消息照常', async () => {
     const { api, app, entries } = await start(replying('第一句', '第二句'));
+    api.failRichSends({ status: 400, description: "Bad Request: can't parse rich message" });
+    api.failSends(500);
+
+    api.push({ chat: group, from: alice, text: 'nori 一' });
+    await waitUntil(() => entries.some((e) => e.msg === 'telegram.send_failed'));
+    await app.bot.idle();
+    const [second] = api.push({ chat: group, from: alice, text: 'nori 二' });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => call.method)).toEqual([
+      'sendRichMessage',
+      'sendMessage',
+      'sendRichMessage',
+    ]);
+    expect(shown(api)).toEqual([{ kind: 'rich', text: '第二句', replyTo: second }]);
+    expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toHaveLength(1);
+    expect(entries.filter((e) => e.msg === 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendMessage',
+        error: { type: 'NetworkError', message: expect.any(String) },
+      },
+    ]);
+  });
+
+  it('富文本关着时发送失败：记 telegram.send_failed（sendMessage），不重试，之后的消息照常', async () => {
+    const { api, app, entries } = await start(replying('第一句', '第二句'), { rich: false });
     api.failSends(500);
 
     api.push({ chat: group, from: alice, text: 'nori 一' });
@@ -409,6 +529,146 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(entries.find((e) => e.msg === 'telegram.send_failed')?.fields).toMatchObject({
       method: 'sendMessage',
     });
+  });
+
+  it.each([
+    [
+      '400',
+      { status: 400, description: "Bad Request: can't parse rich message" },
+      'ValidationError',
+    ],
+    // 说明里有 not found，但不是找不到方法：不能当成不认识接口（那样之后再也不发富文本）
+    [
+      '400 chat not found',
+      { status: 400, description: 'Bad Request: chat not found' },
+      'ValidationError',
+    ],
+    [
+      '400 message to be replied not found',
+      { status: 400, description: 'Bad Request: message to be replied not found' },
+      'ValidationError',
+    ],
+    [
+      '403',
+      { status: 403, description: 'Forbidden: not enough rights to send rich messages' },
+      'PermissionError',
+    ],
+  ])(
+    'Bot API 对 sendRichMessage 回 %s（拒收）：这一条改发 sendMessage，群里看到的文字和引用不变；下一次回复照常先试富文本',
+    async (_status, failure, type) => {
+      const { api, app, entries } = await start(replying('你好呀', '第二句'));
+      api.failRichSends(failure);
+
+      const [first] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+      await delivered(api);
+      await app.bot.idle();
+      const [second] = api.push({ chat: group, from: alice, text: 'nori 再说' });
+      await delivered(api, 2);
+      await app.bot.idle();
+
+      expect(sends(api).map((call) => [call.method, call.body])).toEqual([
+        [
+          'sendRichMessage',
+          {
+            chat_id: String(group.id),
+            rich_message: paragraph('你好呀'),
+            reply_parameters: { message_id: first, allow_sending_without_reply: true },
+          },
+        ],
+        [
+          'sendMessage',
+          {
+            chat_id: String(group.id),
+            text: '你好呀',
+            reply_parameters: { message_id: first, allow_sending_without_reply: true },
+          },
+        ],
+        [
+          'sendRichMessage',
+          {
+            chat_id: String(group.id),
+            rich_message: paragraph('第二句'),
+            reply_parameters: { message_id: second, allow_sending_without_reply: true },
+          },
+        ],
+      ]);
+      expect(shown(api)).toEqual([
+        { kind: 'plain', text: '你好呀', replyTo: first },
+        { kind: 'rich', text: '第二句', replyTo: second },
+      ]);
+      expect(
+        entries.filter((e) => e.msg === 'telegram.rich_fallback').map((e) => e.fields),
+      ).toEqual([
+        {
+          conversationId: expect.any(String),
+          reason: 'rejected',
+          error: { type, message: expect.any(String) },
+        },
+      ]);
+      expect(entries.map((e) => e.msg)).not.toContain('telegram.send_failed');
+    },
+  );
+
+  it.each([
+    ['404', (api: FakeTelegram) => api.dropRichMessages()],
+    [
+      '400 Bad Request: method not found',
+      (api: FakeTelegram) =>
+        api.failRichSends({ status: 400, description: 'Bad Request: method not found' }),
+    ],
+    [
+      '400 METHOD_NOT_FOUND',
+      (api: FakeTelegram) => api.failRichSends({ status: 400, description: 'METHOD_NOT_FOUND' }),
+    ],
+  ])(
+    'Bot API 不认识 sendRichMessage（%s）：改发 sendMessage；再回复一次，不再出现 sendRichMessage 的请求',
+    async (_case, unsupported) => {
+      const { api, app, entries } = await start(replying('你好呀', '第二句'));
+      unsupported(api);
+
+      const [first] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+      await delivered(api);
+      await app.bot.idle();
+      const [second] = api.push({ chat: group, from: alice, text: 'nori 再说' });
+      await delivered(api, 2);
+      await app.bot.idle();
+
+      expect(sends(api).map((call) => call.method)).toEqual([
+        'sendRichMessage',
+        'sendMessage',
+        'sendMessage',
+      ]);
+      expect(shown(api)).toEqual([
+        { kind: 'plain', text: '你好呀', replyTo: first },
+        { kind: 'plain', text: '第二句', replyTo: second },
+      ]);
+      expect(entries.filter((e) => e.msg === 'telegram.rich_unavailable')).toMatchObject([
+        { level: 'warn', fields: { conversationId: expect.any(String) } },
+      ]);
+      expect(entries.map((e) => e.msg)).not.toContain('telegram.rich_fallback');
+    },
+  );
+
+  it('富文本关着：只有 sendMessage，请求和以前一样', async () => {
+    const { api, app } = await start(replying('你好呀'), { rich: false });
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(api.calls.map((call) => call.method)).not.toContain('sendRichMessage');
+    expect(sends(api)).toEqual([
+      {
+        method: 'sendMessage',
+        token,
+        body: {
+          chat_id: String(group.id),
+          text: '你好呀',
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      },
+    ]);
+    expect(shown(api)).toEqual([{ kind: 'plain', text: '你好呀', replyTo: id }]);
   });
 
   it('改群名：会话标题更新，下一段用新标题', async () => {
@@ -430,7 +690,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     const { api, app, storage } = await start(replying('好'));
 
     api.push({ chat: privateWith(alice), from: alice, text: '在吗' });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
     expect((await storage.findConversation('telegram', String(alice.id)))?.title).toBe(
@@ -467,7 +727,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       { chat: group, from: alice, text: '三' },
       { chat: group, from: bob, text: '四' },
     );
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
     // 回复排在它开始生成时看到的最后一条之后，与后两条的先后取决于时机，这里只看用户消息
@@ -494,7 +754,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       { chat: group, from: alice, text: '先说一句' },
       { chat: group, from: bob, text: 'nori 在吗' },
     );
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
     // 线程历史经 state.appendToList 写入；消息缓存是适配器里的私有 Map
@@ -522,18 +782,18 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     const [second] = api.push({ chat: group, from: bob, text: 'nori 你怎么看' });
     await waitUntil(async () => (await historyOf(storage, group.id)).length === 2);
     api.push({ chat: group, from: alice, text: '我也想知道' });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
     await sleep(100);
 
-    expect(sends(api).map((call) => call.body.reply_parameters)).toEqual([
-      { message_id: second, allow_sending_without_reply: true },
-    ]);
+    expect(api.delivered.map((message) => message.replyTo)).toEqual([second]);
     expect(model.doStreamCalls).toHaveLength(1);
     expect(promptText(model, 0)).toContain('我也想知道');
     // 等待期间就在发「正在输入」
+    const firstSend = sends(api)[0];
+    expect(firstSend).toBeDefined();
     expect(api.calls.findIndex((call) => call.method === 'sendChatAction')).toBeLessThan(
-      api.calls.findIndex((call) => call.method === 'sendMessage'),
+      api.calls.indexOf(firstSend!),
     );
   });
 
@@ -565,7 +825,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         document: { file_id: 'pdf', file_name: '报告.pdf', mime_type: 'application/pdf' },
       },
     );
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
     expect(promptFiles(model, 0)).toEqual(['image/jpeg', 'image/webp']);
@@ -601,7 +861,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     };
 
     const [first, second] = api.push({ ...firstItem, caption: 'nori 看看这组' }, secondItem);
-    await api.waitFor(() => sends(api).length === 1, 8000);
+    await delivered(api, 1, 8000);
     await app.bot.idle();
 
     expect(await historyOf(storage, group.id)).toEqual([
@@ -611,10 +871,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(await filesOf(storage, group.id)).toEqual([2, 0]);
     expect(api.downloads).toEqual(['files/a1', 'files/a2']);
     expect(promptFiles(model, 0)).toEqual(['image/jpeg', 'image/jpeg']);
-    expect(sends(api)[0]?.body.reply_parameters).toEqual({
-      message_id: first,
-      allow_sending_without_reply: true,
-    });
+    expect(api.delivered[0]?.replyTo).toBe(first);
 
     // 同一批里改了两条的说明：各条分别处理，不被当成一组攒起来只剩最后一条
     api.pushEdit({ ...firstItem, message_id: first!, caption: '改过的说明' });
@@ -662,7 +919,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     expect(sends(api)).toEqual([]);
 
     api.push({ chat: group, from: bob, text: 'nori 她说了什么' });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
 
     expect(promptText(model, 0)).toContain('改过的说法');
@@ -696,16 +953,13 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       document: { file_id: 'garbled', file_name: 'scan.png', mime_type: 'image/png' },
       caption: 'nori 看看这张',
     });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
     api.push({ chat: group, from: bob, text: 'nori 刚才那张呢' });
-    await api.waitFor(() => sends(api).length === 2);
+    await delivered(api, 2);
     await app.bot.idle();
 
-    expect(sends(api).map((call) => call.body)).toMatchObject([
-      { text: '这张图打不开', reply_parameters: { message_id: id } },
-      { text: '记得' },
-    ]);
+    expect(api.delivered).toMatchObject([{ text: '这张图打不开', replyTo: id }, { text: '记得' }]);
     expect(model.doStreamCalls).toHaveLength(3);
     expect(promptFiles(model, 0)).toEqual(['image/png']);
     expect(promptFiles(model, 2)).toEqual([]);
@@ -732,17 +986,17 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       document: { file_id: 'fake', file_name: 'fake.png', mime_type: 'image/png', file_size: 33 },
       caption: 'nori 这个文件里是什么？',
     });
-    await api.waitFor(() => sends(api).length === 1);
+    await delivered(api);
     await app.bot.idle();
     api.push({ chat: group, from: bob, text: 'nori 还在吗' });
-    await api.waitFor(() => sends(api).length === 2);
+    await delivered(api, 2);
     await app.bot.idle();
 
     expect(api.downloads).toEqual(['files/fake']);
     expect(promptFiles(model, 0)).toEqual([]);
     expect(promptFiles(model, 1)).toEqual([]);
     expect(promptText(model, 1)).toContain('[文件 fake.png]');
-    expect(sends(api).map((call) => call.body.text)).toEqual(['看起来是个文件', '好的']);
+    expect(api.delivered.map((message) => message.text)).toEqual(['看起来是个文件', '好的']);
     expect(await filesOf(storage, group.id)).toEqual([0, 0, 0, 0]);
     expect(entries.filter((e) => e.msg === 'telegram.image_rejected').map((e) => e.fields)).toEqual(
       [{ conversationId: expect.any(String), kind: 'document', size: 33 }],
@@ -939,14 +1193,29 @@ describe('指令（经过真的适配器）', () => {
     await app.bot.idle();
     await sleep(100);
 
+    // 指令的提示是普通消息，洛璃的回复是富文本消息
+    expect(
+      api.delivered.map(({ kind, chatId, text, replyTo }) => ({ kind, chatId, text, replyTo })),
+    ).toEqual([
+      { kind: 'plain', chatId: String(group.id), text: '已压缩', replyTo: groupCompact },
+      { kind: 'plain', chatId: String(group.id), text: '已清空上下文', replyTo: groupClear },
+      { kind: 'rich', chatId: String(alice.id), text: '收到', replyTo: hello },
+      { kind: 'plain', chatId: String(alice.id), text: '已压缩', replyTo: privateCompact },
+      { kind: 'plain', chatId: String(alice.id), text: '已清空上下文', replyTo: privateClear },
+    ]);
+    expect(sends(api)).toHaveLength(5);
+    // 指令的提示：请求体里只有聊天、文字、引用，没有格式标记
     const quote = (id: number | undefined) => ({
       message_id: id,
       allow_sending_without_reply: true,
     });
-    expect(sends(api).map((call) => call.body)).toEqual([
+    expect(
+      sends(api)
+        .filter((call) => call.method === 'sendMessage')
+        .map((call) => call.body),
+    ).toEqual([
       { chat_id: String(group.id), text: '已压缩', reply_parameters: quote(groupCompact) },
       { chat_id: String(group.id), text: '已清空上下文', reply_parameters: quote(groupClear) },
-      { chat_id: String(alice.id), text: '收到', reply_parameters: quote(hello) },
       { chat_id: String(alice.id), text: '已压缩', reply_parameters: quote(privateCompact) },
       { chat_id: String(alice.id), text: '已清空上下文', reply_parameters: quote(privateClear) },
     ]);
@@ -1008,11 +1277,8 @@ describe('指令（经过真的适配器）', () => {
     void app.commandsRegistered.then(() => (registered = true));
 
     const [id] = api.push({ chat: group, from: alice, text: 'nori 在吗' });
-    await waitUntil(() => sends(api).length === 1);
-    expect(sends(api)[0]!.body).toMatchObject({
-      text: '收到',
-      reply_parameters: { message_id: id },
-    });
+    await delivered(api);
+    expect(shown(api)).toEqual([{ kind: 'rich', text: '收到', replyTo: id }]);
     expect(registered).toBe(false);
 
     release();

@@ -14,7 +14,7 @@ import {
   type ToolDefinition,
   type Trigger,
 } from '../../core/index.js';
-import { startFakeTelegram } from '../../telegram/fake-api.js';
+import { startFakeTelegram, type Delivered } from '../../telegram/fake-api.js';
 import { startTelegramFrontend } from '../telegram.js';
 import { fakeClock, recordingLogger, testService } from '../test-kit.js';
 import type {
@@ -1160,6 +1160,16 @@ const aliceUser: TelegramUser = {
 };
 const bobUser: TelegramUser = { id: 22, is_bot: false, first_name: 'Bob' };
 
+/** 发消息的请求：富文本消息（默认）或普通消息 */
+const isSend = (method: string) => method === 'sendMessage' || method === 'sendRichMessage';
+/** 群里看到的一条：在哪个聊天、文字、引用了哪条（不管是富文本消息还是普通消息） */
+const visible = ({ chatId, messageId, text, replyTo }: Delivered) => ({
+  chatId,
+  messageId,
+  text,
+  replyTo,
+});
+
 /**
  * 接上 Telegram 前端（本地假 Bot API），照 main.ts 的接法：会话从会话管理取，登记到点入口。
  * 等待合并调小（用真的计时器）；定时器在这之后才开始，和服务里一样
@@ -1181,6 +1191,7 @@ async function withTelegram(
       wakeWords: ['nori'],
       errorText: '（出了点问题）',
       staleMs: 60 * 60_000,
+      rich: true,
     },
     sessions: s.sessions!,
     storage: s.observed,
@@ -1312,7 +1323,7 @@ describe('到点进 Telegram', () => {
     await waitUntil(() => t.api.delivered.length === 1, '回复发出');
     await t.telegram.bot.idle();
 
-    expect(t.api.delivered).toEqual([
+    expect(t.api.delivered.map(visible)).toEqual([
       {
         chatId: String(group.id),
         messageId: expect.any(Number),
@@ -1336,7 +1347,7 @@ describe('到点进 Telegram', () => {
     // 等待合并时就在发「正在输入」
     const methods = t.api.calls.map((call) => call.method);
     expect(methods.indexOf('sendChatAction')).toBeGreaterThanOrEqual(0);
-    expect(methods.indexOf('sendChatAction')).toBeLessThan(methods.indexOf('sendMessage'));
+    expect(methods.indexOf('sendChatAction')).toBeLessThan(methods.findIndex(isSend));
   });
 
   it('等待合并中到点：并进这一轮，只回复一次；触发者是群里那条，回复引用最后的触发（任务的来源）', async () => {
@@ -1470,7 +1481,7 @@ describe('到点进 Telegram', () => {
 
     expect(t.api.delivered).toMatchObject([{ chatId: String(aliceUser.id), text: '到点啦' }]);
     // 引用的是任务的来源（假接口里没有这条，所以群里看到的不带引用）
-    const sent = t.api.calls.filter((call) => call.method === 'sendMessage');
+    const sent = t.api.calls.filter((call) => isSend(call.method));
     expect(sent.map((call) => call.body.reply_parameters)).toEqual([
       { message_id: 4242, allow_sending_without_reply: true },
     ]);
@@ -1518,7 +1529,7 @@ describe('到点进 Telegram', () => {
     expect(await kinds(s, inGroup)).toEqual(['task']);
     expect(await kinds(s, withBob)).toEqual(['task']);
     expect(model.doStreamCalls).toHaveLength(0);
-    expect(t.api.calls.map((call) => call.method)).not.toContain('sendMessage');
+    expect(t.api.calls.map((call) => call.method).filter(isSend)).toEqual([]);
     expect(t.api.calls.map((call) => call.method)).not.toContain('sendChatAction');
     expect(s.lives().filter((event) => event.type === 'wait')).toEqual([]);
   });
@@ -1565,7 +1576,7 @@ describe('到点进 Telegram', () => {
     await waitUntil(() => t.api.delivered.length === 1, '回复发出');
     await t.telegram.bot.idle();
 
-    expect(t.api.delivered).toEqual([
+    expect(t.api.delivered.map(visible)).toEqual([
       { chatId: String(group.id), messageId: expect.any(Number), text: '该交周报了' },
     ]);
     expect(t.entries.filter((e) => e.msg === 'telegram.send_failed')).toEqual([]);

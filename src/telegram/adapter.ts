@@ -6,6 +6,7 @@ import {
 import type { Logger as ChatLogger, WebhookOptions } from 'chat';
 import type { Logger } from '../core/index.js';
 import type { TelegramRaw } from './message.js';
+import { RichMessageError, type InputRichMessage } from './rich.js';
 
 /**
  * 按我们的需要调整的 Telegram 适配器（依赖 4.43.0 的内部实现，升级 SDK 前要重新核对这几处）：
@@ -20,6 +21,11 @@ import type { TelegramRaw } from './message.js';
  *   相册某一条的编辑不再攒，立即按单条派发。
  * - 下载文件：公开基类的 downloadFile。
  * - 登记指令菜单：setCommands（setMyCommands）。
+ * - 发富文本消息（postRichMessage）：直接用 telegramFetch 调 sendRichMessage，不经过 postMessage
+ *   （它只在消息是 Markdown 时自己试富文本，传字符串时发普通消息）；聊天、话题、引用的参数用基类的
+ *   resolveThreadId、buildChatTargetParams、buildReplyParameters 拼。失败按基类换成的错误类的名字
+ *   （ResourceNotFoundError、ValidationError、PermissionError）分出不认识接口、拒收两种，
+ *   依赖 4.43.0 的 telegramFetch、这几个方法和这些名字，升级前要核对。
  * - 连接状态：记下最近一次拉取更新是否成功（connected）与成功的时间，变了时调 onConnectionChange，
  *   洛璃服务据此报告「离线」。断开期间的拉取不长轮询（timeout 0），恢复后第一次拉取就立即返回、
  *   变回连上；之后照旧长轮询。否则恢复后要等一次长轮询返回（默认 30 秒）才知道连上了。
@@ -130,6 +136,31 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
     await this.telegramFetch<boolean>('setMyCommands', { commands });
   }
 
+  /**
+   * 发一条富文本消息（sendRichMessage）到 threadId 那个聊天（论坛群里连同话题）。replyTo 为被引用
+   * 消息的 id，和 postMessage 一样带 allow_sending_without_reply：被引用的消息不在了照样发出，
+   * 只是不带引用。服务端不认识这个接口、Telegram 拒收这一条时抛 RichMessageError，别的失败原样抛出
+   */
+  async postRichMessage(
+    threadId: string,
+    message: InputRichMessage,
+    replyTo?: string,
+  ): Promise<void> {
+    // 拼参数时出的错（thread id 不对等）不是发送的失败，不归类
+    const thread = this.resolveThreadId(threadId);
+    const payload = {
+      ...this.buildChatTargetParams(thread),
+      rich_message: message,
+      reply_parameters: this.buildReplyParameters(replyTo, thread.chatId),
+    };
+    try {
+      await this.telegramFetch('sendRichMessage', payload);
+    } catch (error) {
+      const kind = richFailure(error);
+      throw kind ? new RichMessageError(kind, error) : error;
+    }
+  }
+
   /** 按 file_id 下载文件（getFile 再取文件；地址含 token，出错时的消息里只有 file_id） */
   async download(fileId: string): Promise<Uint8Array> {
     return new Uint8Array(await this.downloadFile(fileId));
@@ -207,6 +238,36 @@ export class LuoliTelegramAdapter extends TelegramAdapter {
 }
 
 const albumTtlMs = 5 * 60_000;
+
+/**
+ * 发富文本消息失败属于哪一种。基类的 telegramFetch 把 Telegram 的错误换成 @chat-adapter/shared 的
+ * 错误类（不是我们直接声明的依赖，按 name 认）：
+ * - 404（ResourceNotFoundError），或者 400 系列（ValidationError，message 是 Telegram 的说明）的说明
+ *   说的是找不到方法（见 methodNotFound）：服务端不认识这个接口，unsupported；
+ * - 其余的 400 系列（ValidationError）和 403（PermissionError）：Telegram 拒收这一条，rejected；
+ * - 别的（429 的 AdapterRateLimitError、401 的 AuthenticationError、5xx 与网络错误的 NetworkError）：
+ *   undefined，由调用方原样抛出
+ */
+function richFailure(error: unknown): RichMessageError['kind'] | undefined {
+  if (!(error instanceof Error)) return undefined;
+  switch (error.name) {
+    case 'ResourceNotFoundError':
+      return 'unsupported';
+    case 'ValidationError':
+      return methodNotFound.test(error.message) ? 'unsupported' : 'rejected';
+    case 'PermissionError':
+      return 'rejected';
+    default:
+      return undefined;
+  }
+}
+
+// 服务端说不认识这个方法：「method not found」「METHOD_NOT_FOUND」「method sendRichMessage not
+// found」「unknown method」之类，只认出现在说明开头、或者紧跟在一个「Bad Request: 」「Not Found: 」
+// 这样的前缀之后的；说明中间碰巧有的（如「Bad Request: payment method not found」）不算。
+// 认不出只会被当成拒收（多一次请求、多一行日志），认错了这个 bot 以后就不再发富文本，所以宁可认得窄
+const methodNotFound =
+  /^(?:[\w ]+:\s*)?(?:method(?:\s+\w+)?[\s_]+not[\s_]+found|unknown[\s_]+method)\b/i;
 
 function albumKey(raw: TelegramRaw): string {
   return `${raw.chat.id}:${raw.media_group_id}`;

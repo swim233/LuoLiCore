@@ -17,6 +17,7 @@ import { testPrompts } from '../core/test-prompts.js';
 import { createTelegramBot, type ChatTarget, type RoundNotice } from './bot.js';
 import { imageBytes } from './fake-api.js';
 import type { TelegramRaw } from './message.js';
+import { RichMessageError, type InputRichMessage } from './rich.js';
 import { telegramMessageLimit } from './split.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
@@ -73,11 +74,40 @@ function replying(...turns: Array<string | { text: string; gate: Promise<void> }
   });
 }
 
-type Sent = { target: ChatTarget; text: string; replyTo?: number };
+/**
+ * 群里看到的一条：哪一种（plain 普通消息，rich 富文本消息）、发到哪、文字、引用哪条。
+ * 富文本消息的 text 是各段落的文字，message 是发出的富文本消息原样
+ */
+type Sent = {
+  kind: 'plain' | 'rich';
+  target: ChatTarget;
+  text: string;
+  replyTo?: number;
+  message?: InputRichMessage;
+};
+
+/** 适配器换成的错误：只有 name 与说明，和 @chat-adapter/shared 的那些类一样 */
+function adapterError(name: string, description: string): Error {
+  const error = new Error(description);
+  error.name = name;
+  return error;
+}
+
+const rejected = () =>
+  new RichMessageError(
+    'rejected',
+    adapterError('ValidationError', "Bad Request: can't parse rich message"),
+  );
+const unsupported = () =>
+  new RichMessageError(
+    'unsupported',
+    adapterError('ResourceNotFoundError', 'sendRichMessage not found in telegram'),
+  );
 
 function setup({
   model,
   storage = createMemoryStorage(),
+  chats = [group],
   typingIntervalMs = 4000,
   typingFails = false,
   wait = { idleMs: 5, maxMs: 50 },
@@ -87,10 +117,15 @@ function setup({
   tools = [],
   sendDelayMs = 0,
   users = [],
+  rich = true,
+  onSendRich,
+  onSend,
   onRound,
 }: {
   model: MockLanguageModelV4;
   storage?: Storage;
+  /** 白名单里的群 */
+  chats?: TelegramChat[];
   typingIntervalMs?: number;
   typingFails?: boolean;
   wait?: { idleMs: number; maxMs: number };
@@ -104,9 +139,16 @@ function setup({
   sendDelayMs?: number;
   /** 白名单里能私聊的用户 id */
   users?: string[];
+  /** 发富文本消息；默认打开 */
+  rich?: boolean;
+  /** 第 call 次（从 0 起）发富文本消息、普通消息时先调它：抛错就是这次发送失败 */
+  onSendRich?: (call: number) => void | Promise<void>;
+  onSend?: (call: number) => void | Promise<void>;
   onRound?: (notice: RoundNotice) => void;
 }) {
   const sent: Sent[] = [];
+  // 两种发送各被调了几次（含失败的）
+  const calls = { rich: 0, plain: 0 };
   const typing: ChatTarget[] = [];
   const entries: Array<{ level: string; msg: string; fields: Record<string, unknown> }> = [];
   const record = (level: string) => (fields: object, msg: string) =>
@@ -134,8 +176,17 @@ function setup({
         if (typingFails) throw new Error('网络不通');
       },
       send: async (target, text, replyTo) => {
+        const call = calls.plain++;
         if (sendDelayMs) await sleep(sendDelayMs);
-        sent.push({ target, text, replyTo });
+        await onSend?.(call);
+        sent.push({ kind: 'plain', target, text, replyTo });
+      },
+      sendRich: async (target, message, replyTo) => {
+        const call = calls.rich++;
+        if (sendDelayMs) await sleep(sendDelayMs);
+        await onSendRich?.(call);
+        const text = message.blocks.map((block) => block.text).join('\n\n');
+        sent.push({ kind: 'rich', target, text, replyTo, message });
       },
     },
     download: async (fileId) => {
@@ -146,17 +197,18 @@ function setup({
       albums.find((album) => album.some((item) => item.message_id === raw.message_id)) ?? [raw],
     logger,
     bot: () => ({ id: '999', username: 'nori_bot' }),
-    chats: new Set([String(group.id)]),
+    chats: new Set(chats.map((chat) => String(chat.id))),
     users: new Set(users),
     wakeWords: ['nori'],
     errorText: '（出错了）',
     staleMs: 60 * 60_000,
+    rich,
     typingIntervalMs,
     wait,
     onRound,
   });
   cleanups.push(() => bot.close(0));
-  return { bot, sent, typing, entries, storage, conversations };
+  return { bot, sent, calls, typing, entries, storage, conversations };
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -1004,6 +1056,30 @@ describe('分条发送（装了工具时）', () => {
     ]);
   });
 
+  it('富文本开着：每一步的每一段都发富文本消息，文字原样放进一个段落；每一步的第一段引用触发消息，其余不引用', async () => {
+    const first = '我查一下\n**马上**';
+    const tail = '**b**\n<i>$x$';
+    const { bot, sent, calls } = setupWithTool(
+      steps(callsTool(first), answer(`${'a'.repeat(telegramMessageLimit)}${tail}`)),
+    );
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    const paragraph = (text: string) => ({ blocks: [{ type: 'paragraph', text }] });
+    expect(sent.map(({ kind, message, replyTo }) => ({ kind, message, replyTo }))).toEqual([
+      { kind: 'rich', message: paragraph(first), replyTo: trigger.message_id },
+      {
+        kind: 'rich',
+        message: paragraph('a'.repeat(telegramMessageLimit)),
+        replyTo: trigger.message_id,
+      },
+      { kind: 'rich', message: paragraph(tail), replyTo: undefined },
+    ]);
+    expect(calls.plain).toBe(0);
+  });
+
   it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留', async () => {
     const { bot, sent } = setupWithTool(steps(callsTool('我查一下'), answer('')));
 
@@ -1213,6 +1289,7 @@ describe('指令（/compact、/clear）', () => {
       expect(typing[0]).toEqual({ chatId: group.id, messageThreadId: 77 });
       expect(sent).toEqual([
         {
+          kind: 'plain',
           target: { chatId: group.id, messageThreadId: 77 },
           text: '已压缩',
           replyTo: compact.message_id,
@@ -1231,8 +1308,18 @@ describe('指令（/compact、/clear）', () => {
       await bot.idle();
 
       expect(sent).toEqual([
-        { target: { chatId: group.id }, text: '上下文已经是空的', replyTo: clear.message_id },
-        { target: { chatId: alice.id }, text: '没有可压缩的内容', replyTo: compact.message_id },
+        {
+          kind: 'plain',
+          target: { chatId: group.id },
+          text: '上下文已经是空的',
+          replyTo: clear.message_id,
+        },
+        {
+          kind: 'plain',
+          target: { chatId: alice.id },
+          text: '没有可压缩的内容',
+          replyTo: compact.message_id,
+        },
       ]);
       expect(await storage.listConversations('telegram')).toEqual([]);
       expect(model.doStreamCalls).toHaveLength(0);
@@ -1764,5 +1851,212 @@ describe('指令（/compact、/clear）', () => {
       expect(await segmentsOf(storage)).toEqual(segments);
       expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['closing']);
     });
+  });
+});
+
+describe('富文本消息与改发普通消息', () => {
+  // 拆成两段的回复：前一段正好 4096 个字，后一段是「尾巴」
+  const head = '甲'.repeat(telegramMessageLimit);
+  const long = `${head}尾巴`;
+  const shown = (sent: Sent[]) => sent.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }));
+  const logsOf = <T extends { msg: string }>(entries: T[], msg: string) =>
+    entries.filter((entry) => entry.msg === msg);
+
+  it('Telegram 拒收：这一段改发普通消息，文字与引用不变；下一段、下一次回复照常先试富文本；记 telegram.rich_fallback，不带正文', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long, '第二次'),
+      onSendRich: (call) => {
+        if (call === 0) throw rejected();
+      },
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: head, replyTo: first.message_id },
+      { kind: 'rich', text: '尾巴', replyTo: undefined },
+      { kind: 'rich', text: '第二次', replyTo: second.message_id },
+    ]);
+    expect(calls).toEqual({ rich: 3, plain: 1 });
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.rich_fallback',
+        fields: {
+          conversationId: expect.any(String),
+          reason: 'rejected',
+          error: { type: 'ValidationError', message: "Bad Request: can't parse rich message" },
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.send_failed')).toEqual([]);
+    const logged = JSON.stringify(entries);
+    expect(logged).not.toContain('甲甲');
+    expect(logged).not.toContain('尾巴');
+  });
+
+  it('服务端不认识这个接口：这一段改发普通消息，之后的段和之后的回复不再试富文本；telegram.rich_unavailable 只记一次', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long, '第二次'),
+      onSendRich: () => {
+        throw unsupported();
+      },
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: head, replyTo: first.message_id },
+      { kind: 'plain', text: '尾巴', replyTo: undefined },
+      { kind: 'plain', text: '第二次', replyTo: second.message_id },
+    ]);
+    expect(calls.rich).toBe(1);
+    expect(logsOf(entries, 'telegram.rich_unavailable')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.rich_unavailable',
+        fields: {
+          conversationId: expect.any(String),
+          error: {
+            type: 'ResourceNotFoundError',
+            message: 'sendRichMessage not found in telegram',
+          },
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([]);
+  });
+
+  it('两个群同时碰上服务端不认识这个接口：都改发普通消息，telegram.rich_unavailable 只记一次', async () => {
+    const otherGroup: TelegramChat = { id: -1002, type: 'supergroup', title: '另一个群' };
+    // 两个群的富文本请求都发出去以后才一起失败
+    let inFlight = 0;
+    let bothSent!: () => void;
+    const both = new Promise<void>((resolve) => (bothSent = resolve));
+    const { bot, sent, calls, entries } = setup({
+      model: replying('好', '好', '第三次'),
+      chats: [group, otherGroup],
+      onSendRich: async () => {
+        if (++inFlight === 2) bothSent();
+        await both;
+        throw unsupported();
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.handle(message({ chat: otherGroup, text: 'nori 二' }));
+    await bot.idle();
+    await bot.handle(message({ text: 'nori 三' }));
+    await bot.idle();
+
+    expect(calls.rich).toBe(2);
+    expect(sent.map(({ kind, target }) => ({ kind, chatId: target.chatId }))).toEqual(
+      expect.arrayContaining([
+        { kind: 'plain', chatId: group.id },
+        { kind: 'plain', chatId: otherGroup.id },
+      ]),
+    );
+    expect(shown(sent)).toHaveLength(3);
+    expect(shown(sent).at(-1)).toMatchObject({ kind: 'plain', text: '第三次' });
+    expect(logsOf(entries, 'telegram.rich_unavailable')).toHaveLength(1);
+  });
+
+  it('别的失败（如限流）：不改发普通消息，记 telegram.send_failed（sendRichMessage），这一步剩下的段不发；之后的回复照常', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long, '第二次'),
+      onSendRich: (call) => {
+        if (call === 0) {
+          throw adapterError('AdapterRateLimitError', 'Rate limited by telegram, retry after 5s');
+        }
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([{ kind: 'rich', text: '第二次', replyTo: second.message_id }]);
+    expect(calls).toEqual({ rich: 2, plain: 0 });
+    expect(logsOf(entries, 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendRichMessage',
+        error: {
+          type: 'AdapterRateLimitError',
+          message: 'Rate limited by telegram, retry after 5s',
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([]);
+  });
+
+  it('改发的普通消息也失败：记 telegram.send_failed（sendMessage），这一步剩下的段不发', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long),
+      onSendRich: () => {
+        throw rejected();
+      },
+      onSend: () => {
+        throw adapterError('NetworkError', 'Network error calling Telegram sendMessage');
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(calls).toEqual({ rich: 1, plain: 1 });
+    expect(logsOf(entries, 'telegram.rich_fallback')).toHaveLength(1);
+    expect(logsOf(entries, 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendMessage',
+        error: { type: 'NetworkError', message: 'Network error calling Telegram sendMessage' },
+      },
+    ]);
+  });
+
+  it('富文本关着：一次也不调富文本的操作，发出去的和以前一样', async () => {
+    const { bot, sent, calls } = setup({ model: replying(long), rich: false });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: head, replyTo: trigger.message_id },
+      { kind: 'plain', text: '尾巴', replyTo: undefined },
+    ]);
+    expect(calls.rich).toBe(0);
+  });
+
+  it('回复出错时的固定提示发普通消息，不走富文本', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        throw new Error('模型挂了');
+      },
+    });
+    const { bot, sent, calls } = setup({ model });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: '（出错了）', replyTo: trigger.message_id },
+    ]);
+    expect(calls.rich).toBe(0);
   });
 });

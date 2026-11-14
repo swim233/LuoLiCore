@@ -15,7 +15,7 @@ function errorOf(env: Record<string, string | undefined>): string {
 }
 
 describe('Telegram 配置', () => {
-  it('默认值：白名单为空，唤醒词 nori，固定提示，官方 API 地址；只有 Telegram 自己的配置', () => {
+  it('默认值：白名单为空，唤醒词 nori，固定提示，官方 API 地址，发富文本消息；只有 Telegram 自己的配置', () => {
     const result = parse({});
 
     expect(result).toEqual({
@@ -28,8 +28,27 @@ describe('Telegram 配置', () => {
         errorText: defaultErrorText,
         staleMs: 60 * 60_000,
         apiUrl: 'https://api.telegram.org',
+        rich: true,
       },
     });
+  });
+
+  it('LUOLI_TELEGRAM_RICH：不设、空字符串时打开，off 时关上；别的值报错，不回显填的值', () => {
+    const rich = (value: string | undefined) => {
+      const result = parse({ LUOLI_TELEGRAM_RICH: value });
+      return result.ok ? result.config.rich : result.error;
+    };
+
+    expect(rich(undefined)).toBe(true);
+    expect(rich('')).toBe(true);
+    expect(rich('off')).toBe(false);
+    const errors = ['on', 'OFF', ' off', 'false', 'secret-value'].map((value) =>
+      errorOf({ LUOLI_TELEGRAM_RICH: value }),
+    );
+    expect(errors).toEqual(
+      Array(5).fill('LUOLI_TELEGRAM_RICH 只能是 off（发普通消息；不设时打开）'),
+    );
+    expect(errors.join('\n')).not.toContain('secret-value');
   });
 
   it('白名单逗号分隔，去掉空白与空项；id 规范成 Telegram 的写法', () => {

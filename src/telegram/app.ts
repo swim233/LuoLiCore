@@ -93,11 +93,17 @@ export async function startTelegram({
     open,
     sender: {
       typing: (target) => adapter.startTyping(threadId(target)),
-      // 传字符串：适配器按纯文本发送，不转 Markdown
+      // 传字符串：适配器按纯文本发普通消息，不转 Markdown，也不自己试富文本
       send: async (target, text, replyTo) => {
         if (replyTo === undefined) await adapter.postMessage(threadId(target), text);
         else await adapter.reply(threadId(target), String(replyTo), text);
       },
+      sendRich: (target, message, replyTo) =>
+        adapter.postRichMessage(
+          threadId(target),
+          message,
+          replyTo === undefined ? undefined : String(replyTo),
+        ),
     },
     download: (fileId) => adapter.download(fileId),
     albumOf: (raw) => adapter.takeAlbum(raw),
@@ -108,6 +114,7 @@ export async function startTelegram({
     wakeWords: config.wakeWords,
     errorText: config.errorText,
     staleMs: config.staleMs,
+    rich: config.rich,
     typingIntervalMs,
     wait,
     onRound,
