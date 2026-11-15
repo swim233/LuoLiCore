@@ -1,25 +1,95 @@
 /**
  * Telegram 的富文本消息（Bot API 10.1 起的 sendRichMessage）：发送要用到的类型与构造。
- * 只写现在用得到的，字段名照 Bot API 的写法：https://core.telegram.org/bots/api/rich-messages.md
+ * 只写现在用得到的，字段名照 Bot API 的写法（https://core.telegram.org/bots/api/rich-messages.md），
+ * 2026-11-14 在真的接口上试过都收（见 .grill/telegram-usage-footer/final.md「真机上验证过的」）
  */
 
 /**
  * 富文本（RichText）：纯文字是一个字符串；也可以是 RichText 的数组（依次连起来），或带 type 的
- * 对象。带 type 的现在只用下标，加粗等用到时再加
+ * 对象（样式、链接、公式）
  */
-export type RichText = string | RichText[] | RichTextSubscript;
+export type RichText =
+  string | RichText[] | RichTextStyled | RichTextUrl | RichTextMathematicalExpression;
 
-/** 下标（RichTextSubscript）：小一号、靠下的字，尾部用它 */
-export type RichTextSubscript = { type: 'subscript'; text: RichText };
+/**
+ * 带样式的字：加粗（RichTextBold）、斜体（RichTextItalic）、删除线（RichTextStrikethrough）、
+ * 行内代码（RichTextCode）、下标（RichTextSubscript，尾部用它）
+ */
+export type RichTextStyled = {
+  type: 'bold' | 'italic' | 'strikethrough' | 'code' | 'subscript';
+  text: RichText;
+};
+
+/** 链接（RichTextUrl）：显示 text，点了打开 url */
+export type RichTextUrl = { type: 'url'; text: RichText; url: string };
+
+/** 行内的公式（RichTextMathematicalExpression），LaTeX 原文 */
+export type RichTextMathematicalExpression = {
+  type: 'mathematical_expression';
+  expression: string;
+};
 
 /** 段落块（InputRichBlockParagraph），对应 HTML 的 `<p>` */
 export type InputRichBlockParagraph = { type: 'paragraph'; text: RichText };
 
+/** 标题（InputRichBlockSectionHeading）：size 1 到 6，1 最大 */
+export type InputRichBlockSectionHeading = { type: 'heading'; text: RichText; size: number };
+
+/** 等宽的代码块（InputRichBlockPreformatted）；language 是语言，可以不写 */
+export type InputRichBlockPreformatted = { type: 'pre'; text: RichText; language?: string };
+
 /** 分隔线块（InputRichBlockDivider），对应 HTML 的 `<hr/>` */
 export type InputRichBlockDivider = { type: 'divider' };
 
-/** 富文本消息里的一个块（InputRichBlock）；现在只用段落、分隔线 */
-export type InputRichBlock = InputRichBlockParagraph | InputRichBlockDivider;
+/** 单独成块的公式（InputRichBlockMathematicalExpression），LaTeX 原文 */
+export type InputRichBlockMathematicalExpression = {
+  type: 'mathematical_expression';
+  expression: string;
+};
+
+/** 引用（InputRichBlockBlockQuotation）：里面是块 */
+export type InputRichBlockBlockQuotation = { type: 'blockquote'; blocks: InputRichBlock[] };
+
+/**
+ * 列表的一项（InputRichBlockListItem）：里面是块。有序列表的项带 value（编号）和 type（"1" 是数字）；
+ * 任务列表的项带 has_checkbox，勾了的再带 is_checked
+ */
+export type InputRichBlockListItem = {
+  blocks: InputRichBlock[];
+  has_checkbox?: true;
+  is_checked?: true;
+  value?: number;
+  type?: '1';
+};
+
+/** 列表（InputRichBlockList）：有序还是无序看项带不带 value、type */
+export type InputRichBlockList = { type: 'list'; items: InputRichBlockListItem[] };
+
+/** 表格的一格（RichBlockTableCell）：align、valign 都要写 */
+export type RichBlockTableCell = {
+  text?: RichText;
+  is_header?: true;
+  align: 'left' | 'center' | 'right';
+  valign: 'top' | 'middle' | 'bottom';
+};
+
+/** 表格（InputRichBlockTable）：cells 一行一个数组；最多 20 列 */
+export type InputRichBlockTable = {
+  type: 'table';
+  cells: RichBlockTableCell[][];
+  is_bordered?: true;
+};
+
+/** 富文本消息里的一个块（InputRichBlock）；只写我们会发的几种 */
+export type InputRichBlock =
+  | InputRichBlockParagraph
+  | InputRichBlockSectionHeading
+  | InputRichBlockPreformatted
+  | InputRichBlockDivider
+  | InputRichBlockMathematicalExpression
+  | InputRichBlockBlockQuotation
+  | InputRichBlockList
+  | InputRichBlockTable;
 
 /**
  * 要发出的富文本消息（InputRichMessage）。Bot API 要求 blocks、html、markdown 三个字段只用一个，
@@ -27,21 +97,14 @@ export type InputRichBlock = InputRichBlockParagraph | InputRichBlockDivider;
  */
 export type InputRichMessage = { blocks: InputRichBlock[] };
 
-/**
- * 一段原样文字做成的富文本消息：一个段落块，文字原样。不解析任何符号（`**`、`<`、`$` 等都是
- * 字面的字），换行符留在文字里，不按行拆成几个段落。
- * 带 footer（尾部的那一行，见 footer.ts）时，后面再加一条分隔线和一个段落，段落的文字是下标包着的尾部
- */
-export function plainRichMessage(text: string, footer?: string): InputRichMessage {
-  const body: InputRichBlock = { type: 'paragraph', text };
-  if (footer === undefined) return { blocks: [body] };
-  return {
-    blocks: [
-      body,
-      { type: 'divider' },
-      { type: 'paragraph', text: { type: 'subscript', text: footer } },
-    ],
-  };
+/** 尾部（见 footer.ts）在富文本消息里占的块：分隔线，和一个下标包着那一行的段落 */
+export function footerBlocks(footer: string): InputRichBlock[] {
+  return [{ type: 'divider' }, { type: 'paragraph', text: { type: 'subscript', text: footer } }];
+}
+
+/** 一条富文本消息：这些块，带 footer 时后面再加尾部的两块 */
+export function richMessage(blocks: InputRichBlock[], footer?: string): InputRichMessage {
+  return { blocks: footer === undefined ? blocks : [...blocks, ...footerBlocks(footer)] };
 }
 
 /**

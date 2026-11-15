@@ -1,29 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { plainRichMessage } from './rich.js';
+import { richMessage, type InputRichBlock } from './rich.js';
 
-describe('原样文字做成的富文本消息', () => {
-  it('只有一个段落块，文字一字不差：换行留在文字里，Markdown、HTML、公式的符号都不解析', () => {
-    const text = [
-      '第一行',
-      '',
-      '**加粗？** _斜体？_ `代码？` ~~删除？~~',
-      '<b>标签</b> &amp; 1 < 2',
-      '$E = mc^2$ 和 $$x^2$$',
-      '- 列表？',
-      '# 标题？',
-      '  行首的空格与行尾的空格  ',
-    ].join('\n');
+describe('一条富文本消息', () => {
+  const blocks: InputRichBlock[] = [
+    { type: 'heading', text: '标题', size: 2 },
+    { type: 'paragraph', text: ['答案是 ', { type: 'bold', text: '4' }] },
+  ];
 
-    expect(plainRichMessage(text)).toEqual({ blocks: [{ type: 'paragraph', text }] });
+  it('没有尾部：就是这些块', () => {
+    expect(richMessage(blocks)).toEqual({ blocks });
   });
 
-  it('带尾部：正文的段落、分隔线、下标包着尾部的段落，三块；正文照样原样', () => {
-    const text = '答案是 **4**\n<i>$x$</i>';
+  it('带尾部：块的最后加分隔线和下标包着尾部的段落', () => {
     const footer = '输入 5k · 输出 135 · 3.2s';
 
-    expect(plainRichMessage(text, footer)).toEqual({
+    expect(richMessage(blocks, footer)).toEqual({
       blocks: [
-        { type: 'paragraph', text },
+        ...blocks,
         { type: 'divider' },
         { type: 'paragraph', text: { type: 'subscript', text: footer } },
       ],

@@ -15,6 +15,7 @@ import {
 import { parseCommand, type TelegramCommand } from './command.js';
 import { editedText, toAppendInput } from './content.js';
 import { plainWithFooter, usageFooter, type MessageEntity } from './footer.js';
+import { markdownBlocks } from './markdown.js';
 import {
   conversationTitle,
   displayName,
@@ -22,8 +23,8 @@ import {
   isAllowedChat,
   type TelegramRaw,
 } from './message.js';
-import { plainRichMessage, RichMessageError, type InputRichMessage } from './rich.js';
-import { splitMessage, telegramMessageLimit } from './split.js';
+import { richMessage, RichMessageError, type InputRichMessage } from './rich.js';
+import { splitMessage, splitRich, telegramMessageLimit, type RichPiece } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
 /** 往哪个聊天发：论坛群里回到触发消息所在的话题 */
@@ -418,11 +419,11 @@ export function createTelegramBot({
    * - 没调工具的步：finish-step 时先留着，看下一个段：是 finish（回复正常结束）就是最后一条，带上
    *   尾部发出；是 abort 就不发（中止的不发）；是别的（又开始了一步、请求重试、出错）就照原样发出、
    *   不带尾部，这是兜底。流结束了都没有 finish 的也不发。
-   * 没有文字的步不发；最后一步没有文字时没有地方挂尾部，这次就不显示。每条都引用 quote（没有时
-   * 不引用）。流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
-   * 再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
-   * 文字照旧按 4096 拆段，尾部挂在最后一段；每段先试富文本消息（见 deliver）；失败提示总是普通
-   * 消息，不带尾部。用时从调用 reply() 之前量到 finish 段到达，不含等待合并、不含发最后一条。
+   * 没有文字的步不发；最后一步没有文字时没有地方挂尾部，这次就不显示。一步的文字拆成几条时，
+   * 第一条引用 quote（没有时不引用），后面的不引用。流中途重试只清掉这一步还没发出的文字；失败时
+   * 失败那一步的文字不发，之前发出的保留，再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
+   * 一步的文字怎么拆成几条见 piecesOf，每条怎么发见 deliver；尾部挂在最后一条。失败提示总是普通
+   * 消息，不解析、不带尾部。用时从调用 reply() 之前量到 finish 段到达，不含等待合并、不含发最后一条。
    * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）
    */
   async function reply(
@@ -443,13 +444,13 @@ export function createTelegramBot({
     let toolInStep = false;
     let failed = false;
     const flush = async (text: string, footer?: string) => {
-      // 关闭时被中止的回复不再发出
-      if (stopping.signal.aborted) return;
-      const chunks = splitMessage(text).filter((chunk) => chunk.trim());
-      for (const [index, chunk] of chunks.entries()) {
-        // 第一段引用触发消息，后面的接着发；尾部挂在最后一段
-        const last = index === chunks.length - 1;
-        const sent = await deliver(target, chunk, {
+      // 关闭时被中止的回复不再发出；全是空白的不发
+      if (stopping.signal.aborted || !text.trim()) return;
+      const pieces = piecesOf(text);
+      for (const [index, piece] of pieces.entries()) {
+        // 第一条引用触发消息，后面的接着发；尾部挂在最后一条
+        const last = index === pieces.length - 1;
+        const sent = await deliver(target, piece, {
           replyTo: index === 0 ? quote : undefined,
           footer: last ? footer : undefined,
           fields,
@@ -696,23 +697,33 @@ export function createTelegramBot({
   }
 
   /**
-   * 发回复的一段文字。先试富文本消息（开着富文本、服务端也认识这个接口时），文字原样放进一个段落，
-   * 有尾部时后面加分隔线和下标的一行：
-   * - Telegram 拒收这一条：这一段改发普通消息（有尾部时带斜体的一行），记 telegram.rich_fallback；
-   *   下一段照常先试富文本；
-   * - 服务端不认识这个接口：这一段改发普通消息，之后都直接发普通消息，telegram.rich_unavailable
-   *   只记一次；
+   * 一步的文字拆成几条：
+   * - 富文本开着、服务端也认识这个接口：按 Markdown 转成块（markdown.ts），按富文本消息的上限在顶层的块之间
+   *   装成几条（split.ts 的 splitRich）；单独一个块就超限、层数超了的，单独一条发它的原文。转出来一个块都没有
+   *   （比如只有链接定义）时整段原文发普通消息；
+   * - 富文本关着，或者已经知道服务端不认识这个接口：整段原文一条普通消息（发的时候满 4096 拆），和以前一样
+   */
+  function piecesOf(text: string): RichPiece[] {
+    if (!richAvailable) return [{ raw: text }];
+    const parts = markdownBlocks(text);
+    return parts.length ? splitRich(parts) : [{ raw: text }];
+  }
+
+  /**
+   * 发一条（见 piecesOf）。有块的先试富文本消息，有尾部时块的最后加分隔线和下标的一行：
+   * - Telegram 拒收这一条：改发它的原文的普通消息，记 telegram.rich_fallback；下一条照常先试富文本；
+   * - 服务端不认识这个接口：改发原文，之后都直接发普通消息，telegram.rich_unavailable 只记一次；
    * - 别的失败：和普通消息发送失败一样只记日志，不改发、不重试。
-   * 日志不带正文。返回是否发出
+   * 没有块的（退路）、改发的，都是原文的普通消息，见 sendPlain。日志不带正文。返回是否发出
    */
   async function deliver(
     target: ChatTarget,
-    text: string,
+    piece: RichPiece,
     { replyTo, footer, fields }: { replyTo?: number; footer?: string; fields: object },
   ): Promise<boolean> {
-    if (richAvailable) {
+    if (piece.rich && richAvailable) {
       try {
-        await sender.sendRich(target, plainRichMessage(text, footer), replyTo);
+        await sender.sendRich(target, richMessage(piece.rich, footer), replyTo);
         return true;
       } catch (error) {
         if (!(error instanceof RichMessageError)) {
@@ -731,15 +742,35 @@ export function createTelegramBot({
         }
       }
     }
-    if (footer === undefined) return send(target, text, replyTo, fields);
-    // 普通消息：正文、空行、斜体的尾部。加上尾部超过上限时尾部单独成一条（不引用）
-    const withFooter = plainWithFooter(text, footer);
-    if (withFooter.text.length <= telegramMessageLimit) {
-      return send(target, withFooter.text, replyTo, fields, withFooter.entities);
+    return sendPlain(target, piece.raw, { replyTo, footer, fields });
+  }
+
+  /**
+   * 原文发普通消息：满 4096 拆成几段，第一段引用 replyTo，尾部是最后一段末尾斜体的一行（加上尾部超过
+   * 上限时，尾部单独成一条，不引用）。全是空白的段不发。返回是否都发出了
+   */
+  async function sendPlain(
+    target: ChatTarget,
+    text: string,
+    { replyTo, footer, fields }: { replyTo?: number; footer?: string; fields: object },
+  ): Promise<boolean> {
+    const chunks = splitMessage(text).filter((chunk) => chunk.trim());
+    for (const [index, chunk] of chunks.entries()) {
+      const quoted = index === 0 ? replyTo : undefined;
+      const last = index === chunks.length - 1;
+      if (!last || footer === undefined) {
+        if (!(await send(target, chunk, quoted, fields))) return false;
+        continue;
+      }
+      const withFooter = plainWithFooter(chunk, footer);
+      if (withFooter.text.length <= telegramMessageLimit) {
+        return send(target, withFooter.text, quoted, fields, withFooter.entities);
+      }
+      if (!(await send(target, chunk, quoted, fields))) return false;
+      const alone = plainWithFooter('', footer);
+      return send(target, alone.text, undefined, fields, alone.entities);
     }
-    if (!(await send(target, text, replyTo, fields))) return false;
-    const alone = plainWithFooter('', footer);
-    return send(target, alone.text, undefined, fields, alone.entities);
+    return true;
   }
 
   /**

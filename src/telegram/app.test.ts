@@ -20,7 +20,10 @@ import {
   startFakeTelegram,
   type FakeTelegram,
 } from './fake-api.js';
+import { depthProbes } from './fake-rich.js';
 import type { MessageEntity } from './footer.js';
+import { markdownBlocks } from './markdown.js';
+import { RichMessageError, type InputRichBlock, type RichText } from './rich.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
@@ -160,6 +163,21 @@ async function start(
   return { api, app, storage, entries };
 }
 
+/** 经过真的适配器直接发一条富文本消息：假接口收下是 'ok'，拒收是「种类: 说明」 */
+async function postRich(
+  app: Awaited<ReturnType<typeof start>>['app'],
+  blocks: unknown[],
+): Promise<string> {
+  try {
+    await app.adapter.postRichMessage(String(group.id), { blocks } as {
+      blocks: InputRichBlock[];
+    });
+    return 'ok';
+  } catch (error) {
+    return error instanceof RichMessageError ? `${error.kind}: ${error.message}` : String(error);
+  }
+}
+
 async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
   while (!(await check())) {
@@ -186,8 +204,8 @@ const paragraph = (text: string) => ({ blocks: [{ type: 'paragraph', text }] });
 /** 默认的模型（每次回复输入、输出各 1）、停着的时钟下的尾部 */
 const footer = '输入 1 · 输出 1 · 0.0s';
 
-/** 正文的段落、分隔线、下标包着尾部的段落 */
-const withFooter = (text: string) => ({
+/** 一个段落（文字是 text）、分隔线、下标包着尾部的段落 */
+const withFooter = (text: RichText) => ({
   blocks: [
     { type: 'paragraph', text },
     { type: 'divider' },
@@ -232,8 +250,9 @@ async function historyOf(storage: Storage, chatId: number) {
 }
 
 describe('Telegram 前端（本地假 Bot API）', () => {
-  it('群里含唤醒词：记录并回复，发富文本消息（正文的段落、分隔线、下标的尾部三块，文字原样）、引用触发消息，期间发「正在输入」；尾部不进历史', async () => {
-    const reply = '你好呀\n**原样** <b>不解析</b>';
+  it('群里含唤醒词：记录并回复，发富文本消息（按 Markdown 排好的块，后面是分隔线和下标的尾部）、引用触发消息，期间发「正在输入」；历史里是原文', async () => {
+    const reply = '你好呀\n**加粗** <b>HTML 当字</b>';
+    const text: RichText = ['你好呀\n', { type: 'bold', text: '加粗' }, ' <b>HTML 当字</b>'];
     const { api, app, storage } = await start(replying(reply));
 
     const [id] = api.push({ chat: group, from: alice, text: 'Nori 在吗' });
@@ -246,7 +265,7 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         token,
         body: {
           chat_id: String(group.id),
-          rich_message: withFooter(reply),
+          rich_message: withFooter(text),
           reply_parameters: { message_id: id, allow_sending_without_reply: true },
         },
       },
@@ -256,10 +275,10 @@ describe('Telegram 前端（本地假 Bot API）', () => {
         kind: 'rich',
         chatId: String(group.id),
         messageId: expect.any(Number),
-        text: reply,
+        text: '你好呀\n加粗 <b>HTML 当字</b>',
         footer,
         replyTo: id,
-        rich: withFooter(reply),
+        rich: withFooter(text),
       },
     ]);
     expect(api.calls.some((call) => call.method === 'sendChatAction')).toBe(true);
@@ -396,9 +415,9 @@ describe('Telegram 前端（本地假 Bot API）', () => {
     ]);
   });
 
-  it('长回复经适配器发出：每条不超过 4096、没有被截断，拼回去与原文相同', async () => {
+  it('富文本关着：长回复经适配器发出，每条不超过 4096、没有被截断，拼回去与原文相同', async () => {
     const long = `${'A'.repeat(4096)}\n${'B'.repeat(3000)}\n${'C'.repeat(100)}`;
-    const { api, app } = await start(replying(long));
+    const { api, app } = await start(replying(long), { rich: false, usage: false });
 
     const [id] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
     await delivered(api, 2);
@@ -722,6 +741,389 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       expect(entries.map((e) => e.msg)).not.toContain('telegram.rich_fallback');
     },
   );
+
+  it('一条各种写法都有的回复：sendRichMessage 的请求体和期望的一字不差，假接口收下；历史里是原文', async () => {
+    const reply = [
+      '## 小结 $x$',
+      '',
+      '**粗**、*斜*、~~删~~、`码`，[链接](example.com)，公式 \\(a_1\\)。',
+      '',
+      '3. 第三',
+      '4. [x] 做了',
+      '',
+      '> 引用',
+      '> - 项',
+      '',
+      '```ts',
+      'const a = 1;',
+      '```',
+      '',
+      '| 左 | 中 | 右 |',
+      '|:--|:-:|--:|',
+      '| 1 | **2** | 3 |',
+      '',
+      '$$',
+      'E = mc^2',
+      '$$',
+      '',
+      '---',
+      '',
+      '<div>原始</div>',
+    ].join('\n');
+    const { api, app, storage } = await start(replying(reply));
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 总结一下' });
+    await delivered(api);
+    await app.bot.idle();
+
+    const cell = (text: RichText, align: string, header = false) => ({
+      text,
+      ...(header ? { is_header: true } : {}),
+      align,
+      valign: 'top',
+    });
+    const blocks = [
+      {
+        type: 'heading',
+        text: ['小结 ', { type: 'mathematical_expression', expression: 'x' }],
+        size: 2,
+      },
+      {
+        type: 'paragraph',
+        text: [
+          { type: 'bold', text: '粗' },
+          '、',
+          { type: 'italic', text: '斜' },
+          '、',
+          { type: 'strikethrough', text: '删' },
+          '、',
+          { type: 'code', text: '码' },
+          '，',
+          { type: 'url', text: '链接', url: 'https://example.com/' },
+          '，公式 ',
+          { type: 'mathematical_expression', expression: 'a_1' },
+          '。',
+        ],
+      },
+      {
+        type: 'list',
+        items: [
+          { blocks: [{ type: 'paragraph', text: '第三' }], value: 3, type: '1' },
+          {
+            blocks: [{ type: 'paragraph', text: '做了' }],
+            has_checkbox: true,
+            is_checked: true,
+            value: 4,
+            type: '1',
+          },
+        ],
+      },
+      {
+        type: 'blockquote',
+        blocks: [
+          { type: 'paragraph', text: '引用' },
+          { type: 'list', items: [{ blocks: [{ type: 'paragraph', text: '项' }] }] },
+        ],
+      },
+      { type: 'pre', text: 'const a = 1;', language: 'ts' },
+      {
+        type: 'table',
+        cells: [
+          [cell('左', 'left', true), cell('中', 'center', true), cell('右', 'right', true)],
+          [cell('1', 'left'), cell({ type: 'bold', text: '2' }, 'center'), cell('3', 'right')],
+        ],
+        is_bordered: true,
+      },
+      { type: 'mathematical_expression', expression: 'E = mc^2' },
+      { type: 'divider' },
+      { type: 'paragraph', text: '<div>原始</div>' },
+      { type: 'divider' },
+      { type: 'paragraph', text: { type: 'subscript', text: footer } },
+    ];
+    expect(sends(api)).toEqual([
+      {
+        method: 'sendRichMessage',
+        token,
+        body: {
+          chat_id: String(group.id),
+          rich_message: { blocks },
+          reply_parameters: { message_id: id, allow_sending_without_reply: true },
+        },
+      },
+    ]);
+    expect(api.delivered).toMatchObject([{ kind: 'rich', footer, replyTo: id }]);
+    expect(await historyOf(storage, group.id)).toEqual([
+      { role: 'user', text: 'nori 总结一下' },
+      { role: 'assistant', text: reply },
+    ]);
+  });
+
+  it('超过上限的长回复：在块之间拆成几次 sendRichMessage，假接口每次都收下；第一条引用，尾部只在最后一条', async () => {
+    const reply = ['甲', '乙', '丙'].map((c) => c.repeat(20_000)).join('\n\n');
+    const { api, app } = await start(replying(reply));
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
+    await delivered(api, 3);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => call.method)).toEqual([
+      'sendRichMessage',
+      'sendRichMessage',
+      'sendRichMessage',
+    ]);
+    expect(
+      api.delivered.map(({ kind, text, footer, replyTo }) => ({
+        kind,
+        head: text.slice(0, 1),
+        length: text.length,
+        footer,
+        replyTo,
+      })),
+    ).toEqual([
+      { kind: 'rich', head: '甲', length: 20_000, footer: undefined, replyTo: id },
+      { kind: 'rich', head: '乙', length: 20_000, footer: undefined, replyTo: undefined },
+      { kind: 'rich', head: '丙', length: 20_000, footer, replyTo: undefined },
+    ]);
+  });
+
+  it('假接口因为超限拒收（注入的 RICH_MESSAGE_TEXT_TOO_LONG）：这一条改发原文的 sendMessage，别的照常', async () => {
+    const reply = `第一段 **粗**\n\n${'乙'.repeat(40_000)}`;
+    const { api, app, entries } = await start(replying(reply));
+    // 我们数得比真接口多（按码元、连网址都算），造不出它因为超限拒收的情况：注入
+    api.failRichSends({ status: 400, description: 'Bad Request: RICH_MESSAGE_TEXT_TOO_LONG' });
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 讲长一点' });
+    await waitUntil(() => api.delivered.some((m) => m.footer !== undefined));
+    await app.bot.idle();
+
+    // 第一条（第一段）被拒收，改发原文；乙那一大段自己就超限，本来就是原文的普通消息
+    const methods = sends(api).map((call) => call.method);
+    expect(methods[0]).toBe('sendRichMessage');
+    expect(methods.slice(1).every((m) => m === 'sendMessage')).toBe(true);
+    expect(api.delivered[0]).toMatchObject({ kind: 'plain', text: '第一段 **粗**', replyTo: id });
+    expect(api.delivered.slice(1).every((m) => m.replyTo === undefined)).toBe(true);
+    expect(api.delivered.at(-1)?.footer).toBe(footer);
+    expect(
+      api.delivered
+        .slice(1)
+        .map((m) => m.text)
+        .join(''),
+    ).toBe('乙'.repeat(40_000));
+    expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toMatchObject([
+      {
+        fields: {
+          reason: 'rejected',
+          error: { message: 'Bad Request: RICH_MESSAGE_TEXT_TOO_LONG' },
+        },
+      },
+    ]);
+  });
+
+  /** 每层缩进两格的嵌套列表，n 层 */
+  const nestedList = (n: number) =>
+    Array.from({ length: n }, (_, i) => `${'  '.repeat(i)}- 第${i + 1}层`).join('\n');
+  /** 一句套了四层样式的话：段落里是 数组 > 加粗 > 数组 > 斜体 > 数组 > 删除线 > 数组 > 行内代码，连段落 9 层 */
+  const styled = '前 **粗 _斜 ~~删 `码`~~ 后_ 后** 后';
+
+  it.each([
+    // 引用 15 层 + 段落 = 16 层
+    { name: '引用', ok: `${'> '.repeat(15)}十六层`, deep: `${'> '.repeat(16)}十七层` },
+    // 列表 15 层（连同列表项各算一层）+ 段落 = 16 层
+    { name: '列表', ok: nestedList(15), deep: nestedList(16) },
+    // 引用 7 层 + 那句话 9 层 = 16 层
+    { name: '行内样式', ok: `${'> '.repeat(7)}${styled}`, deep: `${'> '.repeat(8)}${styled}` },
+  ])(
+    '层数（$name）：正好 16 层的块发富文本，假接口收下；17 层的我们自己挡下，改发原文的普通消息，不发到接口去',
+    async ({ ok, deep }) => {
+      const reply = `开头\n\n${ok}\n\n中间\n\n${deep}`;
+      const { api, app, storage, entries } = await start(replying(reply));
+
+      const [id] = api.push({ chat: group, from: alice, text: 'nori 套深一点' });
+      await delivered(api, 2);
+      await app.bot.idle();
+
+      expect(sends(api).map((call) => call.method)).toEqual(['sendRichMessage', 'sendMessage']);
+      expect(api.delivered.map(({ kind, replyTo, footer }) => ({ kind, replyTo, footer }))).toEqual(
+        [
+          { kind: 'rich', replyTo: id, footer: undefined },
+          { kind: 'plain', replyTo: undefined, footer },
+        ],
+      );
+      // 16 层的那块照原样在富文本里，假接口收下了（没有被拒收、改发）
+      expect(api.delivered[0]?.rich).toEqual({
+        blocks: markdownBlocks(`开头\n\n${ok}\n\n中间`).map((part) => part.block),
+      });
+      expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toEqual([]);
+      expect(api.delivered[1]?.text).toBe(deep);
+      expect(await historyOf(storage, group.id)).toEqual([
+        { role: 'user', text: 'nori 套深一点' },
+        { role: 'assistant', text: reply },
+      ]);
+    },
+  );
+
+  it('一段回复里夹着空的标题、空的代码块：改成原文的段落，整条照常是富文本，假接口收下', async () => {
+    const reply = '#\n\n正文\n\n```py\n```\n\n# [](https://a.com)\n\n```\n  \n```';
+    const { api, app, entries } = await start(replying(reply));
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 空着' });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => call.method)).toEqual(['sendRichMessage']);
+    expect(api.delivered).toMatchObject([{ kind: 'rich', replyTo: id, footer }]);
+    expect(api.delivered[0]?.rich).toEqual({
+      blocks: [
+        { type: 'paragraph', text: '#' },
+        { type: 'paragraph', text: '正文' },
+        { type: 'paragraph', text: '```py\n```' },
+        { type: 'paragraph', text: '# [](https://a.com)' },
+        { type: 'pre', text: '  ' },
+        { type: 'divider' },
+        { type: 'paragraph', text: { type: 'subscript', text: footer } },
+      ],
+    });
+    expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toEqual([]);
+  });
+
+  it('假接口照真接口：一个字都没有的标题、代码块，空的公式，标题的 size 不对，整条只有分隔线都拒收；空段落、空的加粗、字是空的链接照收', async () => {
+    const { app } = await start(replying());
+    await app.caughtUp;
+    const post = (blocks: unknown[]) => postRich(app, blocks);
+    const contentRequired = 'rejected: Bad Request: RICH_MESSAGE_CONTENT_REQUIRED';
+    const mathRequired = 'rejected: Bad Request: RICH_MESSAGE_MATH_SOURCE_REQUIRED';
+    const badSize = 'rejected: Bad Request: invalid section heading size specified';
+    const heading = (text: unknown, size = 1) => ({ type: 'heading', text, size });
+    const pre = (text: unknown) => ({ type: 'pre', text });
+    const paragraph = (text: unknown) => ({ type: 'paragraph', text });
+    const formula = (expression: string) => ({ type: 'mathematical_expression', expression });
+    const link = { type: 'url', text: '', url: 'https://a.com/' };
+
+    // 标题、代码块里一个字都没有：空字符串、空数组、只有一个空的加粗、字是空的链接
+    for (const empty of ['', [], { type: 'bold', text: '' }, ['', link]]) {
+      expect({ empty, result: await post([heading(empty)]) }).toEqual({
+        empty,
+        result: contentRequired,
+      });
+      expect({ empty, result: await post([pre(empty)]) }).toEqual({
+        empty,
+        result: contentRequired,
+      });
+    }
+    // 在引用、列表里的也一样
+    expect(await post([{ type: 'blockquote', blocks: [heading('')] }])).toBe(contentRequired);
+    // 只有空格、只有换行的，标题里只有一个行内公式的照收
+    expect(await post([heading(' ')])).toBe('ok');
+    expect(await post([pre('\n')])).toBe('ok');
+    expect(await post([heading(formula('x'))])).toBe('ok');
+    // 公式（块公式、行内公式）的内容是空字符串；只有空格的照收
+    expect(await post([formula('')])).toBe(mathRequired);
+    expect(await post([paragraph(['a', formula('')])])).toBe(mathRequired);
+    expect(await post([formula(' ')])).toBe('ok');
+    expect(await post([paragraph(formula(' '))])).toBe('ok');
+    // 标题的 size 不在 1 到 6
+    expect(await post([heading('x', 0)])).toBe(badSize);
+    expect(await post([heading('x', 7)])).toBe(badSize);
+    expect(await post([heading('x', 1), heading('x', 6)])).toBe('ok');
+    // 照收的空东西
+    const cell = { align: 'left', valign: 'top' };
+    for (const blocks of [
+      [paragraph('')],
+      [paragraph([])],
+      [paragraph({ type: 'bold', text: '' })],
+      [paragraph({ type: 'code', text: '' })],
+      [paragraph(link)],
+      [{ type: 'blockquote', blocks: [paragraph('')] }],
+      [{ type: 'list', items: [{ blocks: [paragraph('')] }] }],
+      [{ type: 'table', cells: [[{ ...cell, text: '' }, cell]] }],
+      [{ type: 'table', cells: [[{ ...cell, text: '表头', is_header: true }]] }],
+    ]) {
+      expect({ blocks, result: await post(blocks) }).toEqual({ blocks, result: 'ok' });
+    }
+
+    // 整条只有分隔线（一条、几条都是）：没有内容
+    const divider = { type: 'divider' };
+    expect(await post([divider])).toBe('rejected: Bad Request: RICH_MESSAGE_EMPTY');
+    expect(await post([divider, divider])).toBe('rejected: Bad Request: RICH_MESSAGE_EMPTY');
+    // 分隔线加一个空段落、分隔线加尾部的两块、只有一个块公式、只有一个空引用；引用、列表项里只有一条分隔线
+    for (const blocks of [
+      [divider, paragraph('')],
+      [divider, divider, paragraph({ type: 'subscript', text: footer })],
+      [formula('x')],
+      [{ type: 'blockquote', blocks: [paragraph('')] }],
+      [paragraph('前'), { type: 'blockquote', blocks: [divider] }, paragraph('后')],
+      [paragraph('前'), { type: 'list', items: [{ blocks: [divider] }] }, paragraph('后')],
+    ]) {
+      expect({ blocks, result: await post(blocks) }).toEqual({ blocks, result: 'ok' });
+    }
+  });
+
+  it('尾部关着、回复只有分隔线：假接口拒收（RICH_MESSAGE_EMPTY），改发原文的普通消息；日志没有正文', async () => {
+    const reply = '---\n\n***';
+    const { api, app, entries } = await start(replying(reply), { usage: false });
+
+    const [id] = api.push({ chat: group, from: alice, text: 'nori 画条线' });
+    await delivered(api);
+    await app.bot.idle();
+
+    expect(sends(api).map((call) => call.method)).toEqual(['sendRichMessage', 'sendMessage']);
+    expect(shown(api)).toEqual([{ kind: 'plain', text: reply, replyTo: id }]);
+    expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toMatchObject([
+      { fields: { reason: 'rejected', error: { message: 'Bad Request: RICH_MESSAGE_EMPTY' } } },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('***');
+  });
+
+  it('假接口照真接口守上限：字数（按字数）、块数、层数、表格的列数、空的、不认识的块都拒收', async () => {
+    const { app } = await start(replying());
+    await app.caughtUp;
+    const post = (blocks: unknown[]) => postRich(app, blocks);
+    const paragraph = (text: string) => ({ type: 'paragraph', text });
+    const nested = (n: number): unknown =>
+      n === 0 ? paragraph('x') : { type: 'blockquote', blocks: [nested(n - 1)] };
+    const row = (n: number) =>
+      Array.from({ length: n }, () => ({ text: 'x', align: 'left', valign: 'top' }));
+
+    expect(await post([paragraph('a'.repeat(32_768))])).toBe('ok');
+    expect(await post([paragraph('a'.repeat(32_768)), paragraph('b')])).toBe(
+      'rejected: Bad Request: RICH_MESSAGE_TEXT_TOO_LONG',
+    );
+    // 按字数：32768 个 emoji 是 32768 个字（我们自己数的时候按码元，算 65536）
+    expect(await post([paragraph('😀'.repeat(32_768))])).toBe('ok');
+    expect(await post(Array.from({ length: 500 }, () => paragraph('x')))).toBe('ok');
+    expect(await post(Array.from({ length: 501 }, () => paragraph('x')))).toBe(
+      'rejected: Bad Request: RICH_MESSAGE_BLOCKS_TOO_MANY',
+    );
+    expect(
+      await post([
+        { type: 'list', items: Array.from({ length: 250 }, () => ({ blocks: [paragraph('x')] })) },
+      ]),
+    ).toBe('rejected: Bad Request: RICH_MESSAGE_BLOCKS_TOO_MANY');
+    expect(await post([nested(15)])).toBe('ok');
+    expect(await post([nested(16)])).toBe('rejected: Bad Request: RICH_MESSAGE_DEPTH_INVALID');
+    // 层数：真接口试过的边界，收的照样收，不收的照样不收
+    for (const { name, block, accepted, rejected } of depthProbes) {
+      expect({ name, result: await post([block(accepted)]) }).toEqual({ name, result: 'ok' });
+      expect({ name, result: await post([block(rejected)]) }).toEqual({
+        name,
+        result: 'rejected: Bad Request: RICH_MESSAGE_DEPTH_INVALID',
+      });
+    }
+    // 层数看最深的那个块，不是几个块加起来
+    expect(await post([nested(15), nested(15), paragraph('x')])).toBe('ok');
+    expect(await post([{ type: 'table', cells: [row(20)] }])).toBe('ok');
+    expect(await post([{ type: 'table', cells: [row(21)] }])).toBe(
+      'rejected: Bad Request: RICH_MESSAGE_TABLE_COLS_TOO_MANY',
+    );
+    expect(await post([])).toBe('rejected: Bad Request: RICH_MESSAGE_EMPTY');
+    expect(await post([{ type: 'x' }])).toBe(
+      'rejected: Bad Request: can\'t parse InputRichBlock: type "x" is unsupported',
+    );
+    expect(await post([{ type: 'paragraph', text: { type: 'underline', text: 'x' } }])).toBe(
+      "rejected: Bad Request: can't parse InputRichBlock: Unsupported rich text type",
+    );
+    expect(await post([{ type: 'table', cells: [[{ text: 'x' }]] }])).toMatch(/^rejected: /);
+  });
 
   it('富文本、尾部都关着：只有 sendMessage，请求和以前一样（没有 entities）', async () => {
     const { api, app } = await start(replying('你好呀'), { rich: false, usage: false });

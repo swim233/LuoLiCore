@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '@chat-adapter/telegram';
+import { richParts, richRejection } from './fake-rich.js';
 import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
-import type { InputRichBlock, InputRichMessage, RichText } from './rich.js';
+import type { InputRichMessage } from './rich.js';
+
+export { richParts } from './fake-rich.js';
 
 /** 测试用的本地 Bot API：收到的请求都记下来，更新由测试推送 */
 export type FakeTelegram = Awaited<ReturnType<typeof startFakeTelegram>>;
@@ -20,7 +23,8 @@ export const fakeBot: TelegramUser = {
 /**
  * 群里看得到的一条 bot 发的消息：哪一种（plain 是 sendMessage 发的普通消息，rich 是 sendRichMessage
  * 发的富文本消息）、在哪个聊天、正文、尾部（有时）、引用了哪条（没引用时没有）。正文与尾部怎么分见
- * richParts、plainParts。rich 是收到的 rich_message 原样，entities 是普通消息收到的格式标记原样
+ * richParts（fake-rich.ts）、plainParts。rich 是收到的 rich_message 原样，entities 是普通消息收到的
+ * 格式标记原样
  */
 export type Delivered = {
   kind: 'plain' | 'rich';
@@ -42,8 +46,8 @@ export type SendFailure = { status: number; description: string };
  * （/file/bot<token>/<路径>）。其他返回 404（真的 Bot API 对不认识的方法也是 404）。
  * 两种发送的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
  * 带 allow_sending_without_reply 就不带引用发出，否则 400。
- * 富文本消息只认段落（文字是字符串、数组、下标）和分隔线；普通消息的 entities 只认斜体，超出文字的
- * 范围也不认。不认的回 400，和真的 Bot API 拒收一样
+ * 富文本消息照真的接口收（认哪些块、守哪些上限，见 fake-rich.ts）；普通消息的 entities 只认斜体，
+ * 超出文字的范围也不认。不认的回 400，和真的 Bot API 拒收一样
  */
 export async function startFakeTelegram() {
   const updates: TelegramUpdate[] = [];
@@ -146,9 +150,8 @@ export async function startFakeTelegram() {
     const failure = (kind === 'rich' ? richFailures : sendFailures).shift();
     if (failure) return fail(response, failure.status, failure.description);
     const rich = kind === 'rich' ? (body.rich_message as InputRichMessage | undefined) : undefined;
-    if (kind === 'rich' && !(Array.isArray(rich?.blocks) && rich.blocks.every(isKnownBlock))) {
-      return fail(response, 400, 'Bad Request: rich_message is invalid');
-    }
+    const rejection = kind === 'rich' ? richRejection(rich) : undefined;
+    if (rejection) return fail(response, 400, rejection);
     const entities = body.entities as MessageEntity[] | undefined;
     if (kind === 'plain' && entities !== undefined) {
       const length = String(body.text).length;
@@ -341,21 +344,6 @@ export function tagOf(data: Uint8Array): string {
 }
 
 /**
- * 富文本消息里看到的正文与尾部：分隔线之前各段落的文字是正文（隔一个空行），分隔线之后的是尾部
- * （下标等样式去掉，只留文字）；没有分隔线时没有尾部
- */
-export function richParts(message: InputRichMessage): { text: string; footer?: string } {
-  const divider = message.blocks.findIndex((block) => block.type === 'divider');
-  const paragraphs = (blocks: InputRichBlock[]) =>
-    blocks.flatMap((block) => (block.type === 'paragraph' ? [plainOf(block.text)] : []));
-  if (divider < 0) return { text: paragraphs(message.blocks).join('\n\n') };
-  return {
-    text: paragraphs(message.blocks.slice(0, divider)).join('\n\n'),
-    footer: paragraphs(message.blocks.slice(divider + 1)).join('\n\n'),
-  };
-}
-
-/**
  * 普通消息里看到的正文与尾部：末尾被标成斜体的那一段是尾部，它前面的是正文（去掉隔开它们的空行）；
  * 只有尾部的消息正文是空的。没有斜体时整段都是正文
  */
@@ -371,29 +359,6 @@ export function plainParts(
     text: text.slice(0, tail.offset).replace(/\n\n$/, ''),
     footer: text.slice(tail.offset),
   };
-}
-
-/** 富文本里的文字：样式去掉，只留文字 */
-function plainOf(text: RichText): string {
-  if (typeof text === 'string') return text;
-  if (Array.isArray(text)) return text.map(plainOf).join('');
-  return plainOf(text.text);
-}
-
-/** 假接口认得的块：段落（文字是认得的富文本）、分隔线 */
-function isKnownBlock(block: unknown): boolean {
-  if (typeof block !== 'object' || block === null) return false;
-  const { type, text } = block as { type?: unknown; text?: unknown };
-  if (type === 'divider') return Object.keys(block).length === 1;
-  return type === 'paragraph' && isKnownText(text);
-}
-
-function isKnownText(text: unknown): boolean {
-  if (typeof text === 'string') return true;
-  if (Array.isArray(text)) return text.every(isKnownText);
-  if (typeof text !== 'object' || text === null) return false;
-  const rich = text as { type?: unknown; text?: unknown };
-  return rich.type === 'subscript' && isKnownText(rich.text);
 }
 
 function ok(response: ServerResponse, result: unknown): void {
