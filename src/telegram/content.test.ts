@@ -10,6 +10,7 @@ import {
 } from './content.js';
 import { imageBytes, tagOf } from './fake-api.js';
 import type { TelegramRaw } from './message.js';
+import type { ReceivedRichText, RichBlock } from './rich-received.js';
 
 const group: TelegramChat = { id: -1001, type: 'supergroup', title: '读书会' };
 const alice: TelegramUser = { id: 11, is_bot: false, first_name: 'Alice', last_name: 'Liddell' };
@@ -305,5 +306,131 @@ describe('Telegram 消息转成核心的输入', () => {
       '60:00',
       '0:00',
     ]);
+  });
+});
+
+describe('富文本消息转成核心的输入', () => {
+  /** 一条富文本消息（适配器的类型比文档旧，这里照文档写） */
+  const rich = (...blocks: RichBlock[]) =>
+    message({ rich_message: { blocks } as unknown as TelegramRaw['rich_message'] });
+  const photoBlock = (id: string, caption?: string): RichBlock => ({
+    type: 'photo',
+    photo: [photo(`${id}-小`, 90, 60), photo(id, 1280, 853), photo(`${id}-大`, 2560, 1706)],
+    ...(caption ? { caption: { text: caption } } : {}),
+  });
+
+  it('记成转出来的文字；发言人、Telegram 的发送时间、消息 id 照常', async () => {
+    const { options } = downloader();
+    expect(
+      await toAppendInput(
+        [
+          {
+            ...rich(
+              { type: 'heading', text: '标题', size: 2 },
+              { type: 'paragraph', text: ['nori ', { type: 'bold', text: '看看' }] },
+            ),
+            date: 1793404920,
+            message_id: 42,
+          },
+        ],
+        options,
+      ),
+    ).toEqual({
+      author: { id: '11', name: 'Alice Liddell' },
+      text: '## 标题\n\nnori **看看**',
+      files: [],
+      createdAt: '2026-10-31T00:02:00.000Z',
+      platformMessageId: '42',
+    });
+  });
+
+  it('照片：下载长边不超过 1280 的那一档作为附件，顺序和文字里的占位一致；说明接在占位后面', async () => {
+    expect(
+      await convert(
+        rich(
+          { type: 'paragraph', text: '前' },
+          photoBlock('p1', '第一张'),
+          { type: 'blockquote', blocks: [photoBlock('p2')] },
+          { type: 'collage', blocks: [photoBlock('p3'), photoBlock('p4', '最后')] },
+        ),
+      ),
+    ).toEqual({
+      text: '前\n\n[图片] 第一张\n\n> [图片]\n\n[图片]\n\n[图片] 最后',
+      files: ['p1', 'p2', 'p3', 'p4'].map((fileId) => ({ mediaType: 'image/jpeg', fileId })),
+    });
+  });
+
+  it('12 张照片：只下载前 10 张，后两张只有占位', async () => {
+    const { options, downloads } = downloader();
+    const ids = Array.from({ length: 12 }, (_, i) => `p${i + 1}`);
+    const input = await toAppendInput([rich(...ids.map((id) => photoBlock(id, id)))], options);
+    expect(downloads).toEqual(ids.slice(0, 10));
+    expect(input?.files.map((file) => tagOf(file.data))).toEqual(ids.slice(0, 10));
+    expect(input?.text).toBe(ids.map((id) => `[图片] ${id}`).join('\n\n'));
+  });
+
+  it('下载失败、不是图片的：那个位置是对应的占位，说明照样带着，报告种类与大小；别的照常；正文里本来就有的「[图片]」不被改', async () => {
+    const { options, failures, rejected } = downloader({
+      failing: ['bad'],
+      types: { fake: new TextEncoder().encode('其实是文字') },
+    });
+    const input = await toAppendInput(
+      [
+        rich(
+          { type: 'paragraph', text: '[图片]是正文里的字' },
+          photoBlock('bad', '坏的'),
+          photoBlock('good'),
+          photoBlock('fake', '假的'),
+          { type: 'paragraph', text: '[图片下载失败]也是字' },
+        ),
+      ],
+      options,
+    );
+    expect(input?.text).toBe(
+      [
+        '[图片]是正文里的字',
+        '[图片下载失败] 坏的',
+        '[图片]',
+        '[图片无法读取] 假的',
+        '[图片下载失败]也是字',
+      ].join('\n\n'),
+    );
+    expect(input?.files.map((file) => tagOf(file.data))).toEqual(['good']);
+    expect(failures.map((image) => [image.kind, image.fileId, image.size])).toEqual([
+      ['photo', 'bad', 1280 * 853],
+    ]);
+    expect(rejected.map(({ image, bytes }) => [image.kind, image.fileId, bytes])).toEqual([
+      ['photo', 'fake', new TextEncoder().encode('其实是文字').length],
+    ]);
+  });
+
+  it('没有字也没有照片（比如只有锚点）：「[不支持的消息]」', async () => {
+    expect(await convert(rich({ type: 'anchor', name: 'a' }))).toEqual({
+      text: '[不支持的消息]',
+      files: [],
+    });
+    expect(await convert(rich({ type: 'paragraph', text: '  \n ' }))).toEqual({
+      text: '[不支持的消息]',
+      files: [],
+    });
+  });
+
+  it('转换出错（套了十万层）：「[不支持的消息]」，报告一次', async () => {
+    let deep: unknown = '最里面';
+    for (let i = 0; i < 100_000; i++) deep = [deep];
+    const errors: unknown[] = [];
+    const { options } = downloader();
+    const input = await toAppendInput(
+      [rich({ type: 'paragraph', text: deep as ReceivedRichText })],
+      { ...options, onRichUnreadable: (error) => errors.push(error) },
+    );
+    expect(input?.text).toBe('[不支持的消息]');
+    expect(errors).toHaveLength(1);
+  });
+
+  it('编辑后的正文：新转出来的文字，照片的位置一律写「[图片]」，不下载', () => {
+    expect(editedText(rich({ type: 'paragraph', text: '改过的' }, photoBlock('p', '说明')))).toBe(
+      '改过的\n\n[图片] 说明',
+    );
   });
 });

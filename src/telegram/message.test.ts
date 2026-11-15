@@ -8,6 +8,7 @@ import {
   type TelegramRaw,
 } from './message.js';
 import { sdkLogger } from './adapter.js';
+import type { ReceivedRichText, RichBlock } from './rich-received.js';
 import { splitMessage, telegramMessageLimit } from './split.js';
 import { isTriggered } from './trigger.js';
 
@@ -134,6 +135,53 @@ describe('触发', () => {
     expect(triggered({ voice: { file_id: 'v', duration: 1 }, reply_to_message: botMessage })).toBe(
       true,
     );
+  });
+
+  describe('富文本消息：看转出来的文字和里面的 text_mention', () => {
+    /** 一条富文本消息（适配器的类型比文档旧，这里照文档写） */
+    const rich = (...blocks: RichBlock[]): Partial<TelegramRaw> => ({
+      rich_message: { blocks } as unknown as TelegramRaw['rich_message'],
+    });
+    const para = (text: ReceivedRichText): RichBlock => ({ type: 'paragraph', text });
+    const mentionOf = (user: TelegramUser): ReceivedRichText => ({
+      type: 'text_mention',
+      text: user.first_name,
+      user,
+    });
+    // 唤醒词不用含 nori 的，免得 @nori_bot 被当成唤醒词
+    const triggeredBy = (fields: Partial<TelegramRaw>) =>
+      isTriggered(message(fields), { bot, wakeWords: ['小诺'] });
+
+    it('群里：有唤醒词（不分大小写）、有 @用户名、text_mention 提到 bot，各自触发', () => {
+      expect(triggeredBy(rich(para('今天找小诺聊天')))).toBe(true);
+      expect(isTriggered(message(rich(para('NORI 在吗'))), { bot, wakeWords })).toBe(true);
+      expect(triggeredBy(rich({ type: 'heading', text: '问小诺', size: 2 }))).toBe(true);
+      expect(
+        triggeredBy(
+          rich(
+            para(['问一下 ', { type: 'mention', text: '@NORI_BOT', username: 'nori_bot' }, '。']),
+          ),
+        ),
+      ).toBe(true);
+      expect(triggeredBy(rich(para('看这里 @nori_bot')))).toBe(true);
+      expect(triggeredBy(rich(para([mentionOf(botUser), ' 看看'])))).toBe(true);
+    });
+
+    it('都没有不触发；@用户名后面紧跟字母数字下划线的不算；text_mention 提到别人不算', () => {
+      expect(triggeredBy(rich(para('今天天气不错')))).toBe(false);
+      expect(triggeredBy(rich(para('@nori_bot2 你好')))).toBe(false);
+      expect(triggeredBy(rich(para('@nori_bot_x 你好')))).toBe(false);
+      expect(triggeredBy(rich(para([mentionOf(bob), ' 看看'])))).toBe(false);
+      expect(triggeredBy(rich({ type: 'anchor', name: 'a' }))).toBe(false);
+    });
+
+    it('私聊照常触发；回复 bot 的富文本消息照常触发', () => {
+      expect(triggeredBy({ ...rich(para('随便说说')), chat: { id: 11, type: 'private' } })).toBe(
+        true,
+      );
+      const botMessage = { message_id: 3, date: 0, chat: group, from: botUser, text: '我是 bot' };
+      expect(triggeredBy({ ...rich(para('为什么')), reply_to_message: botMessage })).toBe(true);
+    });
   });
 
   it('bot 身份还没拿到时，只有私聊与唤醒词能触发', () => {

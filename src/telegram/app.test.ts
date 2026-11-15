@@ -23,6 +23,8 @@ import {
 import { depthProbes } from './fake-rich.js';
 import type { MessageEntity } from './footer.js';
 import { markdownBlocks } from './markdown.js';
+import type { TelegramRaw } from './message.js';
+import type { RichBlock } from './rich-received.js';
 import { RichMessageError, type InputRichBlock, type RichText } from './rich.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
@@ -1368,6 +1370,96 @@ describe('Telegram 前端（本地假 Bot API）', () => {
       { role: 'assistant', text: '看到了' },
     ]);
     expect(await filesOf(storage, group.id)).toEqual([1, 1, 0, 0, 0, 0]);
+  });
+
+  describe('收到的富文本消息', () => {
+    /** 一条富文本消息（适配器的类型比文档旧，这里照文档写） */
+    const rich = (...blocks: RichBlock[]) => ({ blocks }) as unknown as TelegramRaw['rich_message'];
+    const photoBlock = (id: string, caption: string): RichBlock => ({
+      type: 'photo',
+      photo: [
+        { file_id: `${id}-s`, file_unique_id: `${id}1`, width: 90, height: 60 },
+        { file_id: id, file_unique_id: `${id}2`, width: 1280, height: 853 },
+        { file_id: `${id}-l`, file_unique_id: `${id}3`, width: 2560, height: 1706 },
+      ],
+      caption: { text: caption },
+    });
+    const content = (photoCaption: string, words: string) =>
+      rich(
+        { type: 'heading', text: '周末', size: 2 },
+        { type: 'paragraph', text: [words, { type: 'bold', text: '看看' }] },
+        photoBlock('rich-photo', photoCaption),
+      );
+    /** 历史里的消息：正文、附件数、编辑时间 */
+    const stored = async (storage: Storage) => {
+      const info = await storage.findConversation('telegram', String(group.id));
+      if (!info) return [];
+      return (await (await storage.openConversation(info.id)).list()).map((message) => ({
+        role: message.role,
+        text: message.parts.map((part) => (part.type === 'text' ? part.text : '')).join(''),
+        files: message.parts.filter((part) => part.type === 'file').length,
+        edited: message.metadata?.editedAt !== undefined,
+      }));
+    };
+
+    it('带照片、带唤醒词的：历史里是转出来的文字和图片，模型看到图片；洛璃回复，引用这条', async () => {
+      const model = replying('看到了');
+      const { api, app, storage } = await start(model);
+      api.addFile('rich-photo', imageBytes('image/jpeg', 'rich-photo'));
+
+      const [id] = api.push({ chat: group, from: alice, rich_message: content('海边', 'nori ') });
+      await delivered(api);
+      await app.bot.idle();
+
+      expect(api.downloads).toEqual(['files/rich-photo']);
+      expect(promptFiles(model, 0)).toEqual(['image/jpeg']);
+      expect(await stored(storage)).toEqual([
+        { role: 'user', text: '## 周末\n\nnori **看看**\n\n[图片] 海边', files: 1, edited: false },
+        { role: 'assistant', text: '看到了', files: 0, edited: false },
+      ]);
+      expect(api.delivered).toMatchObject([{ kind: 'rich', text: '看到了', replyTo: id }]);
+    });
+
+    it('编辑：历史里的正文换成新转出来的文字，记编辑时间；不触发，不再下载', async () => {
+      const model = replying('不该出现');
+      const { api, storage, entries } = await start(model);
+      api.addFile('rich-photo', imageBytes('image/jpeg', 'rich-photo'));
+
+      const [id] = api.push({ chat: group, from: alice, rich_message: content('海边', '大家 ') });
+      await waitUntil(async () => (await stored(storage)).length === 1);
+      api.pushEdit({
+        message_id: id!,
+        chat: group,
+        from: alice,
+        rich_message: content('山上', 'nori 改过的 '),
+      });
+      await waitUntil(() => entries.some((e) => e.msg === 'telegram.edited'));
+      await sleep(100);
+
+      expect(await stored(storage)).toEqual([
+        {
+          role: 'user',
+          text: '## 周末\n\nnori 改过的 **看看**\n\n[图片] 山上',
+          files: 1,
+          edited: true,
+        },
+      ]);
+      expect(api.downloads).toEqual(['files/rich-photo']);
+      expect(sends(api)).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+    });
+
+    it('白名单外的群发的：不记录、不下载', async () => {
+      const { api, storage, entries } = await start(replying());
+      api.addFile('rich-photo', imageBytes('image/jpeg', 'rich-photo'));
+
+      api.push({ chat: otherGroup, from: alice, rich_message: content('海边', 'nori ') });
+      await waitUntil(() => entries.some((e) => e.msg === 'telegram.ignored'));
+
+      expect(await storage.findConversation('telegram', String(otherGroup.id))).toBeUndefined();
+      expect(api.downloads).toEqual([]);
+      expect(api.calls.filter((call) => call.method === 'getFile')).toEqual([]);
+    });
   });
 
   it('相册：适配器攒齐后合成一条消息、多张图，按原顺序；回复引用第一条；编辑第一条的说明文字改正文、图片不变', async () => {

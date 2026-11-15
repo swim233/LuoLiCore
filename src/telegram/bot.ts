@@ -298,6 +298,21 @@ export function createTelegramBot({
     session.title = title;
   }
 
+  /**
+   * 收到的富文本消息转换出错（这条记成「[不支持的消息]」）：日志一行，只有消息 id 和错误的类型，
+   * 不带内容
+   */
+  function richUnreadable(fields: object, raw: TelegramRaw, error: unknown): void {
+    logger.warn(
+      {
+        ...fields,
+        messageId: String(raw.message_id),
+        error: { type: error instanceof Error ? error.name : typeof error },
+      },
+      'telegram.rich_unreadable',
+    );
+  }
+
   /** 编辑：改历史里那条消息的正文，不触发回复，也不影响等待计时 */
   async function edit(raw: TelegramRaw): Promise<void> {
     const chatId = String(raw.chat.id);
@@ -307,7 +322,9 @@ export function createTelegramBot({
       info &&
       (await editMessage(await storage.openConversation(info.id), {
         platformMessageId: messageId,
-        text: editedText(raw),
+        text: editedText(raw, {
+          onRichUnreadable: (error) => richUnreadable({ conversationId: info.id }, raw, error),
+        }),
         editedAt: new Date((raw.edit_date ?? raw.date) * 1000).toISOString(),
       }));
     if (!info || !edited) {
@@ -845,6 +862,7 @@ export function createTelegramBot({
             ),
           onImageRejected: (image, size) =>
             logger.warn({ ...fields, kind: image.kind, size }, 'telegram.image_rejected'),
+          onRichUnreadable: (error) => richUnreadable(fields, raw, error),
         });
         if (!input) return;
         let message: Awaited<ReturnType<BotConversation['append']>>;

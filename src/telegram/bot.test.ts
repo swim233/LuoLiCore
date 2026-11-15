@@ -19,6 +19,7 @@ import { createTelegramBot, type ChatTarget, type RoundNotice } from './bot.js';
 import { imageBytes, plainParts, richParts } from './fake-api.js';
 import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
+import type { ReceivedRichText, RichBlock } from './rich-received.js';
 import { RichMessageError, type InputRichMessage } from './rich.js';
 import { telegramMessageLimit } from './split.js';
 
@@ -2979,5 +2980,101 @@ describe('按 Markdown 排版、按富文本的上限拆分', () => {
     expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
       { kind: 'plain', text: '[ref]: https://example.com', footer },
     ]);
+  });
+});
+
+describe('收到的富文本消息', () => {
+  /** 一条富文本消息（适配器的类型比文档旧，这里照文档写） */
+  const rich = (...blocks: RichBlock[]): Partial<TelegramRaw> => ({
+    rich_message: { blocks } as unknown as TelegramRaw['rich_message'],
+  });
+  const para = (text: ReceivedRichText): RichBlock => ({ type: 'paragraph', text });
+  const shown = (sent: Sent[]) => sent.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }));
+
+  it.each([
+    ['唤醒词（不分大小写）', [para('大家好'), para('NORI 在吗')]],
+    ['唤醒词在列表里', [{ type: 'list', items: [{ label: '•', blocks: [para('问问 nori')] }] }]],
+    [
+      'text_mention 提到 bot',
+      [
+        para([
+          {
+            type: 'text_mention',
+            text: '洛璃',
+            user: { id: 999, is_bot: true, first_name: '洛璃' },
+          },
+          ' 看看',
+        ]),
+      ],
+    ],
+  ] as Array<[string, RichBlock[]]>)('群里：%s，触发，回复引用这条', async (_, blocks) => {
+    const { bot, sent } = setup({ model: replying('好') });
+
+    const trigger = message(rich(...blocks));
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([{ kind: 'rich', text: '好', replyTo: trigger.message_id }]);
+  });
+
+  it('群里：没有唤醒词、没有提到 bot：只记录（转出来的文字），不触发', async () => {
+    const model = replying('好');
+    const { bot, sent, storage } = setup({ model });
+
+    for (const blocks of [
+      [para('普通的话')],
+      [{ type: 'heading', text: '标题', size: 1 }, para({ type: 'bold', text: '粗' })],
+      [
+        para([
+          {
+            type: 'text_mention',
+            text: '小明',
+            user: { id: 7, is_bot: false, first_name: '小明' },
+          },
+          ' 来了',
+        ]),
+      ],
+    ] as RichBlock[][]) {
+      await bot.handle(message(rich(...blocks)));
+    }
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect((await historyOf(storage)).map((m) => m.text)).toEqual([
+      '普通的话',
+      '# 标题\n\n**粗**',
+      '小明 来了',
+    ]);
+  });
+
+  it('转换出错（套了十万层）：记「[不支持的消息]」，日志一行 telegram.rich_unreadable，没有内容；编辑时也一样', async () => {
+    const { bot, entries, storage } = setup({ model: replying('好') });
+    const deep = (word: string) => {
+      let text: unknown = word;
+      for (let i = 0; i < 100_000; i++) text = [text];
+      return para(text as ReceivedRichText);
+    };
+
+    const raw = message(rich(deep('秘密的内容')));
+    await bot.handle(raw);
+    await bot.handle({ ...raw, ...rich(deep('改过的秘密')), edit_date: raw.date + 1 });
+    await bot.idle();
+
+    expect((await historyOf(storage)).map((m) => m.text)).toEqual(['[不支持的消息]']);
+    const logged = entries.filter((e) => e.msg === 'telegram.rich_unreadable');
+    expect(logged.map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        messageId: String(raw.message_id),
+        error: { type: 'RangeError' },
+      },
+      {
+        conversationId: expect.any(String),
+        messageId: String(raw.message_id),
+        error: { type: 'RangeError' },
+      },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('秘密');
   });
 });
