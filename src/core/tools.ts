@@ -71,7 +71,10 @@ export type ToolSummary<INPUT = unknown, OUTPUT = unknown> = (call: {
   output?: OUTPUT;
 }) => string | undefined;
 
-/** 定义一个工具。一个工具一个文件，放在 src/tools/，再列进 src/tools/index.ts 的清单 */
+/**
+ * 定义一个工具。通用工具放在插件里（plugins/<名字>/，经 src/plugin-api.ts 引用），列进插件的工具，
+ * 插件再列进插件清单 plugins/index.ts；洛璃服务自己的工具（如任务）由服务装配
+ */
 export function defineTool<SCHEMA extends z.ZodType, OUTPUT, ENV extends string = never>({
   env = [],
   history,

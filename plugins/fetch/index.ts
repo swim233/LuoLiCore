@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { defineTool, ToolError, type Logger, type ToolDefinition } from '../../core/index.js';
+import {
+  definePlugin,
+  defineTool,
+  ToolError,
+  type Logger,
+  type ToolDefinition,
+} from '../../src/plugin-api.js';
 import { defaultJina } from './jina.js';
 import { fetchSummary, renderPage, truncatedNote } from './page.js';
 import { readGeneric, type ReadOptions, type ReadResult } from './read.js';
@@ -52,7 +58,7 @@ export type FetchToolOptions = {
   sites?: readonly SiteHandler[];
 };
 
-/** 造一个 fetch 工具。清单里用默认参数造的那一份 */
+/** 造一个 fetch 工具。fetch 插件里用的是默认参数造的那一份（fetchTool） */
 export function createFetchTool({
   requester,
   jinaReader = defaultJina.reader,
@@ -112,6 +118,9 @@ export function createFetchTool({
 }
 
 export const fetchTool = createFetchTool();
+
+/** fetch 插件：只有 fetch 这一个工具。列进插件清单 plugins/index.ts */
+export const fetchPlugin = definePlugin({ name: 'fetch', tools: [fetchTool] });
 
 /** 去掉首尾空白；没写协议的（example.com/a、www.example.com）补成 https */
 function normalizeUrl(raw: string): URL {

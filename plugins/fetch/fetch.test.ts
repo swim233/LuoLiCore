@@ -1,8 +1,7 @@
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installTools, TextAndImages, ToolError } from '../../core/index.js';
-import { tools } from '../index.js';
-import { createFetchTool, fetchTool } from './index.js';
+import { TextAndImages, ToolError } from '../../src/plugin-api.js';
+import { createFetchTool, fetchPlugin, fetchTool } from './index.js';
 import { createRequester, defaultUserAgents } from './request.js';
 import type { SiteHandler } from './sites.js';
 import {
@@ -103,11 +102,12 @@ const jinaOk: Handler = ok(
 );
 
 describe('工具定义', () => {
-  it('工具清单里有 fetch，装配通过', () => {
-    expect(tools.map((tool) => tool.name)).toContain('fetch');
-    const setup = installTools(tools, {});
-    expect(setup.tools.map((tool) => tool.definition.name)).toContain('fetch');
-    expect(setup.skipped).toEqual([]);
+  // 插件清单里有 fetch、装配通过：见 src/server/plugins.test.ts（插件的测试不引 src/ 下别的东西）
+  it('fetch 插件里只有 fetch 这一个工具', () => {
+    expect(fetchPlugin.name).toBe('fetch');
+    expect(fetchPlugin.tools).toEqual([fetchTool]);
+    expect(fetchTool.name).toBe('fetch');
+    expect(fetchTool.env).toEqual([]);
     expect(fetchTool.timeoutMs).toBe(30_000);
     expect(fetchTool.history).toBeUndefined();
   });

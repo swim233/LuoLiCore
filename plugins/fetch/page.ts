@@ -1,4 +1,4 @@
-import { TextAndImages, ToolError, type NewFile } from '../../core/index.js';
+import { TextAndImages, ToolError, type NewFile } from '../../src/plugin-api.js';
 
 /**
  * 读到的一个网页：正文（Markdown 或文字）、非文本内容的一行说明，或者一张交给模型看的图片

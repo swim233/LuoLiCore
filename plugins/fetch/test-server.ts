@@ -6,7 +6,7 @@ import {
 } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { expect } from 'vitest';
-import { ToolError, type Logger, type ToolDefinition } from '../../core/index.js';
+import { ToolError, type Logger, type ToolDefinition } from '../../src/plugin-api.js';
 
 // fetch 测试用的本地 HTTP 服务（不访问外网）
 

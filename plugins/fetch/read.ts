@@ -1,4 +1,4 @@
-import { describeImage, imageSize, isSupportedImage, ToolError } from '../../core/index.js';
+import { describeImage, imageSize, isSupportedImage, ToolError } from '../../src/plugin-api.js';
 import { decodeText } from './body.js';
 import { convertHtml, isPoorConversion, type Converted, type FetchMode } from './convert.js';
 import { readViaJina, type JinaOptions } from './jina.js';

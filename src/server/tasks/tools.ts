@@ -9,7 +9,7 @@ import {
 import { describeSchedule, formatDue, scheduleKinds } from './schedule.js';
 import { maxActionChars, maxActiveTasks, personOf, type TaskService } from './service.js';
 
-// 任务工具（ADR-0010）：建任务、列出任务、取消任务。由服务提供，接在通用工具后面一起装配，
+// 任务工具（ADR-0010）：建任务、列出任务、取消任务。由服务提供，接在插件的工具后面一起装配，
 // 所有会话共用；只看、只取消本会话的任务。检查不过都以错误结果告诉模型
 
 type Service = Pick<TaskService, 'create' | 'list' | 'cancelIn' | 'now'>;

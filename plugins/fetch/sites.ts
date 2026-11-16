@@ -1,4 +1,4 @@
-import type { Logger } from '../../core/index.js';
+import type { Logger } from '../../src/plugin-api.js';
 import type { FetchMode } from './convert.js';
 import { createGitHubHandler } from './github.js';
 import type { Page } from './page.js';

@@ -2,6 +2,7 @@ import { builtinModules } from 'node:module';
 import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
+import rootManifest from './package.json' with { type: 'json' };
 import markdownManifest from './packages/markdown/package.json' with { type: 'json' };
 import uiManifest from './packages/ui/package.json' with { type: 'json' };
 
@@ -14,15 +15,23 @@ const frontends = [
   '(^|[/#])requests(/|$)',
 ];
 
-// 洛璃服务（src/server/）与网页面板（src/web/）：core 与工具同样不得引用
+// 洛璃服务（src/server/）与网页面板（src/web/）：core 与插件的入口文件同样不得引用
 const serverAndWeb = ['(^|[/#])server(/|$)', '(^|[/#])web(/|$)'];
+
+// 插件（根目录的 plugins/，含插件清单 plugins/index.ts）：任何含 plugins 路径段的写法
+// （服务自己的 ./plugins.js 不算：那一段是 plugins.js）
+const pluginsDir = '(^|[/#])plugins(/|$)';
+// 插件的入口文件（src/plugin-api.ts）：最后一段是 plugin-api 的写法（带不带扩展名、写几个 ../ 都算）。
+// 它转出了核心的代码，src/ 下只有洛璃服务能引它，不然网页面板、CLI 能经它绕过「只引核心的类型」
+const pluginApiFile = '(^|[/#])plugin-api(\\.[cm]?[jt]s)?$';
 
 // core 不得引用的模块
 const forbiddenInCore = [
   ...frontends,
   ...serverAndWeb,
-  // 工具清单与工具（src/tools/），同上；core 只认 defineTool 的形状。core 自己的 ./tools.js 不算
-  '(^|[/#])tools(/|$)',
+  // 插件与插件的入口文件（src/plugin-api.ts）：core 只认 defineTool 的形状，不认识插件
+  pluginsDir,
+  pluginApiFile,
   // core 只依赖 Logger 接口，不引用 pino
   '^pino(/|$)',
   '^(node:)?readline(/|$)',
@@ -31,17 +40,20 @@ const forbiddenInCore = [
   '^grammy(/|$)',
 ];
 
+// 正则里要当普通字符的模块名（如 @mozilla/readability）先转义
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // 网页面板里没有 Node：node: 模块与不带前缀的内置模块（fs、path……）都不能引用
 const nodeBuiltins = `^(node:|(${builtinModules
   .filter((name) => !name.startsWith('_'))
   .join('|')})(/|$))`;
 
-// 网页面板不得引用的目录：服务端、core、各前端与它们共用的代码、工具（src/ 下的同名目录）
-const outsideDirs = 'core|server|cli|telegram|shared|requests|tools';
+// 网页面板不得引用的目录：服务端、core、各前端与它们共用的代码（src/ 下的同名目录）
+const outsideDirs = 'core|server|cli|telegram|shared|requests';
 
 // 网页面板不得引用的模块，按文件所在的深度（d = src/web 到文件之间隔了几层目录）分别写：
 // 走出 src/web 到 src/ 要 d+1 个 ../，所以只有 (../){d+1}core 这样的才是 core；
-// 网页自己的 ./server/x、../tools/y（d ≥ 1 时是 src/web 里的目录）不拦。
+// 网页自己的 ./server/x、../cli/y（d ≥ 1 时是 src/web 里的目录）不拦。
 // 另外含 src/core 这样的路径段一律拦（不管写几个 ../ 或绝对路径），子路径导入 #core 也拦。
 // d 超过 WEB_DEPTHS 的文件用最宽的写法（任何路径段含这些目录名都拦）
 const WEB_DEPTHS = 5;
@@ -52,6 +64,15 @@ const webPatterns = (d) => [
   nodeBuiltins,
 ];
 const webPatternsDeep = [`(^|[/#])(${outsideDirs})(/|$)`, nodeBuiltins];
+// 插件（根目录的 plugins/）：走出 src/web 到仓库根要 d+2 个 ../（中间夹着 ./ 也算）；
+// 绝对路径里含 plugins 路径段、子路径导入 #plugins 也拦。插件的入口文件 src/plugin-api.ts 也拦。
+// import type 也不行
+const webPluginPatterns = (d) => [
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 2}}plugins(/|$)`,
+  '^/(.*/)?plugins(/|$)',
+  '^#plugins(/|$)',
+  pluginApiFile,
+];
 
 /**
  * 一组引用规则：patterns 里任一个匹配就报 message。
@@ -97,7 +118,7 @@ function restrictImports(files, ...groups) {
 }
 
 // 组件库（packages/ui，包名 @luoli/ui）是浏览器里的代码：src/ 下只有网页面板能引用。
-// core、工具、服务、CLI、Telegram、导出脚本、共用代码都不能（测试也不例外，import type 也不行）
+// core、插件的入口文件、服务、CLI、Telegram、导出脚本、共用代码都不能（测试也不例外，import type 也不行）
 const noUi = rule(
   ['^@luoli/ui(/|$)'],
   '组件库 @luoli/ui 是浏览器里的代码，src/ 下只有网页面板（src/web/）能引用',
@@ -109,21 +130,80 @@ const viaPackageName = rule(
   '工作区的包（组件库 @luoli/ui/…、@luoli/markdown）只能按包名引用，不能用相对路径或含 packages/、node_modules/@luoli/ 的路径绕进去',
 );
 
+// 插件和插件的入口文件只有洛璃服务（src/server/）能引用，插件只引清单 plugins/index.js：src/ 下别的代码
+// （前端、导出脚本、共用代码，CLI 的测试与非测试文件）都不能，import type 也不行。
+// core、网页面板另有自己的一份
+const noPlugins = rule(
+  [pluginsDir, pluginApiFile],
+  '插件（plugins/）和插件的入口文件（src/plugin-api.ts）只有洛璃服务（src/server/）能引用，插件只引清单 plugins/index.js',
+);
+// 洛璃服务只引插件清单，不引插件里的文件（插件的东西都经清单交给服务）
+const onlyPluginList = rule(
+  ['(^|[/#])plugins(/(?!index\\.js$)|$)'],
+  '洛璃服务只引插件清单 plugins/index.js，不引插件里的文件',
+);
+
 // CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
-// tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、工具、网页。
-// 测试不在此列（连接部分的测试要装一个真的服务）
+// tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、网页。
+// 插件另由 noPlugins 拦（import type 也不行）。测试不在此列（连接部分的测试要装一个真的服务）
 const cliForbidden = [
   '(^|[/#])server(/|$)',
   '(^|[/#])core(/(?!tool-content(\\.js)?$)|$)',
   '(^|[/#])telegram(/|$)',
   '(^|[/#])shared(/|$)',
   '(^|[/#])requests(/|$)',
-  '(^|[/#])tools(/|$)',
   '(^|[/#])web(/|$)',
 ];
 
-const WEB_MESSAGE =
-  '网页面板不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）';
+const WEB_MESSAGE = '网页面板不得引用服务端、core、前端的代码或 node 模块（import type 可以）';
+const WEB_PLUGIN_MESSAGE =
+  '网页面板不得引用插件（plugins/）和插件的入口文件（src/plugin-api.ts），import type 也不行';
+
+// 插件的入口文件（src/plugin-api.ts）：只引核心（./core/…），别的一律拦：
+// 不以 ./core/ 开头的（别的相对路径、npm 包、node 模块、绝对路径、#子路径）、任何含 .. 路径段的写法
+const pluginApiPatterns = ['^(?!\\./core/)', '(^|/)\\.\\.(/|$)'];
+const PLUGIN_API_MESSAGE =
+  '插件的入口文件只引核心（./core/…），不引 npm 包、node 模块和前端、服务、网页的代码与插件';
+
+// 插件（plugins/<名字>/）：只许引用自己这个插件目录里的文件、src/plugin-api.js（插件要用的东西都从这里引）、
+// node 内置模块和根 package.json 里声明的依赖；不得引用 src/ 下别的代码、别的插件、工作区的包（@luoli/…），
+// import type 也不行。测试文件（*.test.*、test-*.*）另外可以引 vitest。
+// 按文件所在的深度（d = 插件目录到文件之间隔了几层目录）分别写：走出插件目录要 d+1 个 ../
+// （中间夹着 ./ 也算），只放过正好 d+2 个 ../ 走到的 src/plugin-api.js；先进目录再往上退的写法（a/../../x）
+// 一律拦；不以 . 开头的（裸模块名、绝对路径、#子路径）只放过 node 模块与声明了的依赖。
+// d 达到 PLUGIN_DEPTHS 的文件用最宽的写法：开头有 PLUGIN_DEPTHS+1 个以上 ../ 的都拦，
+// 任意个 ../ 接 src/plugin-api.js 都放过
+const pluginDeps = Object.keys({
+  ...rootManifest.dependencies,
+  ...rootManifest.peerDependencies,
+  ...rootManifest.optionalDependencies,
+}).filter((name) => !name.startsWith('@luoli/'));
+const nodeModuleNames = builtinModules.filter((name) => !name.startsWith('_'));
+const PLUGIN_DEPTHS = 5;
+const PLUGIN_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
+const pluginPatterns = (d, deps) => [
+  `^(?!(\\.\\./)${d < PLUGIN_DEPTHS ? `{${d + 2}}` : '+'}src/plugin-api\\.js$)(\\./)*(\\.\\.(/|$)(\\./)*){${Math.min(d, PLUGIN_DEPTHS) + 1}}`,
+  '(^|/)[^/.][^/]*/\\.\\.(/|$)',
+  `^(?!\\.|node:|(${[...nodeModuleNames, ...deps].map(escapeRe).join('|')})(/|$))`,
+];
+const PLUGIN_MESSAGE =
+  '插件只许引用自己这个插件目录里的文件、src/plugin-api.js、node 模块和根 package.json 里声明的依赖，不得引用 src/ 下别的代码、别的插件和工作区的包（@luoli/…）';
+const pluginRules = (names, deps, message) => [
+  ...Array.from({ length: PLUGIN_DEPTHS }, (_, d) =>
+    restrictImports(
+      names.map((name) => `plugins/*/${'*/'.repeat(d)}${name}`),
+      rule(pluginPatterns(d, deps), message),
+    ),
+  ),
+  restrictImports(
+    names.map((name) => `plugins/*/${'*/'.repeat(PLUGIN_DEPTHS)}**/${name}`),
+    rule(pluginPatterns(PLUGIN_DEPTHS, deps), message),
+  ),
+];
+// 插件清单（plugins/index.ts 等 plugins/ 下直接放的文件）：只许引各插件的入口（./<名字>/index.js）
+// 和 ../src/plugin-api.js（插件的类型），别的一律拦
+const pluginListPatterns = ['^(?!\\./[^/.][^/]*/index\\.js$|\\.\\./src/plugin-api\\.js$)'];
+const PLUGIN_LIST_MESSAGE = '插件清单只引各插件的入口（./<名字>/index.js）和 ../src/plugin-api.js';
 
 // 组件库（packages/ui）：只许引用包里自己的文件，和它自己 package.json 里声明的依赖。
 // 根目录的 node_modules 里解析得到的别的包（hono、ai、marked……）不能靠这个引到；import type 也不行。
@@ -132,7 +212,6 @@ const uiDeps = Object.keys({
   ...uiManifest.peerDependencies,
   ...uiManifest.optionalDependencies,
 });
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // 测试由根目录的 vitest 跑，测试文件另外可以引 vitest；控件的测试用 react-dom/server 渲染（不需要 DOM），react-dom 在包的 devDependencies 里
 const uiTestDeps = [...uiDeps, 'vitest', 'react-dom'];
 // 按文件所在的深度（d = packages/ui 到文件之间隔了几层目录）分别写：走出 packages/ui 要 d+1 个 ../
@@ -235,21 +314,35 @@ export default defineConfig(
   globalIgnores(['node_modules', 'dist', '.grill', '.handoff', 'coverage']),
   js.configs.recommended,
   tseslint.configs.recommended,
-  // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/。
-  // 写在最前面：后面 core、工具、CLI 各自的规则对它们的文件整份覆盖这一份，所以那几处也带上这两组
-  { ...restrictImports(['src/**'], noUi, viaPackageName), ignores: ['src/web/**'] },
+  // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/；不得引用插件。
+  // 写在最前面：后面 core、服务、插件的入口文件、CLI 各自的规则对它们的文件整份覆盖这一份，
+  // 所以那几处也带上组件库、packages/ 这两组，插件各自另写
+  { ...restrictImports(['src/**'], noUi, viaPackageName, noPlugins), ignores: ['src/web/**'] },
   restrictImports(
     ['src/core/**'],
-    rule(forbiddenInCore, 'core 不得引用前端、服务、网页、平台代码或工具清单'),
+    rule(forbiddenInCore, 'core 不得引用前端、服务、网页、平台代码或插件'),
     noUi,
     viaPackageName,
   ),
+  // 洛璃服务：只引插件清单，不引插件里的文件
+  restrictImports(['src/server/**'], onlyPluginList, noUi, viaPackageName),
+  // 插件的入口文件：只引核心
   restrictImports(
-    ['src/tools/**'],
-    rule([...frontends, ...serverAndWeb], '工具不得引用前端、服务或网页代码'),
+    ['src/plugin-api.ts'],
+    rule(pluginApiPatterns, PLUGIN_API_MESSAGE),
     noUi,
     viaPackageName,
   ),
+  // 插件：只引自己目录里的文件、src/plugin-api.js、node 模块和声明了的依赖
+  ...pluginRules([`*.${PLUGIN_EXT}`], pluginDeps, PLUGIN_MESSAGE),
+  // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
+  ...pluginRules(
+    [`*.test.${PLUGIN_EXT}`, `test-*.${PLUGIN_EXT}`],
+    [...pluginDeps, 'vitest'],
+    PLUGIN_MESSAGE + '；测试文件（*.test.*、test-*.*）另外可以引 vitest',
+  ),
+  // 插件清单：只引各插件的入口和 ../src/plugin-api.js
+  restrictImports([`plugins/*.${PLUGIN_EXT}`], rule(pluginListPatterns, PLUGIN_LIST_MESSAGE)),
   // 组件库：不得引用包外面的文件、node 模块和没声明的依赖
   ...uiRules('{ts,tsx,js,mjs,mts,cts,cjs,jsx}', uiDeps, UI_MESSAGE),
   // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
@@ -283,17 +376,20 @@ export default defineConfig(
     files: ['packages/markdown/**/*.ts'],
     rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
   },
-  // 网页面板：不得引用服务端、core、前端、工具的代码或 node 模块（import type 可以）；组件库只能按包名引
+  // 网页面板：不得引用服务端、core、前端的代码或 node 模块（import type 可以）；不得引用插件
+  // （import type 也不行）；组件库只能按包名引
   ...Array.from({ length: WEB_DEPTHS }, (_, d) =>
     restrictImports(
       [`src/web/${'*/'.repeat(d)}*.{ts,tsx}`],
       rule(webPatterns(d), WEB_MESSAGE, { allowTypeImports: true }),
+      rule(webPluginPatterns(d), WEB_PLUGIN_MESSAGE),
       viaPackageName,
     ),
   ),
   restrictImports(
     [`src/web/${'*/'.repeat(WEB_DEPTHS)}**/*.{ts,tsx}`],
     rule(webPatternsDeep, WEB_MESSAGE, { allowTypeImports: true }),
+    rule([pluginsDir, pluginApiFile], WEB_PLUGIN_MESSAGE),
     viaPackageName,
   ),
   {
@@ -307,13 +403,14 @@ export default defineConfig(
       ['src/cli/**/*.ts'],
       rule(
         cliForbidden,
-        'CLI 是洛璃服务的客户端：服务端只许 import type，core 只许 tool-content 与类型，不引用其他前端、共用代码、工具或网页',
+        'CLI 是洛璃服务的客户端：服务端只许 import type，core 只许 tool-content 与类型，不引用其他前端、共用代码或网页',
         { allowTypeImports: true },
       ),
       noUi,
       viaPackageName,
+      noPlugins,
     ),
-    // 测试走最前面那一份（不得引用组件库）
+    // 测试走最前面那一份（不得引用组件库、插件）
     ignores: ['src/cli/**/*.test.ts'],
   },
   {

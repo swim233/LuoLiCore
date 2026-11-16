@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { plugins } from '../../plugins/index.js';
 import {
   createModel,
   createPromptFiles,
@@ -11,9 +12,7 @@ import {
 } from '../core/index.js';
 import { createLogger } from '../shared/logger.js';
 import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
-import { setupTools } from '../shared/tools.js';
 import type { startTelegram } from '../telegram/app.js';
-import { tools as toolList } from '../tools/index.js';
 import { createApp } from './app.js';
 import { createChats, type Chats } from './chat.js';
 import { parseServerConfig } from './config.js';
@@ -22,11 +21,11 @@ import { hostname, listen, type Listener } from './listen.js';
 import { createLive } from './live.js';
 import { observeStorage } from './observed-storage.js';
 import { isBuilt, notBuiltText, webDist } from './pages.js';
+import { setupServiceTools } from './plugins.js';
 import { relayChanges } from './relay.js';
 import { createSessions } from './sessions.js';
 import { createStatus } from './status.js';
 import { createTaskService } from './tasks/service.js';
-import { createTaskTools } from './tasks/tools.js';
 import { startTelegramFrontend } from './telegram.js';
 import { toolSummaries } from './tool-summary.js';
 import { createViews } from './views.js';
@@ -57,9 +56,13 @@ try {
   process.exit(1);
 }
 
-// 工具清单：通用工具，后面接上任务工具（ADR-0010）。有误时退出；缺环境变量的不装，各提示一行。
-// 所有会话共用装上的这一份。任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
-const installed = setupTools([...toolList, ...createTaskTools(() => taskService)], process.env, {
+// 工具：插件清单（plugins/index.ts）里插件的工具，后面接上任务工具（ADR-0010、ADR-0014）。
+// 插件或工具有误时退出；缺环境变量的不装，各提示一行。所有会话共用装上的这一份。
+// 任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
+const installed = setupServiceTools({
+  plugins,
+  tasks: () => taskService,
+  env: process.env,
   logger,
   report: (line) => console.error(line),
 });
