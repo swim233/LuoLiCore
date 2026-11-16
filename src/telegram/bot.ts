@@ -1,6 +1,10 @@
 import {
+  ConversationBusyError,
   DuplicateMessageError,
   editMessage,
+  type Author,
+  type ClearResult,
+  type CompactResult,
   type Conversation,
   type Logger,
   type MessageChunk,
@@ -8,23 +12,45 @@ import {
   type Storage,
   type Trigger,
 } from '../core/index.js';
+import { parseCommand, type TelegramCommand } from './command.js';
 import { editedText, toAppendInput } from './content.js';
-import { conversationTitle, isAllowed, isAllowedChat, type TelegramRaw } from './message.js';
-import { splitMessage } from './split.js';
+import { plainWithFooter, usageFooter, type MessageEntity } from './footer.js';
+import { markdownBlocks } from './markdown.js';
+import {
+  conversationTitle,
+  displayName,
+  isAllowed,
+  isAllowedChat,
+  type TelegramRaw,
+} from './message.js';
+import { richMessage, RichMessageError, type InputRichMessage } from './rich.js';
+import { splitMessage, splitRich, telegramMessageLimit, type RichPiece } from './split.js';
 import { isTriggered, type BotIdentity } from './trigger.js';
 
 /** 往哪个聊天发：论坛群里回到触发消息所在的话题 */
 export type ChatTarget = { chatId: number; messageThreadId?: number };
 
-/** 发往 Telegram 的两种操作；由 Chat SDK 的适配器实现，测试里可以换成假的 */
+/** 发往 Telegram 的几种操作；由 Chat SDK 的适配器实现，测试里可以换成假的 */
 export type Sender = {
   /** 显示「正在输入」，Telegram 几秒后自动消失 */
   typing(target: ChatTarget): Promise<void>;
   /**
-   * 发一条纯文本；replyTo 为被引用消息的 id。被引用的消息不在了（删了、id 不对）时照样发出，
-   * 只是不带引用（适配器带上 allow_sending_without_reply）
+   * 发一条纯文本的普通消息；replyTo 为被引用消息的 id。被引用的消息不在了（删了、id 不对）时
+   * 照样发出，只是不带引用（适配器带上 allow_sending_without_reply）。
+   * entities 是文字里的格式标记（尾部的斜体），offset、length 对着 text 原样算；有它时文字要原样
+   * 发出，不能被改动。没有时和以前一样
    */
-  send(target: ChatTarget, text: string, replyTo?: number): Promise<void>;
+  send(
+    target: ChatTarget,
+    text: string,
+    replyTo?: number,
+    entities?: readonly MessageEntity[],
+  ): Promise<void>;
+  /**
+   * 发一条富文本消息（sendRichMessage），引用的规则同 send。服务端不认识这个接口、Telegram 拒收
+   * 这一条时抛 RichMessageError（unsupported、rejected），由调用方改发普通消息；别的失败原样抛出
+   */
+  sendRich(target: ChatTarget, message: InputRichMessage, replyTo?: number): Promise<void>;
 };
 
 /** 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点 */
@@ -106,6 +132,33 @@ type Round = {
   finish: () => void;
 };
 
+/** 指令的结果：核心给的，或者失败 */
+type CommandOutcome = CompactResult | ClearResult | 'failed';
+
+/** 群里看到的提示；被中止（服务退出）时不发 */
+const commandReplies: Record<Exclude<CommandOutcome, 'aborted' | 'failed'>, string> = {
+  cleared: '已清空上下文',
+  'already-empty': '上下文已经是空的',
+  compacted: '已压缩',
+  'nothing-to-compact': '没有可压缩的内容',
+};
+const failedReplies: Record<TelegramCommand, string> = { compact: '压缩失败', clear: '清空失败' };
+
+/** 排在会话里的一条指令（压缩、清空） */
+type QueuedCommand = {
+  kind: TelegramCommand;
+  /** 指令那条消息：提示引用它，发到它所在的聊天（与话题） */
+  raw: TelegramRaw;
+  /** 执行人：发指令的人 */
+  by: Author;
+  /** 收到的时刻（Date.now()） */
+  receivedAt: number;
+  /** 开始执行的时刻；还在等时没有 */
+  startedAt?: number;
+  /** 中止进行中的压缩（关闭时） */
+  abort: AbortController;
+};
+
 type Session = {
   conversationId: string;
   conversation: BotConversation;
@@ -113,6 +166,13 @@ type Session = {
   title?: string;
   /** 每个会话三种状态：空闲（没有 round）、等待、回复中 */
   round?: Round;
+  /**
+   * 指令队列，按收到的先后：第一条在执行（有 startedAt）或在等，其余的在等。一轮回复还没结束时
+   * 都等着；一轮结束、或前一条执行完，开始下一条
+   */
+  commands: QueuedCommand[];
+  /** 正在执行的那条指令结束时兑现 */
+  running?: Promise<void>;
 };
 
 /**
@@ -132,6 +192,9 @@ export function createTelegramBot({
   wakeWords,
   errorText,
   staleMs,
+  rich,
+  usage,
+  now = () => performance.now(),
   typingIntervalMs = 4000,
   wait = { idleMs: waitMs, maxMs: maxWaitMs },
   onRound,
@@ -153,6 +216,12 @@ export function createTelegramBot({
   errorText: string;
   /** 触发消息的发送时间早于这么久之前（毫秒）时只记录、不回复 */
   staleMs: number;
+  /** 回复发富文本消息；false 时发普通消息，和以前一样 */
+  rich: boolean;
+  /** 回复的最后一条消息末尾带一行用量（尾部）；false 时不带 */
+  usage: boolean;
+  /** 量回复用时的时钟（毫秒，只用差值）；测试里换成可控的 */
+  now?: () => number;
   /** 等待与生成期间每隔多久重发「正在输入」 */
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
@@ -166,6 +235,8 @@ export function createTelegramBot({
   const stopping = new AbortController();
   // 一开始关闭就置位：之后不再打开会话、不再开始新的一轮
   let closing = false;
+  // 回复先试富文本消息：开着富文本，而且这次运行里还没发现服务端不认识这个接口
+  let richAvailable = rich;
 
   function notify(type: RoundNotice['type'], session: Session): void {
     if (!onRound) return;
@@ -177,6 +248,14 @@ export function createTelegramBot({
         'telegram.notify_failed',
       );
     }
+  }
+
+  function newSession(
+    conversationId: string,
+    conversation: BotConversation,
+    title: string | undefined,
+  ): Session {
+    return { conversationId, conversation, title, commands: [] };
   }
 
   /** 已经打开好的会话（打开失败的不算） */
@@ -192,11 +271,8 @@ export function createTelegramBot({
       session = (async () => {
         const found = await storage.findConversation('telegram', chatId);
         if (found) {
-          return {
-            conversationId: found.id,
-            conversation: await open(found.id, { checkIdleOnCreate: false }),
-            title: found.title,
-          };
+          const conversation = await open(found.id, { checkIdleOnCreate: false });
+          return newSession(found.id, conversation, found.title);
         }
         const title = conversationTitle(raw.chat);
         const id = await storage.createConversation({
@@ -204,11 +280,7 @@ export function createTelegramBot({
           platformConversationId: chatId,
           title,
         });
-        return {
-          conversationId: id,
-          conversation: await open(id, { checkIdleOnCreate: false }),
-          title,
-        };
+        return newSession(id, await open(id, { checkIdleOnCreate: false }), title);
       })();
       // 打开失败时不留下坏的条目，下一条消息再试
       session.catch(() => sessions.delete(chatId));
@@ -226,6 +298,21 @@ export function createTelegramBot({
     session.title = title;
   }
 
+  /**
+   * 收到的富文本消息转换出错（这条记成「[不支持的消息]」）：日志一行，只有消息 id 和错误的类型，
+   * 不带内容
+   */
+  function richUnreadable(fields: object, raw: TelegramRaw, error: unknown): void {
+    logger.warn(
+      {
+        ...fields,
+        messageId: String(raw.message_id),
+        error: { type: error instanceof Error ? error.name : typeof error },
+      },
+      'telegram.rich_unreadable',
+    );
+  }
+
   /** 编辑：改历史里那条消息的正文，不触发回复，也不影响等待计时 */
   async function edit(raw: TelegramRaw): Promise<void> {
     const chatId = String(raw.chat.id);
@@ -235,7 +322,9 @@ export function createTelegramBot({
       info &&
       (await editMessage(await storage.openConversation(info.id), {
         platformMessageId: messageId,
-        text: editedText(raw),
+        text: editedText(raw, {
+          onRichUnreadable: (error) => richUnreadable({ conversationId: info.id }, raw, error),
+        }),
         editedAt: new Date((raw.edit_date ?? raw.date) * 1000).toISOString(),
       }));
     if (!info || !edited) {
@@ -335,14 +424,23 @@ export function createTelegramBot({
     if (session.round === round) session.round = undefined;
     round.finish();
     notify('end', session);
+    // 这一轮全部结束：轮到排着的指令（正在关闭时不开始）
+    runCommands(session);
   }
 
   /**
-   * 一次回复，分条发出：每一步的文字在这一步的模型输出结束时发出。这一步调了工具时，
-   * 在它的第一个工具段出现时发（核心在请求正常结束后才放出工具段，之前的文字已经齐了）；
-   * 最后一步的文字在这一步结束时发。没有文字的步不发。每条都引用 quote（没有时不引用）。
-   * 流中途重试只清掉这一步还没发出的文字；失败时失败那一步的文字不发，之前发出的保留，
-   * 再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
+   * 一次回复，分条发出：每一步的文字在这一步的模型输出结束时发出。
+   * - 调了工具的步：工具段之前的话在第一个工具段出现时发（核心在请求正常结束后才放出工具段，之前的
+   *   文字已经齐了）；工具段之后又说的话在这一步的 finish-step 时发。这一步不会是最后一步（核心
+   *   执行完工具一定再请求一次，收尾的那步不提供工具），所以都不带尾部。
+   * - 没调工具的步：finish-step 时先留着，看下一个段：是 finish（回复正常结束）就是最后一条，带上
+   *   尾部发出；是 abort 就不发（中止的不发）；是别的（又开始了一步、请求重试、出错）就照原样发出、
+   *   不带尾部，这是兜底。流结束了都没有 finish 的也不发。
+   * 没有文字的步不发；最后一步没有文字时没有地方挂尾部，这次就不显示。一步的文字拆成几条时，
+   * 第一条引用 quote（没有时不引用），后面的不引用。流中途重试只清掉这一步还没发出的文字；失败时
+   * 失败那一步的文字不发，之前发出的保留，再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
+   * 一步的文字怎么拆成几条见 piecesOf，每条怎么发见 deliver；尾部挂在最后一条。失败提示总是普通
+   * 消息，不解析、不带尾部。用时从调用 reply() 之前量到 finish 段到达，不含等待合并、不含发最后一条。
    * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）
    */
   async function reply(
@@ -357,37 +455,220 @@ export function createTelegramBot({
     const fields = { conversationId: session.conversationId };
     // 这一步还没发出的文字
     let pending = '';
+    // 结束了的一步的文字，等下一个段决定带不带尾部
+    let held: string | undefined;
+    // 这一步出现过工具段：finish-step 时直接发，不留
+    let toolInStep = false;
     let failed = false;
-    const flush = async () => {
-      const text = pending;
-      pending = '';
-      // 关闭时被中止的回复不再发出
-      if (stopping.signal.aborted) return;
-      const chunks = splitMessage(text).filter((chunk) => chunk.trim());
-      for (const [index, chunk] of chunks.entries()) {
-        // 第一段引用触发消息，后面的接着发
-        const sent = await send(target, chunk, index === 0 ? quote : undefined, fields);
+    const flush = async (text: string, footer?: string) => {
+      // 关闭时被中止的回复不再发出；全是空白的不发
+      if (stopping.signal.aborted || !text.trim()) return;
+      const pieces = piecesOf(text);
+      for (const [index, piece] of pieces.entries()) {
+        // 第一条引用触发消息，后面的接着发；尾部挂在最后一条
+        const last = index === pieces.length - 1;
+        const sent = await deliver(target, piece, {
+          replyTo: index === 0 ? quote : undefined,
+          footer: last ? footer : undefined,
+          fields,
+        });
         if (!sent) break;
       }
     };
+    const startedAt = now();
     const stream = session.conversation.reply({
       abortSignal: stopping.signal,
       triggers,
       ...(tasks.length > 0 ? { tasks } : {}),
     });
     for await (const chunk of stream) {
+      if (held !== undefined) {
+        const text = held;
+        held = undefined;
+        if (chunk.type === 'finish') {
+          const footer = usage
+            ? usageFooter(chunk.messageMetadata?.usage, now() - startedAt)
+            : undefined;
+          await flush(text, footer);
+          continue;
+        }
+        // 中止的不发；别的段说明还没结束（又开始了一步，或出错），这一条照原样发出
+        if (chunk.type !== 'abort') await flush(text);
+      }
       if (chunk.type === 'text-delta') pending += chunk.delta;
-      else if (chunk.type === 'reset-step') pending = '';
-      else if (chunk.type === 'error') {
+      else if (chunk.type === 'start-step') toolInStep = false;
+      else if (chunk.type === 'reset-step') {
+        // 这一步重新生成：之前的输出作废（核心只在请求正常结束后放出工具段，所以这时其实不会有）
+        pending = '';
+        toolInStep = false;
+      } else if (chunk.type === 'error') {
         failed = true;
         pending = '';
-      } else if (startsToolCall(chunk) || (chunk.type === 'finish-step' && !failed)) {
-        await flush();
+      } else if (startsToolCall(chunk)) {
+        toolInStep = true;
+        const text = pending;
+        pending = '';
+        await flush(text);
+      } else if (chunk.type === 'finish-step' && !failed) {
+        const text = pending;
+        pending = '';
+        // 调了工具的步后面还有一步，直接发；别的步留着等下一个段。没有可发的字时不留
+        if (toolInStep) await flush(text);
+        else if (text.trim()) held = text;
       }
     }
     if (stopping.signal.aborted) return;
     // 错误详情由核心记进日志；群里只发固定提示
     if (failed) await send(target, errorText, quote, fields);
+  }
+
+  // 不属于哪个会话的后台任务（还没有会话的聊天里回的提示）：idle、close 等它们
+  const background = new Set<Promise<unknown>>();
+  function track(task: Promise<unknown>): void {
+    background.add(task);
+    void task.finally(() => background.delete(task));
+  }
+
+  /**
+   * 指令结束（或不执行）时记一行 telegram.command：会话 id（还没有会话时是 chat id）、哪条指令、
+   * 执行人的 id、结果、等了多久；开始执行过的还有执行了多久（到核心给出结果为止）。
+   * 不记正文，不记名字
+   */
+  function logCommand(
+    command: { kind: TelegramCommand; by: Author; receivedAt: number; startedAt?: number },
+    result: CommandOutcome | 'stale' | 'closing',
+    fields: object,
+    endedAt = Date.now(),
+  ): void {
+    const { startedAt, receivedAt } = command;
+    logger.info(
+      {
+        ...fields,
+        command: command.kind,
+        byId: command.by.id,
+        result,
+        waitedMs: (startedAt ?? endedAt) - receivedAt,
+        ...(startedAt === undefined ? {} : { ranMs: endedAt - startedAt }),
+      },
+      'telegram.command',
+    );
+  }
+
+  /** 从会话的指令队列里拿掉这一条（已经不在时什么都不做） */
+  function dequeue(session: Session, command: QueuedCommand): void {
+    const index = session.commands.indexOf(command);
+    if (index >= 0) session.commands.splice(index, 1);
+  }
+
+  /**
+   * 收到一条指令（已过白名单、不是编辑）：过期的、正在关闭时的不执行，只记日志；这个聊天还没有
+   * 会话时不建会话，直接回提示；有会话时排进它的指令队列。不等执行完就返回
+   */
+  async function onCommand(kind: TelegramCommand, raw: TelegramRaw): Promise<void> {
+    const chatId = String(raw.chat.id);
+    const from = raw.from!;
+    const command = {
+      kind,
+      raw,
+      by: { id: String(from.id), name: displayName(from) },
+      receivedAt: Date.now(),
+    };
+    const ageMs = Date.now() - raw.date * 1000;
+    if (ageMs > staleMs) {
+      logCommand(command, 'stale', { chatId, ageMinutes: Math.floor(ageMs / 60_000) });
+      return;
+    }
+    if (closing) return logCommand(command, 'closing', { chatId });
+    // 这个聊天还没有会话（从没说过话）：不建会话，上下文本来就是空的
+    const known = sessions.has(chatId) || (await storage.findConversation('telegram', chatId));
+    if (closing) return logCommand(command, 'closing', { chatId });
+    if (!known) {
+      const result = kind === 'clear' ? 'already-empty' : 'nothing-to-compact';
+      const done = { ...command, startedAt: Date.now() };
+      track(
+        (async () => {
+          await send(targetOf(raw), commandReplies[result], raw.message_id, { chatId });
+          logCommand(done, result, { chatId }, done.startedAt);
+        })(),
+      );
+      return;
+    }
+    const session = await sessionFor(raw);
+    if (closing) {
+      return logCommand(command, 'closing', { conversationId: session.conversationId });
+    }
+    session.commands.push({ ...command, abort: new AbortController() });
+    runCommands(session);
+  }
+
+  /**
+   * 会话空着（没有一轮回复在进行，最前面的指令也还没开始）时，开始排在最前面的指令。
+   * 正在关闭时不开始
+   */
+  function runCommands(session: Session): void {
+    if (closing) return;
+    const first = session.commands[0];
+    if (!first || first.startedAt !== undefined || session.round) return;
+    execute(session, first);
+  }
+
+  /**
+   * 执行一条指令：同步调用核心（这之前不 await，核心取到的界线就是这一刻的最后一条消息）；压缩
+   * 期间对指令所在的聊天显示「正在输入」。结束后引用指令那条消息发一句提示（被中止、正在关闭时
+   * 不发），再看下一条能不能开始
+   */
+  function execute(session: Session, command: QueuedCommand): void {
+    command.startedAt = Date.now();
+    const fields = { conversationId: session.conversationId };
+    const target = targetOf(command.raw);
+    let running: Promise<CompactResult | ClearResult>;
+    try {
+      running =
+        command.kind === 'compact'
+          ? session.conversation.compact({ by: command.by, abortSignal: command.abort.signal })
+          : session.conversation.clear({ by: command.by });
+    } catch (error) {
+      running = Promise.reject(error);
+    }
+    const stopTyping = command.kind === 'compact' ? keepTyping(target, fields) : () => {};
+    session.running = (async () => {
+      try {
+        let outcome: CommandOutcome;
+        // 失败的详情只进日志：压缩的核心已经记了 summary.failed，清空的记在指令的那一行
+        let failure: object = {};
+        try {
+          outcome = await running;
+        } catch (error) {
+          outcome = 'failed';
+          if (command.kind === 'clear') failure = { error: describe(error) };
+          // 正忙：按排队的规矩不该发生（一轮回复还没结束时指令只会等着）
+          if (error instanceof ConversationBusyError) {
+            logger.error(
+              { ...fields, command: command.kind, reason: error.reason },
+              'telegram.command_busy',
+            );
+          }
+        } finally {
+          stopTyping();
+        }
+        const endedAt = Date.now();
+        // 群里只发固定的一句；被中止（关闭时）、正在关闭时不发
+        const text =
+          outcome === 'failed'
+            ? failedReplies[command.kind]
+            : outcome === 'aborted'
+              ? undefined
+              : commandReplies[outcome];
+        if (text !== undefined && !closing) {
+          await send(target, text, command.raw.message_id, fields);
+        }
+        logCommand(command, outcome, { ...fields, ...failure }, endedAt);
+      } finally {
+        session.running = undefined;
+        dequeue(session, command);
+        runCommands(session);
+      }
+    })();
   }
 
   /** 从现在起显示「正在输入」，每隔一段时间重发，直到调用返回的函数 */
@@ -423,40 +704,124 @@ export function createTelegramBot({
     if (!session) {
       if (closing) return undefined;
       // 到点按现在的时间：创建时补做漏掉的空闲切段（会话管理里多半已经打开，这时不起作用）
-      session = open(conversationId, { checkIdleOnCreate: true }).then((conversation) => ({
-        conversationId,
-        conversation,
-        title,
-      }));
+      session = open(conversationId, { checkIdleOnCreate: true }).then((conversation) =>
+        newSession(conversationId, conversation, title),
+      );
       session.catch(() => sessions.delete(chatId));
       sessions.set(chatId, session);
     }
     return session;
   }
 
-  /** 发送失败只记日志，不重试；返回是否发出 */
+  /**
+   * 一步的文字拆成几条：
+   * - 富文本开着、服务端也认识这个接口：按 Markdown 转成块（markdown.ts），按富文本消息的上限在顶层的块之间
+   *   装成几条（split.ts 的 splitRich）；单独一个块就超限、层数超了的，单独一条发它的原文。转出来一个块都没有
+   *   （比如只有链接定义）时整段原文发普通消息；
+   * - 富文本关着，或者已经知道服务端不认识这个接口：整段原文一条普通消息（发的时候满 4096 拆），和以前一样
+   */
+  function piecesOf(text: string): RichPiece[] {
+    if (!richAvailable) return [{ raw: text }];
+    const parts = markdownBlocks(text);
+    return parts.length ? splitRich(parts) : [{ raw: text }];
+  }
+
+  /**
+   * 发一条（见 piecesOf）。有块的先试富文本消息，有尾部时块的最后加分隔线和下标的一行：
+   * - Telegram 拒收这一条：改发它的原文的普通消息，记 telegram.rich_fallback；下一条照常先试富文本；
+   * - 服务端不认识这个接口：改发原文，之后都直接发普通消息，telegram.rich_unavailable 只记一次；
+   * - 别的失败：和普通消息发送失败一样只记日志，不改发、不重试。
+   * 没有块的（退路）、改发的，都是原文的普通消息，见 sendPlain。日志不带正文。返回是否发出
+   */
+  async function deliver(
+    target: ChatTarget,
+    piece: RichPiece,
+    { replyTo, footer, fields }: { replyTo?: number; footer?: string; fields: object },
+  ): Promise<boolean> {
+    if (piece.rich && richAvailable) {
+      try {
+        await sender.sendRich(target, richMessage(piece.rich, footer), replyTo);
+        return true;
+      } catch (error) {
+        if (!(error instanceof RichMessageError)) {
+          sendFailed('sendRichMessage', error, fields);
+          return false;
+        }
+        if (error.kind === 'rejected') {
+          logger.warn(
+            { ...fields, reason: 'rejected', error: describe(error.cause) },
+            'telegram.rich_fallback',
+          );
+        } else if (richAvailable) {
+          // 几个会话同时在发时可能都碰上，只有第一个记
+          richAvailable = false;
+          logger.warn({ ...fields, error: describe(error.cause) }, 'telegram.rich_unavailable');
+        }
+      }
+    }
+    return sendPlain(target, piece.raw, { replyTo, footer, fields });
+  }
+
+  /**
+   * 原文发普通消息：满 4096 拆成几段，第一段引用 replyTo，尾部是最后一段末尾斜体的一行（加上尾部超过
+   * 上限时，尾部单独成一条，不引用）。全是空白的段不发。返回是否都发出了
+   */
+  async function sendPlain(
+    target: ChatTarget,
+    text: string,
+    { replyTo, footer, fields }: { replyTo?: number; footer?: string; fields: object },
+  ): Promise<boolean> {
+    const chunks = splitMessage(text).filter((chunk) => chunk.trim());
+    for (const [index, chunk] of chunks.entries()) {
+      const quoted = index === 0 ? replyTo : undefined;
+      const last = index === chunks.length - 1;
+      if (!last || footer === undefined) {
+        if (!(await send(target, chunk, quoted, fields))) return false;
+        continue;
+      }
+      const withFooter = plainWithFooter(chunk, footer);
+      if (withFooter.text.length <= telegramMessageLimit) {
+        return send(target, withFooter.text, quoted, fields, withFooter.entities);
+      }
+      if (!(await send(target, chunk, quoted, fields))) return false;
+      const alone = plainWithFooter('', footer);
+      return send(target, alone.text, undefined, fields, alone.entities);
+    }
+    return true;
+  }
+
+  /**
+   * 发一条普通消息，entities 是尾部的斜体（没有时和以前一样）。发送失败只记日志，不重试；
+   * 返回是否发出
+   */
   async function send(
     target: ChatTarget,
     text: string,
     replyTo: number | undefined,
     fields: object,
+    entities?: readonly MessageEntity[],
   ): Promise<boolean> {
     try {
-      await sender.send(target, text, replyTo);
+      if (entities) await sender.send(target, text, replyTo, entities);
+      else await sender.send(target, text, replyTo);
       return true;
     } catch (error) {
-      logger.warn(
-        { ...fields, method: 'sendMessage', error: describe(error) },
-        'telegram.send_failed',
-      );
+      sendFailed('sendMessage', error, fields);
       return false;
     }
+  }
+
+  function sendFailed(method: string, error: unknown, fields: object): void {
+    logger.warn({ ...fields, method, error: describe(error) }, 'telegram.send_failed');
   }
 
   return {
     /**
      * 处理一条原始消息（相册由适配器攒齐后只派发一条，各条由 albumOf 取回）。
-     * 等到记录完成才返回，等待与回复在后台进行；从不抛错
+     * 等到记录完成才返回，等待与回复在后台进行；从不抛错。
+     * 指令（`/compact`、`/clear`，见 parseCommand）不记录：等这个会话一整轮回复（等待合并、
+     * 回复中、补回复）结束再执行，同一个会话的按先后一个个执行，结束后引用指令发一句提示。
+     * 排进队列就返回，不等执行完（适配器按聊天排队处理，压缩期间这个群的消息照常记录）
      */
     async handle(raw: TelegramRaw): Promise<void> {
       try {
@@ -477,6 +842,13 @@ export function createTelegramBot({
           await edit(raw);
           return;
         }
+        // 指令：不写进历史、不触发回复、不参与等待合并；在判断触发之前拦下（群里的 /clear@本bot
+        // 带着对 bot 的 @，会被当成「@助手」）
+        const command = parseCommand(raw, bot());
+        if (command) {
+          await onCommand(command, raw);
+          return;
+        }
         const session = await sessionFor(raw);
         await syncTitle(session, raw);
         const fields = { conversationId: session.conversationId };
@@ -490,6 +862,7 @@ export function createTelegramBot({
             ),
           onImageRejected: (image, size) =>
             logger.warn({ ...fields, kind: image.kind, size }, 'telegram.image_rejected'),
+          onRichUnreadable: (error) => richUnreadable(fields, raw, error),
         });
         if (!input) return;
         let message: Awaited<ReturnType<BotConversation['append']>>;
@@ -600,30 +973,45 @@ export function createTelegramBot({
         opened++;
         sessions.set(
           platformConversationId,
-          open(id, { checkIdleOnCreate: true }).then((conversation) => ({
-            conversationId: id,
-            conversation,
-            title,
-          })),
+          open(id, { checkIdleOnCreate: true }).then((conversation) =>
+            newSession(id, conversation, title),
+          ),
         );
       }
       await Promise.all(sessions.values());
       return opened;
     },
 
-    /** 等待中与回复中的都结束（测试用） */
+    /** 等待中与回复中的、排着的指令都结束（测试用） */
     async idle(): Promise<void> {
-      for (const session of await openedSessions()) await session.round?.done;
+      for (const session of await openedSessions()) {
+        // 一轮结束时会开始排着的指令，指令执行完又可能轮到下一条
+        while (session.round || session.running) {
+          await Promise.all([session.round?.done, session.running]);
+        }
+      }
+      await Promise.all(background);
     },
 
     /**
-     * 关闭：不再开始新的一轮；等待中的直接放弃；回复中的最多等 graceMs，仍未完成的中止
-     * （不发出）；再关闭各会话（中止进行中的摘要）
+     * 关闭：不再开始新的一轮与指令；等待中的直接放弃；还在等的指令丢掉（不执行、不发提示），
+     * 进行中的压缩马上中止（不发提示），进行中的清空照常做完；回复中的最多等 graceMs，仍未完成的
+     * 中止（不发出）；等进行中的指令结束，再关闭各会话（中止进行中的摘要）
      */
     async close(graceMs = 10_000): Promise<void> {
       closing = true;
       const opened = await openedSessions();
       for (const session of opened) {
+        for (const command of [...session.commands]) {
+          // 进行中的：压缩马上中止，清空不理会这个信号、照常做完
+          if (command.startedAt !== undefined) {
+            command.abort.abort();
+            continue;
+          }
+          dequeue(session, command);
+          logCommand(command, 'closing', { conversationId: session.conversationId });
+        }
+        // 放弃等待中的一轮：正在关闭，不会因此开始排着的指令
         if (session.round?.state === 'waiting') endRound(session, session.round);
       }
       const rounds = Promise.all(opened.map((session) => session.round?.done));
@@ -637,6 +1025,7 @@ export function createTelegramBot({
       clearTimeout(timer);
       stopping.abort();
       await rounds;
+      await Promise.all([...opened.map((session) => session.running), ...background]);
       await Promise.all(opened.map((session) => session.conversation.close()));
     },
   };

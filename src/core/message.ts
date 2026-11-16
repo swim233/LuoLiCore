@@ -52,13 +52,15 @@ export type MessageMetadata = {
   reasoningMs?: Array<number | null>;
 };
 
-/** 一次回复的 token 用量。服务端没报的项为 undefined */
+/** 一次回复的 token 用量。服务端没报的项为 undefined（报了 0 就是 0） */
 export type Usage = {
   input?: number;
   output?: number;
   total?: number;
   /** 输入中命中缓存的部分 */
   cacheRead?: number;
+  /** 输出中用于推理的部分。以前写入的消息没有这一项 */
+  reasoning?: number;
 };
 
 /** 回复流中的数据段。都是 transient 的，不进入消息历史。 */

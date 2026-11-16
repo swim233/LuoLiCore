@@ -4,6 +4,7 @@ import { createMemoryStorage } from '../core/index.js';
 import { testPort, testService } from '../server/test-kit.js';
 import type { ConversationsResponse, MessagesResponse } from '../server/types.js';
 import { createClient, unreachableText, type Fetch } from './client.js';
+import { runLines } from './lines.js';
 import { createChatSession } from './session.js';
 
 // CLI 连洛璃服务：会话、客户端对着真的服务接口（app.request，mock 模型，不起端口）
@@ -141,7 +142,14 @@ async function setup(
         await service.request(`/api/conversations/${id}/messages`)
       ).json()) as MessagesResponse
     ).messages;
-  return { ...service, net, client, history };
+  /** 各段的起点、原因、执行人 */
+  const segments = async (id: string) =>
+    (await (await service.storage.openConversation(id)).segments()).map((segment) => [
+      segment.startSeq,
+      segment.startReason,
+      segment.startedBy?.name,
+    ]);
+  return { ...service, net, client, history, segments };
 }
 
 const unreachable = unreachableText(`127.0.0.1:${testPort}`);
@@ -385,5 +393,221 @@ describe('CLI 的客户端', () => {
       platform: 'cli',
       messages: 4,
     });
+  });
+});
+
+describe('CLI 的指令', () => {
+  it('还没有会话 id（新会话还没发过第一句）：不请求服务，/clear、/compact 各打一句', async () => {
+    const { client, net } = await setup(scripted());
+    const session = createChatSession({ client, author: 'Bob' });
+    // 请求了就会打连不上的提示
+    net.down = true;
+
+    expect(await session.command('clear')).toBe('done');
+    expect(await session.command('compact')).toBe('done');
+
+    expect(printed()).toBe('[err]（上下文已经是空的）\n[err]（没有可压缩的内容）\n');
+  });
+
+  it('会话空着：各种结果各打一句，都写在 stderr；执行人是 CLI 的发言人名字', async () => {
+    const { client, segments } = await setup(
+      scripted(answer('好'), answer('Bob 打了招呼。'), answer('又好')),
+    );
+    const session = createChatSession({ client, author: 'Bob' });
+    await session.say('第一句');
+    const id = session.conversationId!;
+    output = [];
+
+    expect(await session.command('compact')).toBe('done');
+    expect(printed()).toBe('[err]（压缩中…）\n[err]（已压缩）\n');
+    output = [];
+    await session.command('compact');
+    expect(printed()).toBe('[err]（压缩中…）\n[err]（没有可压缩的内容）\n');
+
+    await session.say('第二句');
+    output = [];
+    expect(await session.command('clear')).toBe('done');
+    expect(printed()).toBe('[err]（已清空上下文）\n');
+    output = [];
+    await session.command('clear');
+    expect(printed()).toBe('[err]（上下文已经是空的）\n');
+
+    expect(await segments(id)).toEqual([
+      [1, 'first', undefined],
+      [3, 'manual', 'Bob'],
+      [5, 'clear', 'Bob'],
+    ]);
+  });
+
+  it('另一个终端的回复还在进行：打「（等当前回复结束）」，回复结束后执行', async () => {
+    const hold = gate();
+    const { client } = await setup(scripted([...text('说到'), { gate: hold.promise }, finish()]));
+    const a = createChatSession({ client, author: 'A' });
+    const saidA = a.say('第一句');
+    await waitUntil(() => printed().includes('说到'));
+    const b = createChatSession({ client, author: 'B', conversationId: a.conversationId });
+
+    const clearing = b.command('clear');
+    await waitUntil(() => printed().includes('（等当前回复结束）'));
+    hold.open();
+    await saidA;
+    expect(await clearing).toBe('done');
+
+    expect(printed()).toContain('[err]（等当前回复结束）\n');
+    expect(printed()).toContain('[err]（已清空上下文）\n');
+  });
+
+  it('压缩出错：打「（压缩失败：原因）」；服务拒绝：打「发送失败：原因」', async () => {
+    const storage = createMemoryStorage();
+    const model = scripted(answer('好'));
+    const { client, request } = await setup(model, { storage });
+    const session = createChatSession({ client, author: 'Bob' });
+    await session.say('第一句');
+    output = [];
+    // 模型没有更多脚本：摘要请求出错
+    expect(await session.command('compact')).toBe('done');
+    expect(printed()).toMatch(/^\[err\]（压缩中…）\n\[err\]（压缩失败：.+）\n$/);
+
+    const web = await storage.createConversation({ platform: 'web' });
+    const onWeb = createChatSession({ client, author: 'Bob', conversationId: web });
+    output = [];
+    expect(await onWeb.command('clear')).toBe('done');
+    expect(printed()).toBe('[err]发送失败：压缩、清空现在只给 CLI 会话用，这是网页的会话\n');
+    expect((await request('/api/conversations')).status).toBe(200);
+  });
+
+  it('服务退出时还在等：打「（已中止）」', async () => {
+    const hold = gate();
+    const { client, chats } = await setup(
+      scripted([...text('说到'), { gate: hold.promise }, finish()]),
+    );
+    const a = createChatSession({ client, author: 'A' });
+    const saidA = a.say('第一句');
+    await waitUntil(() => printed().includes('说到'));
+    const b = createChatSession({ client, author: 'B', conversationId: a.conversationId });
+    const clearing = b.command('clear');
+    await waitUntil(() => printed().includes('（等当前回复结束）'));
+
+    chats!.close();
+    expect(await clearing).toBe('done');
+    expect(printed()).toContain('[err]（等当前回复结束）\n[err]（已中止）\n');
+    hold.open();
+    await saidA;
+  });
+
+  it('Ctrl+C：等待中、压缩中都断开请求，打「（已中止）」，段不变；之后还能接着发消息', async () => {
+    const hold = gate();
+    const summaryHold = gate();
+    const model = scripted(
+      [...text('说到'), { gate: hold.promise }, finish()],
+      [{ gate: summaryHold.promise }, ...answer('不会用上的摘要')],
+      answer('接着说'),
+    );
+    const { client, chats, segments, storage } = await setup(model);
+    const a = createChatSession({ client, author: 'A' });
+    const saidA = a.say('第一句');
+    await waitUntil(() => printed().includes('说到'));
+    const id = a.conversationId!;
+    const b = createChatSession({ client, author: 'B', conversationId: id });
+
+    // 等待中
+    const waitingCtrlC = new AbortController();
+    const waiting = b.command('clear', waitingCtrlC.signal);
+    await waitUntil(() => printed().includes('（等当前回复结束）'));
+    waitingCtrlC.abort();
+    expect(await waiting).toBe('done');
+    expect(printed()).toContain('[err]（等当前回复结束）\n[err]（已中止）\n');
+    hold.open();
+    await saidA;
+    await waitUntil(() => !chats!.busy(id));
+    expect(await segments(id)).toEqual([[1, 'first', undefined]]);
+
+    // 压缩中
+    output = [];
+    const compactCtrlC = new AbortController();
+    const compacting = b.command('compact', compactCtrlC.signal);
+    await waitUntil(() => printed().includes('（压缩中…）') && model.doStreamCalls.length === 2);
+    compactCtrlC.abort();
+    expect(await compacting).toBe('done');
+    expect(printed()).toBe('[err]（压缩中…）\n[err]（已中止）\n');
+    await waitUntil(() => !chats!.busy(id));
+    expect(await segments(id)).toEqual([[1, 'first', undefined]]);
+    const calls = await (await storage.openConversation(id)).calls();
+    expect(calls.at(-1)).toMatchObject({ summaryReason: 'manual', outcome: 'aborted' });
+    summaryHold.open();
+
+    output = [];
+    expect(await b.say('还在吗')).toBe('done');
+    expect(printed()).toContain('接着说');
+  });
+
+  it('连不上服务、流中途断了：打连不上的提示，返回 unreachable；会话照旧', async () => {
+    const { client, net } = await setup(scripted(answer('好'), answer('又好')));
+    const session = createChatSession({ client, author: 'Bob' });
+    await session.say('第一句');
+    const id = session.conversationId;
+    output = [];
+
+    net.down = true;
+    expect(await session.command('clear')).toBe('unreachable');
+    expect(printed()).toBe(`[err]${unreachable}\n`);
+
+    net.down = false;
+    net.breakAfter = '"type":"start"';
+    output = [];
+    expect(await session.command('clear')).toBe('unreachable');
+    expect(printed()).toBe(`[err]${unreachable}\n`);
+
+    net.breakAfter = undefined;
+    output = [];
+    expect(await session.say('还在吗')).toBe('done');
+    expect(session.conversationId).toBe(id);
+  });
+});
+
+describe('CLI 的管道输入', () => {
+  it('「一句话、/clear、一句话」：按顺序处理，中间那行走指令的接口，不当消息发出去；后面跟了字的当消息', async () => {
+    const model = scripted(answer('一'), answer('二'), answer('三'));
+    const { client, history, segments } = await setup(model);
+    const session = createChatSession({ client, author: 'Bob' });
+
+    const code = await runLines(
+      ['第一句', '  /CLEAR  ', '第二句', '/compact 记住旅行计划'],
+      session,
+    );
+
+    expect(code).toBe(0);
+    const id = session.conversationId!;
+    expect((await history(id)).map((m) => [m.seq, m.message.role])).toEqual([
+      [1, 'user'],
+      [2, 'assistant'],
+      [3, 'user'],
+      [4, 'assistant'],
+      [5, 'user'],
+      [6, 'assistant'],
+    ]);
+    const texts = (await history(id)).map((m) =>
+      m.message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join(''),
+    );
+    expect(texts[4]).toBe('/compact 记住旅行计划');
+    expect(await segments(id)).toEqual([
+      [1, 'first', undefined],
+      [3, 'clear', 'Bob'],
+    ]);
+    expect(model.doStreamCalls).toHaveLength(3);
+    expect(printed()).toContain('[err]（已清空上下文）\n');
+  });
+
+  it('连不上服务：打提示，退出码 1，后面的行不处理', async () => {
+    const { client, net } = await setup(scripted(answer('好')));
+    const session = createChatSession({ client, author: 'Bob' });
+    await session.say('第一句');
+    output = [];
+    net.down = true;
+
+    const code = await runLines(['/compact', '后面的一句', '/clear'], session);
+
+    expect(code).toBe(1);
+    expect(printed()).toBe(`[err]${unreachable}\n`);
   });
 });

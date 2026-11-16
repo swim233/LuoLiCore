@@ -2,11 +2,11 @@
 
 洛璃网页面板的组件库：设计变量、基础控件、滚动、浮层、表单控件、聊天内容、特效。夜蓝星空是默认的配色，只有深色；只管桌面 Chrome。
 
-为什么这样设计，见仓库的 `docs/adr/0011-ui-component-library.md`。
+为什么这样设计，见仓库的 `docs/adr/0013-ui-component-library.md`。
 
 ## 怎么用
 
-这个包不构建、不发布，用它的项目直接引用源码（TypeScript 和 CSS），所以项目的打包器要能处理 `.ts`、`.tsx` 和 CSS 的 `@import`（Vite 可以）。在同一个 pnpm workspace 里把它声明成依赖：
+这个包不构建、不发布，用它的项目直接引用源码（TypeScript 和 CSS），所以项目的打包器要能处理 `.ts`、`.tsx` 和 CSS 的 `@import`（Vite 可以）。在同一个 pnpm workspace 里把它声明成依赖（它还依赖本仓库的 `@luoli/markdown`，Markdown 的解析规则在那个包里）：
 
 ```json
 { "dependencies": { "@luoli/ui": "workspace:*" } }

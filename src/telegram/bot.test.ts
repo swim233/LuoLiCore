@@ -11,12 +11,16 @@ import {
   type Conversation,
   type InstalledTool,
   type Logger,
+  type MessageChunk,
   type Storage,
 } from '../core/index.js';
 import { testPrompts } from '../core/test-prompts.js';
 import { createTelegramBot, type ChatTarget, type RoundNotice } from './bot.js';
-import { imageBytes } from './fake-api.js';
+import { imageBytes, plainParts, richParts } from './fake-api.js';
+import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
+import type { ReceivedRichText, RichBlock } from './rich-received.js';
+import { RichMessageError, type InputRichMessage } from './rich.js';
 import { telegramMessageLimit } from './split.js';
 
 type StreamResult = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
@@ -73,11 +77,43 @@ function replying(...turns: Array<string | { text: string; gate: Promise<void> }
   });
 }
 
-type Sent = { target: ChatTarget; text: string; replyTo?: number };
+/**
+ * 群里看到的一条：哪一种（plain 普通消息，rich 富文本消息）、发到哪、正文、尾部（有时）、引用哪条。
+ * 正文与尾部的分法同假的 Bot API（richParts、plainParts）。message 是发出的富文本消息原样，
+ * entities 是普通消息带的格式标记原样
+ */
+type Sent = {
+  kind: 'plain' | 'rich';
+  target: ChatTarget;
+  text: string;
+  footer?: string;
+  replyTo?: number;
+  message?: InputRichMessage;
+  entities?: readonly MessageEntity[];
+};
+
+/** 适配器换成的错误：只有 name 与说明，和 @chat-adapter/shared 的那些类一样 */
+function adapterError(name: string, description: string): Error {
+  const error = new Error(description);
+  error.name = name;
+  return error;
+}
+
+const rejected = () =>
+  new RichMessageError(
+    'rejected',
+    adapterError('ValidationError', "Bad Request: can't parse rich message"),
+  );
+const unsupported = () =>
+  new RichMessageError(
+    'unsupported',
+    adapterError('ResourceNotFoundError', 'sendRichMessage not found in telegram'),
+  );
 
 function setup({
   model,
   storage = createMemoryStorage(),
+  chats = [group],
   typingIntervalMs = 4000,
   typingFails = false,
   wait = { idleMs: 5, maxMs: 50 },
@@ -86,10 +122,20 @@ function setup({
   files = {},
   tools = [],
   sendDelayMs = 0,
+  users = [],
+  rich = true,
+  usage = true,
+  clock = { ms: 0 },
+  replyStream,
+  errorText = '（出错了）',
+  onSendRich,
+  onSend,
   onRound,
 }: {
   model: MockLanguageModelV4;
   storage?: Storage;
+  /** 白名单里的群 */
+  chats?: TelegramChat[];
   typingIntervalMs?: number;
   typingFails?: boolean;
   wait?: { idleMs: number; maxMs: number };
@@ -101,9 +147,26 @@ function setup({
   tools?: InstalledTool[];
   /** 每次发送要等这么久才发出（像真的网络请求） */
   sendDelayMs?: number;
+  /** 白名单里能私聊的用户 id */
+  users?: string[];
+  /** 发富文本消息；默认打开 */
+  rich?: boolean;
+  /** 最后一条消息带尾部；默认打开 */
+  usage?: boolean;
+  /** 量回复用时的时钟（毫秒），测试拨动它；默认停在 0 */
+  clock?: { ms: number };
+  /** 给了时，会话的 reply() 换成它给的流（照写回复流里的段），用来摆出核心不容易摆出的顺序 */
+  replyStream?: (abortSignal: AbortSignal | undefined) => ReadableStream<MessageChunk>;
+  /** 回复出错时发的固定提示 */
+  errorText?: string;
+  /** 第 call 次（从 0 起）发富文本消息、普通消息时先调它：抛错就是这次发送失败 */
+  onSendRich?: (call: number) => void | Promise<void>;
+  onSend?: (call: number) => void | Promise<void>;
   onRound?: (notice: RoundNotice) => void;
 }) {
   const sent: Sent[] = [];
+  // 两种发送各被调了几次（含失败的）
+  const calls = { rich: 0, plain: 0 };
   const typing: ChatTarget[] = [];
   const entries: Array<{ level: string; msg: string; fields: Record<string, unknown> }> = [];
   const record = (level: string) => (fields: object, msg: string) =>
@@ -123,16 +186,31 @@ function setup({
         tools,
       });
       conversations.push(conversation);
-      return conversation;
+      if (!replyStream) return conversation;
+      return { ...conversation, reply: (options) => replyStream(options?.abortSignal) };
     },
     sender: {
       typing: async (target) => {
         typing.push(target);
         if (typingFails) throw new Error('网络不通');
       },
-      send: async (target, text, replyTo) => {
+      send: async (target, text, replyTo, entities) => {
+        const call = calls.plain++;
         if (sendDelayMs) await sleep(sendDelayMs);
-        sent.push({ target, text, replyTo });
+        await onSend?.(call);
+        sent.push({
+          kind: 'plain',
+          target,
+          ...plainParts(text, entities),
+          replyTo,
+          ...(entities ? { entities } : {}),
+        });
+      },
+      sendRich: async (target, message, replyTo) => {
+        const call = calls.rich++;
+        if (sendDelayMs) await sleep(sendDelayMs);
+        await onSendRich?.(call);
+        sent.push({ kind: 'rich', target, ...richParts(message), replyTo, message });
       },
     },
     download: async (fileId) => {
@@ -143,17 +221,20 @@ function setup({
       albums.find((album) => album.some((item) => item.message_id === raw.message_id)) ?? [raw],
     logger,
     bot: () => ({ id: '999', username: 'nori_bot' }),
-    chats: new Set([String(group.id)]),
-    users: new Set(),
+    chats: new Set(chats.map((chat) => String(chat.id))),
+    users: new Set(users),
     wakeWords: ['nori'],
-    errorText: '（出错了）',
+    errorText,
     staleMs: 60 * 60_000,
+    rich,
+    usage,
+    now: () => clock.ms,
     typingIntervalMs,
     wait,
     onRound,
   });
   cleanups.push(() => bot.close(0));
-  return { bot, sent, typing, entries, storage, conversations };
+  return { bot, sent, calls, typing, entries, storage, conversations };
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -250,9 +331,9 @@ describe('Telegram 前端的会话逻辑', () => {
     expect(sent).toEqual([]);
   });
 
-  it('长回复拆成几条：第一条引用触发消息，后面的接着发', async () => {
+  it('富文本关着：长回复满 4096 拆成几条，第一条引用触发消息，后面的接着发', async () => {
     const long = `${'a'.repeat(telegramMessageLimit)}${'b'.repeat(10)}`;
-    const { bot, sent } = setup({ model: replying(long) });
+    const { bot, sent } = setup({ model: replying(long), rich: false });
 
     const trigger = message({ text: 'nori 讲长一点' });
     await bot.handle(trigger);
@@ -851,10 +932,18 @@ describe('分条发送（装了工具时）', () => {
     { type: 'tool-input-end', id },
     { type: 'tool-call', toolCallId: id, toolName: 'lookup', input: '{}' },
   ];
-  const finish = (reason: 'stop' | 'tool-calls'): StreamPart => ({
+  const finish = (
+    reason: 'stop' | 'tool-calls',
+    stepUsage: Extract<StreamPart, { type: 'finish' }>['usage'] = usage,
+  ): StreamPart => ({
     type: 'finish',
     finishReason: { unified: reason, raw: undefined },
-    usage,
+    usage: stepUsage,
+  });
+  /** 一步的用量：输入（其中缓存命中）、输出（其中推理） */
+  const tokens = (input: number, cacheRead: number, output: number, reasoning: number) => ({
+    inputTokens: { total: input, noCache: input - cacheRead, cacheRead, cacheWrite: undefined },
+    outputTokens: { total: output, text: output - reasoning, reasoning },
   });
   /** 这一步说了 content（可以为空）再调工具 */
   const callsTool = (content = ''): StreamPart[] => [
@@ -889,11 +978,26 @@ describe('分条发送（装了工具时）', () => {
     });
   }
 
+  /** 同 steps，每次请求时把时钟拨快 ms（像模型在生成） */
+  function timedSteps(clock: { ms: number }, ms: number, ...turns: Array<StreamPart[] | Error>) {
+    const inner = steps(...turns);
+    return new MockLanguageModelV4({
+      doStream: async (options) => {
+        clock.ms += ms;
+        return inner.doStream(options);
+      },
+    });
+  }
+
   /**
    * 装上 lookup 工具的 bot：工具执行时记下群里已经发出的消息（seen，也用来知道工具开始执行了），
    * gate 给出时等它放行
    */
-  function setupWithTool(model: MockLanguageModelV4, gate?: Promise<void>) {
+  function setupWithTool(
+    model: MockLanguageModelV4,
+    gate?: Promise<void>,
+    options: Omit<Parameters<typeof setup>[0], 'model' | 'tools' | 'sendDelayMs'> = {},
+  ) {
     const seen: string[][] = [];
     let sentNow: () => string[] = () => [];
     const lookup = defineTool({
@@ -907,7 +1011,12 @@ describe('分条发送（装了工具时）', () => {
       },
     });
     // 发送要花一点时间，像真的网络请求：与工具执行并行
-    const t = setup({ model, tools: installTools([lookup], {}).tools, sendDelayMs: 20 });
+    const t = setup({
+      model,
+      tools: installTools([lookup], {}).tools,
+      sendDelayMs: 20,
+      ...options,
+    });
     sentNow = () => t.sent.map((s) => s.text);
     return { ...t, seen };
   }
@@ -985,9 +1094,11 @@ describe('分条发送（装了工具时）', () => {
     ]);
   });
 
-  it('长文字拆分：每一步的第一段引用触发消息，其余不引用', async () => {
+  it('富文本关着：长文字满 4096 拆，每一步的第一段引用触发消息，其余不引用', async () => {
     const long = `${'a'.repeat(telegramMessageLimit)}${'b'.repeat(10)}`;
-    const { bot, sent } = setupWithTool(steps(callsTool(long), answer(`${long}c`)));
+    const { bot, sent } = setupWithTool(steps(callsTool(long), answer(`${long}c`)), undefined, {
+      rich: false,
+    });
 
     const trigger = message({ text: 'nori 讲长一点' });
     await bot.handle(trigger);
@@ -1001,13 +1112,192 @@ describe('分条发送（装了工具时）', () => {
     ]);
   });
 
-  it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留', async () => {
+  it('富文本开着：每一步的文字都按 Markdown 排成块（调工具之前说的话也是）；每一步的第一条引用触发消息；尾部只在最后一条', async () => {
+    const first = '我查一下\n**马上**';
+    const answerText = '## 结果\n\n- **b**\n- <i>$x$';
+    const { bot, sent, calls } = setupWithTool(steps(callsTool(first), answer(answerText)));
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent.map(({ kind, message, replyTo }) => ({ kind, message, replyTo }))).toEqual([
+      {
+        kind: 'rich',
+        message: {
+          blocks: [{ type: 'paragraph', text: ['我查一下\n', { type: 'bold', text: '马上' }] }],
+        },
+        replyTo: trigger.message_id,
+      },
+      {
+        kind: 'rich',
+        message: {
+          blocks: [
+            { type: 'heading', text: '结果', size: 2 },
+            {
+              type: 'list',
+              items: [
+                { blocks: [{ type: 'paragraph', text: { type: 'bold', text: 'b' } }] },
+                {
+                  blocks: [
+                    {
+                      type: 'paragraph',
+                      text: ['<i>', { type: 'mathematical_expression', expression: 'x' }],
+                    },
+                  ],
+                },
+              ],
+            },
+            { type: 'divider' },
+            { type: 'paragraph', text: { type: 'subscript', text: '输入 2 · 输出 2 · 0.0s' } },
+          ],
+        },
+        replyTo: trigger.message_id,
+      },
+    ]);
+    expect(calls.plain).toBe(0);
+  });
+
+  it('带工具的多步回复：调工具之前说的话不带尾部；最后的回答带，写的是各步的合计，用时从开始生成到回复完成', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setupWithTool(
+      timedSteps(
+        clock,
+        1250,
+        [...text('我查一下'), ...call(), finish('tool-calls', tokens(1000, 0, 20, 0))],
+        [...text('查到了'), finish('stop', tokens(3096, 3000, 115, 40))],
+      ),
+      undefined,
+      { clock },
+    );
+
+    const trigger = message({ text: 'nori 查一下' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent.map(({ text, footer, replyTo }) => ({ text, footer, replyTo }))).toEqual([
+      { text: '我查一下', footer: undefined, replyTo: trigger.message_id },
+      {
+        text: '查到了',
+        footer: '输入 4.1k · 缓存 3k · 输出 135 · 推理 40 · 2.5s',
+        replyTo: trigger.message_id,
+      },
+    ]);
+  });
+
+  it.each([
+    { rich: true, usage: true },
+    { rich: false, usage: false },
+  ])(
+    '工具之后同一步里又说了话（RICH=$rich、USAGE=$usage）：这句在下一步的模型请求返回之前就已发出，不带尾部；最后的回答带尾部、写合计',
+    async ({ rich, usage }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const inner = steps(
+        [
+          ...text('我查一下'),
+          ...call(),
+          { type: 'text-start', id: 'u' },
+          { type: 'text-delta', id: 'u', delta: '等等' },
+          { type: 'text-end', id: 'u' },
+          finish('tool-calls'),
+        ],
+        answer('查到了'),
+      );
+      let requests = 0;
+      // 第二步的请求等闸门放开才返回（像服务端在处理长上下文）
+      const model = new MockLanguageModelV4({
+        doStream: async (options) => {
+          if (requests++ === 1) await gate;
+          return inner.doStream(options);
+        },
+      });
+      const { bot, sent } = setupWithTool(model, undefined, { rich, usage });
+
+      const trigger = message({ text: 'nori 查一下' });
+      await bot.handle(trigger);
+      const deadline = Date.now() + 2000;
+      while (sent.length < 2 && Date.now() < deadline) await sleep(5);
+      const beforeSecond = sent.map(({ text, footer }) => ({ text, footer }));
+      const secondRequested = requests === 2;
+      release();
+      await bot.idle();
+
+      expect(secondRequested).toBe(true);
+      expect(beforeSecond).toEqual([
+        { text: '我查一下', footer: undefined },
+        { text: '等等', footer: undefined },
+      ]);
+      expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+        { kind: rich ? 'rich' : 'plain', text: '我查一下', footer: undefined },
+        { kind: rich ? 'rich' : 'plain', text: '等等', footer: undefined },
+        {
+          kind: rich ? 'rich' : 'plain',
+          text: '查到了',
+          footer: usage ? '输入 2 · 输出 2 · 0.0s' : undefined,
+        },
+      ]);
+    },
+  );
+
+  it('富文本关着：长文字满 4096 拆成两段，尾部在第二段，第一段没有', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(answer(`${'a'.repeat(telegramMessageLimit)}尾巴`)),
+      undefined,
+      { rich: false },
+    );
+
+    await bot.handle(message({ text: 'nori 讲长一点' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ length: text.length, footer }))).toEqual([
+      { length: telegramMessageLimit, footer: undefined },
+      { length: 2, footer: '输入 1 · 输出 1 · 0.0s' },
+    ]);
+  });
+
+  it('执行过工具、最后一步没有文字：不发失败提示，之前发出的保留；没有尾部，也不为它另发一条', async () => {
     const { bot, sent } = setupWithTool(steps(callsTool('我查一下'), answer('')));
 
     await bot.handle(message({ text: 'nori 查一下' }));
     await bot.idle();
 
-    expect(sent.map((s) => s.text)).toEqual(['我查一下']);
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '我查一下', footer: undefined },
+    ]);
+    expect(sent[0]?.message?.blocks).toHaveLength(1);
+  });
+
+  it('出错的回复：已完成的步和固定的提示都不带尾部', async () => {
+    const { bot, sent } = setupWithTool(
+      steps(callsTool('我查一下'), serverError(), serverError(), serverError()),
+    );
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+      { kind: 'rich', text: '我查一下', footer: undefined },
+      { kind: 'plain', text: '（出错了）', footer: undefined },
+    ]);
+    expect(sent[0]?.message?.blocks).toHaveLength(1);
+    expect(sent[1]?.entities).toBeUndefined();
+  });
+
+  it('服务退出时被中止的回复：调工具之前说的话已经发出（不带尾部），中止的这次不再发，也没有尾部', async () => {
+    const { bot, sent, seen } = setupWithTool(
+      steps(callsTool('我查一下'), answer('不该出现')),
+      new Promise<void>(() => {}),
+    );
+
+    await bot.handle(message({ text: 'nori 查一下' }));
+    const deadline = Date.now() + 2000;
+    while (seen.length === 0 && Date.now() < deadline) await sleep(5);
+    await bot.close(30);
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '我查一下', footer: undefined },
+    ]);
   });
 
   it('合并回复：工具执行期间又被触发，这次的各条都引用原来的触发，下一次的引用期间最后一条触发', async () => {
@@ -1033,5 +1323,1758 @@ describe('分条发送（装了工具时）', () => {
       { text: '查到了', replyTo: first.message_id },
       { text: '第二次', replyTo: last.message_id },
     ]);
+  });
+});
+
+describe('指令（/compact、/clear）', () => {
+  const alicePrivate: TelegramChat = { id: alice.id, type: 'private', first_name: 'Alice' };
+  const byAlice = { id: String(alice.id), name: 'Alice' };
+  const quoted = (sent: Sent[]) => sent.map(({ text, replyTo }) => ({ text, replyTo }));
+
+  async function waitFor(check: () => boolean, what = '条件'): Promise<void> {
+    const deadline = Date.now() + 3000;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error(`等待${what}超时`);
+      await sleep(5);
+    }
+  }
+
+  /** 在 ms 毫秒内返回为 true；被拖住时为 false（不让测试一直挂着） */
+  async function returnsWithin(task: Promise<unknown>, ms = 1000): Promise<boolean> {
+    return Promise.race([task.then(() => true), sleep(ms).then(() => false)]);
+  }
+
+  async function storeOf(storage: Storage, chatId: number = group.id) {
+    const info = await storage.findConversation('telegram', String(chatId));
+    return info && { id: info.id, store: await storage.openConversation(info.id) };
+  }
+
+  /** 各段：起点、原因、摘要、执行人 */
+  async function segmentsOf(storage: Storage, chatId: number = group.id) {
+    const found = await storeOf(storage, chatId);
+    if (!found) return [];
+    return (await found.store.segments()).map((segment) => ({
+      startSeq: segment.startSeq,
+      reason: segment.startReason,
+      summary: segment.priorSummary,
+      by: segment.startedBy,
+    }));
+  }
+
+  /** 历史里的消息：序号、角色、正文 */
+  async function entriesOf(storage: Storage, chatId: number = group.id) {
+    const found = await storeOf(storage, chatId);
+    if (!found) return [];
+    return (await found.store.entries()).map(({ seq, message }) => ({
+      seq,
+      role: message.role,
+      text: message.parts.map((part) => (part.type === 'text' ? part.text : '')).join(''),
+    }));
+  }
+
+  type Entry = { level: string; msg: string; fields: Record<string, unknown> };
+  const commandLogs = (entries: Entry[]) =>
+    entries.filter((e) => e.msg === 'telegram.command').map((e) => e.fields);
+
+  const minutesAgo = (minutes: number) => Math.floor(Date.now() / 1000) - minutes * 60;
+
+  describe('执行', () => {
+    it('群里发 /clear：不进历史、不触发回复；多一段清空的段，执行人是发指令的人；引用指令回「已清空上下文」。再发一次回「上下文已经是空的」，段不变', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '已清空上下文', replyTo: clear.message_id }]);
+      expect(sent[0]!.target).toEqual({ chatId: group.id });
+      expect(await entriesOf(storage)).toEqual([{ seq: 1, role: 'user', text: '今天读到第三章' }]);
+      const segments = await segmentsOf(storage);
+      expect(segments.at(-1)).toEqual({
+        startSeq: 2,
+        reason: 'clear',
+        summary: undefined,
+        by: byAlice,
+      });
+      expect(model.doStreamCalls).toHaveLength(0);
+      // 清空不显示「正在输入」
+      expect(typing).toEqual([]);
+
+      const again = message({ text: '/clear' });
+      await bot.handle(again);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '已清空上下文', replyTo: clear.message_id },
+        { text: '上下文已经是空的', replyTo: again.message_id },
+      ]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(model.doStreamCalls).toHaveLength(0);
+    });
+
+    it('群里发 /compact：执行期间发「正在输入」；多一段手动压缩的段，带摘要与执行人；引用指令回「已压缩」；之后的回复里 system 是新摘要、消息只有压缩之后的。段里没有消息时回「没有可压缩的内容」，不请求模型', async () => {
+      const { model, release, calledAt } = gated('读书会的新摘要', '回复');
+      const { bot, sent, typing, storage } = setup({ model, typingIntervalMs: 20 });
+      await bot.handle(message({ text: '今天读到第三章' }));
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      await sleep(50);
+      // 压缩还没结束：「正在输入」一直在发，提示还没发
+      expect(typing.length).toBeGreaterThanOrEqual(2);
+      expect(typing[0]).toEqual({ chatId: group.id });
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+      const count = typing.length;
+      await sleep(60);
+      expect(typing.length).toBe(count);
+
+      expect(quoted(sent)).toEqual([{ text: '已压缩', replyTo: compact.message_id }]);
+      expect(promptText(model, 0)).toContain('今天读到第三章');
+      expect((await segmentsOf(storage)).at(-1)).toEqual({
+        startSeq: 2,
+        reason: 'manual',
+        summary: '读书会的新摘要',
+        by: byAlice,
+      });
+
+      const again = message({ text: '/compact' });
+      await bot.handle(again);
+      await bot.idle();
+      expect(quoted(sent).at(-1)).toEqual({ text: '没有可压缩的内容', replyTo: again.message_id });
+      expect(model.doStreamCalls).toHaveLength(1);
+
+      await bot.handle(message({ text: 'nori 我们读到哪了' }));
+      await bot.idle();
+      expect(sent.at(-1)!.text).toBe('回复');
+      const prompt = promptText(model, 1);
+      expect(prompt).toContain('读书会的新摘要');
+      expect(prompt).toContain('nori 我们读到哪了');
+      expect(prompt).not.toContain('今天读到第三章');
+      // 指令本身不进历史，也不会出现在请求里
+      expect(prompt).not.toContain('/compact');
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '今天读到第三章',
+        'nori 我们读到哪了',
+        '回复',
+      ]);
+    });
+
+    it('私聊里同样能用，提示发回私聊；指令不触发回复', async () => {
+      const model = replying('好', '不该出现');
+      const { bot, sent, storage } = setup({ model, users: [String(alice.id)] });
+      await bot.handle(message({ chat: alicePrivate, text: '在吗' }));
+      await bot.idle();
+
+      const clear = message({ chat: alicePrivate, text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(sent.map(({ target, text, replyTo }) => ({ target, text, replyTo }))).toEqual([
+        { target: { chatId: alice.id }, text: '好', replyTo: expect.any(Number) },
+        { target: { chatId: alice.id }, text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(model.doStreamCalls).toHaveLength(1);
+      expect((await segmentsOf(storage, alice.id)).at(-1)).toMatchObject({
+        startSeq: 3,
+        reason: 'clear',
+        by: byAlice,
+      });
+      expect(await entriesOf(storage, alice.id)).toHaveLength(2);
+    });
+
+    it('论坛群的话题里：「正在输入」和提示都发回指令所在的话题', async () => {
+      const model = replying('话题里的摘要');
+      const { bot, sent, typing } = setup({ model });
+      const topic = { is_topic_message: true, message_thread_id: 77 };
+      await bot.handle(message({ text: '话题里的闲聊', ...topic }));
+
+      const compact = message({ text: '/compact@nori_bot', ...topic });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(typing[0]).toEqual({ chatId: group.id, messageThreadId: 77 });
+      expect(sent).toEqual([
+        {
+          kind: 'plain',
+          target: { chatId: group.id, messageThreadId: 77 },
+          text: '已压缩',
+          replyTo: compact.message_id,
+        },
+      ]);
+    });
+
+    it('还没有会话的聊天（白名单里、从没说过话）：不建会话，/clear 回「上下文已经是空的」，/compact 回「没有可压缩的内容」', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, storage, entries } = setup({ model, users: [String(alice.id)] });
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const compact = message({ chat: alicePrivate, text: '/compact' });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(sent).toEqual([
+        {
+          kind: 'plain',
+          target: { chatId: group.id },
+          text: '上下文已经是空的',
+          replyTo: clear.message_id,
+        },
+        {
+          kind: 'plain',
+          target: { chatId: alice.id },
+          text: '没有可压缩的内容',
+          replyTo: compact.message_id,
+        },
+      ]);
+      expect(await storage.listConversations('telegram')).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(commandLogs(entries)).toEqual([
+        {
+          chatId: String(group.id),
+          command: 'clear',
+          byId: '11',
+          result: 'already-empty',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+        {
+          chatId: String(alice.id),
+          command: 'compact',
+          byId: '11',
+          result: 'nothing-to-compact',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+      ]);
+    });
+
+    it('白名单之外的群、私聊发指令：没有任何动作，日志只有 telegram.ignored', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage, entries } = setup({ model });
+
+      await bot.handle(message({ chat: { ...group, id: -1002 }, text: '/clear' }));
+      await bot.handle(message({ chat: alicePrivate, text: '/compact' }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(typing).toEqual([]);
+      expect(await storage.listConversations('telegram')).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(entries.map((e) => e.msg)).toEqual(['telegram.ignored', 'telegram.ignored']);
+    });
+
+    it('指令结束的那行日志：会话 id、指令、执行人的 id、结果、等了多久、执行了多久，没有正文和名字', async () => {
+      const { bot, storage, entries } = setup({ model: replying('不该出现') });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      await bot.handle(message({ text: '/clear' }));
+      await bot.idle();
+
+      const id = (await storage.findConversation('telegram', String(group.id)))!.id;
+      const logs = commandLogs(entries);
+      expect(logs).toEqual([
+        {
+          conversationId: id,
+          command: 'clear',
+          byId: '11',
+          result: 'cleared',
+          waitedMs: expect.any(Number),
+          ranMs: expect.any(Number),
+        },
+      ]);
+      expect(logs[0]!.waitedMs).toBeGreaterThanOrEqual(0);
+      expect(logs[0]!.ranMs).toBeGreaterThanOrEqual(0);
+      const telegramLines = JSON.stringify(entries.filter((e) => e.msg.startsWith('telegram.')));
+      expect(telegramLines).not.toContain('Alice');
+      expect(telegramLines).not.toContain('/clear');
+      expect(telegramLines).not.toContain('第三章');
+    });
+  });
+
+  describe('等一轮回复结束', () => {
+    it('等待合并期间发 /clear：不重置等待的计时；这一轮照常回复，回复发出后才清空并回提示；那次回复和它回答的消息都在旧的一段里', async () => {
+      const { model, release, calledAt } = gated('回复');
+      release();
+      const { bot, sent, storage } = setup({ model, wait: { idleMs: 150, maxMs: 1000 } });
+
+      const trigger = message({ text: 'nori 第三章讲了什么' });
+      await bot.handle(trigger);
+      const triggeredAt = Date.now();
+      await sleep(100);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      // 指令若重置了计时，要到 250 毫秒之后才开始
+      expect(calledAt[0]! - triggeredAt).toBeLessThan(240);
+      expect(quoted(sent)).toEqual([
+        { text: '回复', replyTo: trigger.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(promptText(model, 0)).toContain('nori 第三章讲了什么');
+      expect(await entriesOf(storage)).toEqual([
+        { seq: 1, role: 'user', text: 'nori 第三章讲了什么' },
+        { seq: 2, role: 'assistant', text: '回复' },
+      ]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({ startSeq: 3, reason: 'clear' });
+    });
+
+    it('回复中发 /clear，之后又有人触发：补回复也发出后才清空；补回复看得到期间的新消息', async () => {
+      const { model, release, calledAt } = gated('第一次', '第二次');
+      const { bot, sent, storage } = setup({ model });
+
+      const first = message({ text: 'nori 讲个故事' });
+      await bot.handle(first);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const second = message({ text: 'nori 我也要听' });
+      await bot.handle(second);
+      release();
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '第一次', replyTo: first.message_id },
+        { text: '第二次', replyTo: second.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(promptText(model, 1)).toContain('nori 我也要听');
+      expect(promptText(model, 1)).not.toContain('/clear');
+      const entries = await entriesOf(storage);
+      expect(entries.map((entry) => entry.text)).toEqual([
+        'nori 讲个故事',
+        '第一次',
+        'nori 我也要听',
+        '第二次',
+      ]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        startSeq: entries.at(-1)!.seq + 1,
+        reason: 'clear',
+      });
+    });
+
+    it('回复中先后发 /compact、/clear：这一轮结束后按先后执行，两句提示按先后发出', async () => {
+      const { model, release, calledAt } = gated('第一次', '摘要');
+      const { bot, sent, entries } = setup({ model });
+
+      const first = message({ text: 'nori 讲个故事' });
+      await bot.handle(first);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await sleep(30);
+      // 回复还没结束：两条都在等
+      expect(calledAt).toHaveLength(1);
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([
+        { text: '第一次', replyTo: first.message_id },
+        { text: '已压缩', replyTo: compact.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(calledAt).toHaveLength(2);
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['compact', 'compacted'],
+        ['clear', 'cleared'],
+      ]);
+    });
+
+    it('压缩进行中有人触发：回复在压缩结束后才请求模型，system 里是新摘要、消息里有这条触发；这一轮回复期间再发的指令等它结束才执行', async () => {
+      const { model, release, calledAt } = gated('压缩出来的摘要', '回复');
+      const { bot, sent, storage } = setup({ model });
+      await bot.handle(message({ text: '压缩之前的话' }));
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      const trigger = message({ text: 'nori 在吗' });
+      await bot.handle(trigger);
+      // 等待合并（5 毫秒）早就过了，回复已经开始，在等压缩
+      await sleep(60);
+      expect(calledAt).toHaveLength(1);
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      const releasedAt = Date.now();
+      release();
+      await bot.idle();
+
+      expect(calledAt).toHaveLength(2);
+      expect(calledAt[1]!).toBeGreaterThanOrEqual(releasedAt);
+      const prompt = promptText(model, 1);
+      expect(prompt).toContain('压缩出来的摘要');
+      expect(prompt).toContain('nori 在吗');
+      expect(prompt).not.toContain('压缩之前的话');
+      // 压缩的提示和回复谁先发出不一定；清空等这一轮结束，最后才发
+      expect(quoted(sent)).toEqual(
+        expect.arrayContaining([
+          { text: '已压缩', replyTo: compact.message_id },
+          { text: '回复', replyTo: trigger.message_id },
+        ]),
+      );
+      expect(quoted(sent)).toHaveLength(3);
+      expect(quoted(sent)[2]).toEqual({ text: '已清空上下文', replyTo: clear.message_id });
+      const entries = await entriesOf(storage);
+      expect(entries.map((entry) => entry.text)).toEqual(['压缩之前的话', 'nori 在吗', '回复']);
+      const segments = await segmentsOf(storage);
+      expect(segments.slice(-2)).toEqual([
+        { startSeq: 2, reason: 'manual', summary: '压缩出来的摘要', by: byAlice },
+        { startSeq: entries.at(-1)!.seq + 1, reason: 'clear', summary: undefined, by: byAlice },
+      ]);
+    });
+
+    it('压缩进行中群里有普通消息：handle 没有被压缩拖住，消息照常记录，在新的一段里', async () => {
+      const { model, release, calledAt } = gated('摘要');
+      const { bot, sent, storage } = setup({ model });
+      await bot.handle(message({ text: '压缩之前的话' }));
+
+      expect(await returnsWithin(bot.handle(message({ text: '/compact' })))).toBe(true);
+      await waitFor(() => calledAt.length === 1, '摘要请求');
+      expect(await returnsWithin(bot.handle(message({ text: '压缩期间的闲聊' })))).toBe(true);
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '压缩之前的话',
+        '压缩期间的闲聊',
+      ]);
+      expect(sent).toEqual([]);
+      release();
+      await bot.idle();
+
+      expect(sent.map((s) => s.text)).toEqual(['已压缩']);
+      expect(promptText(model, 0)).not.toContain('压缩期间的闲聊');
+      // 期间的闲聊是 2 号，新的一段从它开始
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        startSeq: 2,
+        reason: 'manual',
+      });
+    });
+
+    it('一轮结束的那一刻就执行，中间不留空当：「这一轮结束」的通知里紧接着来的消息，在清空之后的一段里', async () => {
+      const { model, release, calledAt } = gated('回复');
+      let next: Promise<void> | undefined;
+      const { bot, sent, storage } = setup({
+        model,
+        // 收到这一轮结束的通知时马上来一条普通消息。执行指令之前要是先等了一下（哪怕一个
+        // setTimeout(0)），它就会抢在清空之前写进历史，落进被清掉的旧段
+        onRound: (notice) => {
+          if (notice.type === 'end' && !next) {
+            next = bot.handle(message({ text: '紧接着的一句' }));
+          }
+        },
+      });
+
+      const trigger = message({ text: 'nori 讲个故事' });
+      await bot.handle(trigger);
+      await waitFor(() => calledAt.length === 1, '第一次请求');
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      release();
+      await bot.idle();
+      await next;
+
+      expect(quoted(sent)).toEqual([
+        { text: '回复', replyTo: trigger.message_id },
+        { text: '已清空上下文', replyTo: clear.message_id },
+      ]);
+      expect(await entriesOf(storage)).toEqual([
+        { seq: 1, role: 'user', text: 'nori 讲个故事' },
+        { seq: 2, role: 'assistant', text: '回复' },
+        { seq: 3, role: 'user', text: '紧接着的一句' },
+      ]);
+      // 清空的段从这条消息开始：它不在被清掉的旧段里
+      expect((await segmentsOf(storage)).at(-1)).toEqual({
+        startSeq: 3,
+        reason: 'clear',
+        summary: undefined,
+        by: byAlice,
+      });
+    });
+  });
+
+  describe('失败与不执行', () => {
+    it('压缩失败（模型报错）：引用指令回「压缩失败」，段不变；之后还能再压缩', async () => {
+      let call = 0;
+      const model = new MockLanguageModelV4({
+        doStream: async (options) => {
+          if (call++ === 0) throw new Error('模型挂了');
+          return replying('第二次的摘要').doStream(options);
+        },
+      });
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      const compact = message({ text: '/compact' });
+      await bot.handle(compact);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '压缩失败', replyTo: compact.message_id }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(entries.map((e) => e.msg)).toContain('summary.failed');
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['failed']);
+      // 详情只在核心的 summary.failed 里，群里只有那句话
+      expect(sent.map((s) => s.text).join('')).not.toContain('模型挂了');
+
+      const again = message({ text: '/compact' });
+      await bot.handle(again);
+      await bot.idle();
+      expect(quoted(sent).at(-1)).toEqual({ text: '已压缩', replyTo: again.message_id });
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({
+        reason: 'manual',
+        summary: '第二次的摘要',
+      });
+    });
+
+    it('清空失败（存储出错）：引用指令回「清空失败」，段不变；错误记在指令的那一行', async () => {
+      const storage = createMemoryStorage();
+      const openConversation = storage.openConversation.bind(storage);
+      storage.openConversation = async (id) => {
+        const store = await openConversation(id);
+        return {
+          ...store,
+          addSegment: async () => {
+            throw new Error('磁盘满了');
+          },
+        };
+      };
+      const { bot, sent, entries } = setup({ model: replying('不该出现'), storage });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '清空失败', replyTo: clear.message_id }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries)).toEqual([
+        expect.objectContaining({
+          command: 'clear',
+          result: 'failed',
+          error: { type: 'Error', message: '磁盘满了' },
+        }),
+      ]);
+    });
+
+    it('核心以「正忙」拒绝（绕开 bot 直接开始了一次回复）：当作失败回「清空失败」，另记一行 telegram.command_busy', async () => {
+      const { model, release, calledAt } = gated('不经 bot 的回复');
+      const { bot, sent, storage, entries, conversations } = setup({ model });
+      await bot.handle(message({ text: '你好' }));
+      const reading = conversations[0]!.reply().pipeTo(new WritableStream());
+      await waitFor(() => calledAt.length === 1, '回复的请求');
+
+      const clear = message({ text: '/clear' });
+      await bot.handle(clear);
+      await bot.idle();
+
+      expect(quoted(sent)).toEqual([{ text: '清空失败', replyTo: clear.message_id }]);
+      const id = (await storage.findConversation('telegram', String(group.id)))!.id;
+      expect(entries.filter((e) => e.msg === 'telegram.command_busy')).toEqual([
+        {
+          level: 'error',
+          msg: 'telegram.command_busy',
+          fields: { conversationId: id, command: 'clear', reason: 'replying' },
+        },
+      ]);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['failed']);
+      release();
+      await reading;
+    });
+
+    it('过期的指令（发送时间早于时限）：不执行、不回提示，日志一行', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, typing, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+
+      await bot.handle(message({ text: '/compact', date: minutesAgo(61) }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(typing).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(await entriesOf(storage)).toHaveLength(1);
+      expect(commandLogs(entries)).toEqual([
+        {
+          chatId: String(group.id),
+          ageMinutes: 61,
+          command: 'compact',
+          byId: '11',
+          result: 'stale',
+          waitedMs: expect.any(Number),
+        },
+      ]);
+    });
+
+    it('把一条旧消息编辑成 /clear：照编辑处理（历史里那条的正文变了），没有清空', async () => {
+      const { bot, sent, storage, entries } = setup({ model: replying('不该出现') });
+      const original = message({ text: '原来的话' });
+      await bot.handle(original);
+      const segments = await segmentsOf(storage);
+
+      await bot.handle({ ...original, text: '/clear', edit_date: Math.floor(Date.now() / 1000) });
+      await bot.idle();
+
+      expect(await entriesOf(storage)).toEqual([{ seq: 1, role: 'user', text: '/clear' }]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(sent).toEqual([]);
+      expect(commandLogs(entries)).toEqual([]);
+      expect(entries.map((e) => e.msg)).toContain('telegram.edited');
+    });
+
+    it('不算指令的（/clear 现在、/clear@别的bot、说明文字是 /clear 的图片）：照普通消息记录；私聊里照常触发回复', async () => {
+      const model = replying('私聊里的回复');
+      const { bot, sent, storage, entries } = setup({ model, users: [String(alice.id)] });
+
+      await bot.handle(message({ text: '/clear 现在' }));
+      await bot.handle(message({ text: '/clear@other_bot' }));
+      await bot.handle(
+        message({ photo: [{ file_id: 'p', width: 8, height: 8 }], caption: '/clear' }),
+      );
+      await bot.idle();
+      expect(sent).toEqual([]);
+      expect((await entriesOf(storage)).map((entry) => entry.text)).toEqual([
+        '/clear 现在',
+        '/clear@other_bot',
+        '/clear',
+      ]);
+      expect(await segmentsOf(storage)).toHaveLength(1);
+
+      const privately = message({ chat: alicePrivate, text: '/compact 记住旅行计划' });
+      await bot.handle(privately);
+      await bot.idle();
+      expect(quoted(sent)).toEqual([{ text: '私聊里的回复', replyTo: privately.message_id }]);
+      expect(promptText(model, 0)).toContain('/compact 记住旅行计划');
+      expect(commandLogs(entries)).toEqual([]);
+    });
+  });
+
+  describe('关闭', () => {
+    it('还在等的指令丢掉：不执行、不发提示，各记一行 closing', async () => {
+      const model = replying({ text: '永远等不到', gate: new Promise<void>(() => {}) });
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await waitFor(() => model.doStreamCalls.length === 1, '回复的请求');
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/clear' }));
+      await bot.handle(message({ text: '/compact' }));
+
+      await bot.close(30);
+      await sleep(30);
+
+      expect(sent).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(1);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['clear', 'closing'],
+        ['compact', 'closing'],
+      ]);
+    });
+
+    it('进行中的压缩马上中止：段不变、没有提示；不等满宽限期（回复在等这次压缩时也一样）', async () => {
+      const model = replying({ text: '不会用上的摘要', gate: new Promise<void>(() => {}) }, '回复');
+      const { bot, sent, storage, entries } = setup({ model });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/compact' }));
+      await waitFor(() => model.doStreamCalls.length === 1, '摘要请求');
+      // 一轮回复已经开始，在核心里等这次压缩
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await sleep(30);
+
+      const startedAt = Date.now();
+      await bot.close(10_000);
+
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      // 宽限期内回复照常发完（关闭的原有规则）；压缩没有提示
+      expect(sent.map((s) => s.text)).toEqual(['回复']);
+      expect(entries.map((e) => e.msg)).toContain('summary.aborted');
+      expect(commandLogs(entries).map((fields) => [fields.command, fields.result])).toEqual([
+        ['compact', 'aborted'],
+      ]);
+    });
+
+    it('关闭时被放弃的等待中的一轮，没有带出排着的指令的执行', async () => {
+      const model = replying('不该出现');
+      const { bot, sent, storage, entries } = setup({
+        model,
+        wait: { idleMs: 5000, maxMs: 8000 },
+      });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      await bot.handle(message({ text: 'nori 在吗' }));
+      const segments = await segmentsOf(storage);
+      await bot.handle(message({ text: '/clear' }));
+
+      await bot.close(10_000);
+      await sleep(30);
+
+      expect(sent).toEqual([]);
+      expect(model.doStreamCalls).toHaveLength(0);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['closing']);
+    });
+
+    it('进行中的清空照常做完（不发提示）；各会话等它结束才关闭', async () => {
+      const storage = createMemoryStorage();
+      const openConversation = storage.openConversation.bind(storage);
+      let slow = false;
+      storage.openConversation = async (id) => {
+        const store = await openConversation(id);
+        return {
+          ...store,
+          currentSegment: async () => {
+            if (slow) await sleep(50);
+            return store.currentSegment();
+          },
+        };
+      };
+      const { bot, sent, entries } = setup({ model: replying('不该出现'), storage });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      slow = true;
+
+      await bot.handle(message({ text: '/clear' }));
+      await bot.close(0);
+
+      expect(sent).toEqual([]);
+      expect((await segmentsOf(storage)).at(-1)).toMatchObject({ startSeq: 2, reason: 'clear' });
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['cleared']);
+    });
+
+    it('关闭之后再发指令：不执行，记一行 closing', async () => {
+      const { bot, sent, storage, entries } = setup({ model: replying('不该出现') });
+      await bot.handle(message({ text: '今天读到第三章' }));
+      const segments = await segmentsOf(storage);
+      await bot.close(0);
+
+      await bot.handle(message({ text: '/clear' }));
+      await bot.idle();
+
+      expect(sent).toEqual([]);
+      expect(await segmentsOf(storage)).toEqual(segments);
+      expect(commandLogs(entries).map((fields) => fields.result)).toEqual(['closing']);
+    });
+  });
+});
+
+describe('富文本消息与改发普通消息', () => {
+  // 拆成两段的回复：前一段正好 4096 个字，后一段是「尾巴」
+  const head = '甲'.repeat(telegramMessageLimit);
+  const long = `${head}尾巴`;
+  const shown = (sent: Sent[]) => sent.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }));
+  const logsOf = <T extends { msg: string }>(entries: T[], msg: string) =>
+    entries.filter((entry) => entry.msg === msg);
+
+  it('Telegram 拒收：这一条改发原文的普通消息，引用不变；下一次回复照常先试富文本；记 telegram.rich_fallback，不带正文', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying('第一次 **甲甲**', '第二次'),
+      onSendRich: (call) => {
+        if (call === 0) throw rejected();
+      },
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: '第一次 **甲甲**', replyTo: first.message_id },
+      { kind: 'rich', text: '第二次', replyTo: second.message_id },
+    ]);
+    expect(calls).toEqual({ rich: 2, plain: 1 });
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.rich_fallback',
+        fields: {
+          conversationId: expect.any(String),
+          reason: 'rejected',
+          error: { type: 'ValidationError', message: "Bad Request: can't parse rich message" },
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.send_failed')).toEqual([]);
+    const logged = JSON.stringify(entries);
+    expect(logged).not.toContain('甲甲');
+    expect(logged).not.toContain('第一次');
+  });
+
+  it('服务端不认识这个接口：这一段改发普通消息，之后的段和之后的回复不再试富文本；telegram.rich_unavailable 只记一次', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long, '第二次'),
+      onSendRich: () => {
+        throw unsupported();
+      },
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: head, replyTo: first.message_id },
+      { kind: 'plain', text: '尾巴', replyTo: undefined },
+      { kind: 'plain', text: '第二次', replyTo: second.message_id },
+    ]);
+    expect(calls.rich).toBe(1);
+    expect(logsOf(entries, 'telegram.rich_unavailable')).toEqual([
+      {
+        level: 'warn',
+        msg: 'telegram.rich_unavailable',
+        fields: {
+          conversationId: expect.any(String),
+          error: {
+            type: 'ResourceNotFoundError',
+            message: 'sendRichMessage not found in telegram',
+          },
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([]);
+  });
+
+  it('两个群同时碰上服务端不认识这个接口：都改发普通消息，telegram.rich_unavailable 只记一次', async () => {
+    const otherGroup: TelegramChat = { id: -1002, type: 'supergroup', title: '另一个群' };
+    // 两个群的富文本请求都发出去以后才一起失败
+    let inFlight = 0;
+    let bothSent!: () => void;
+    const both = new Promise<void>((resolve) => (bothSent = resolve));
+    const { bot, sent, calls, entries } = setup({
+      model: replying('好', '好', '第三次'),
+      chats: [group, otherGroup],
+      onSendRich: async () => {
+        if (++inFlight === 2) bothSent();
+        await both;
+        throw unsupported();
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.handle(message({ chat: otherGroup, text: 'nori 二' }));
+    await bot.idle();
+    await bot.handle(message({ text: 'nori 三' }));
+    await bot.idle();
+
+    expect(calls.rich).toBe(2);
+    expect(sent.map(({ kind, target }) => ({ kind, chatId: target.chatId }))).toEqual(
+      expect.arrayContaining([
+        { kind: 'plain', chatId: group.id },
+        { kind: 'plain', chatId: otherGroup.id },
+      ]),
+    );
+    expect(shown(sent)).toHaveLength(3);
+    expect(shown(sent).at(-1)).toMatchObject({ kind: 'plain', text: '第三次' });
+    expect(logsOf(entries, 'telegram.rich_unavailable')).toHaveLength(1);
+  });
+
+  it('别的失败（如限流）：不改发普通消息，记 telegram.send_failed（sendRichMessage），这一步剩下的段不发；之后的回复照常', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long, '第二次'),
+      onSendRich: (call) => {
+        if (call === 0) {
+          throw adapterError('AdapterRateLimitError', 'Rate limited by telegram, retry after 5s');
+        }
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([{ kind: 'rich', text: '第二次', replyTo: second.message_id }]);
+    expect(calls).toEqual({ rich: 2, plain: 0 });
+    expect(logsOf(entries, 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendRichMessage',
+        error: {
+          type: 'AdapterRateLimitError',
+          message: 'Rate limited by telegram, retry after 5s',
+        },
+      },
+    ]);
+    expect(logsOf(entries, 'telegram.rich_fallback')).toEqual([]);
+  });
+
+  it('改发的普通消息也失败：记 telegram.send_failed（sendMessage），这一步剩下的段不发', async () => {
+    const { bot, sent, calls, entries } = setup({
+      model: replying(long),
+      onSendRich: () => {
+        throw rejected();
+      },
+      onSend: () => {
+        throw adapterError('NetworkError', 'Network error calling Telegram sendMessage');
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(calls).toEqual({ rich: 1, plain: 1 });
+    expect(logsOf(entries, 'telegram.rich_fallback')).toHaveLength(1);
+    expect(logsOf(entries, 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendMessage',
+        error: { type: 'NetworkError', message: 'Network error calling Telegram sendMessage' },
+      },
+    ]);
+  });
+
+  it('富文本关着（尾部也关着）：一次也不调富文本的操作，发出去的和以前一样', async () => {
+    const { bot, sent, calls } = setup({ model: replying(long), rich: false, usage: false });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: head, replyTo: trigger.message_id },
+      { kind: 'plain', text: '尾巴', replyTo: undefined },
+    ]);
+    expect(sent.map((s) => s.entities)).toEqual([undefined, undefined]);
+    expect(calls.rich).toBe(0);
+  });
+
+  it('回复出错时的固定提示发普通消息，不走富文本', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        throw new Error('模型挂了');
+      },
+    });
+    const { bot, sent, calls } = setup({ model });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([
+      { kind: 'plain', text: '（出错了）', replyTo: trigger.message_id },
+    ]);
+    expect(calls.rich).toBe(0);
+  });
+});
+
+describe('回复的尾部', () => {
+  /** 一次请求的用量；none 表示服务端一项都没报 */
+  type Tokens = { input: number; cacheRead: number; output: number; reasoning: number } | 'none';
+  const usageOf = (tokens: Tokens) =>
+    tokens === 'none'
+      ? {
+          inputTokens: {
+            total: undefined,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+        }
+      : {
+          inputTokens: {
+            total: tokens.input,
+            noCache: tokens.input - tokens.cacheRead,
+            cacheRead: tokens.cacheRead,
+            cacheWrite: undefined,
+          },
+          outputTokens: {
+            total: tokens.output,
+            text: tokens.output - tokens.reasoning,
+            reasoning: tokens.reasoning,
+          },
+        };
+  const small: Tokens = { input: 10, cacheRead: 0, output: 2, reasoning: 0 };
+  const smallFooter = '输入 10 · 输出 2 · 0.0s';
+
+  /**
+   * 依次回复：每次请求时把时钟拨快 ms（像模型在生成），说 text，带 tokens 的用量；
+   * 带 gate 的拨完时钟等它放行才输出
+   */
+  function answering(
+    clock: { ms: number },
+    ...turns: Array<{ text: string; ms: number; tokens?: Tokens; gate?: Promise<void> }>
+  ) {
+    let call = 0;
+    return new MockLanguageModelV4({
+      doStream: async () => {
+        const { text, ms, tokens = small, gate } = turns[call++] ?? { text: '', ms: 0 };
+        clock.ms += ms;
+        await gate;
+        const parts: StreamPart[] = [
+          { type: 'text-start', id: 't' },
+          { type: 'text-delta', id: 't', delta: text },
+          { type: 'text-end', id: 't' },
+          {
+            type: 'finish',
+            finishReason: { unified: 'stop', raw: undefined },
+            usage: usageOf(tokens),
+          },
+        ];
+        return { stream: simulateReadableStream({ chunks: parts }) };
+      },
+    });
+  }
+
+  /** 照写的回复流：依次给出这些段；then 是之后的事（等中止等），返回之后再给的段 */
+  function scripted(
+    chunks: MessageChunk[],
+    then: (abortSignal: AbortSignal | undefined) => Promise<MessageChunk[]> = async () => [],
+  ) {
+    return (abortSignal: AbortSignal | undefined) =>
+      new ReadableStream<MessageChunk>({
+        async start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          for (const chunk of await then(abortSignal)) controller.enqueue(chunk);
+          controller.close();
+        },
+      });
+  }
+  const finishedStep: MessageChunk[] = [
+    { type: 'start' },
+    { type: 'start-step' },
+    { type: 'text-start', id: 't' },
+    { type: 'text-delta', id: 't', delta: '说完了' },
+    { type: 'text-end', id: 't' },
+    { type: 'finish-step' },
+  ];
+
+  it('一步的回复：那一条带尾部，数字来自回复结束时的用量，用时从开始生成到回复完成（不含等待合并、不含发送）', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: answering(clock, {
+        text: '好的',
+        ms: 3200,
+        tokens: { input: 4976, cacheRead: 4096, output: 135, reasoning: 102 },
+      }),
+      clock,
+      // 等待合并花了 5 秒，发送花了 10 秒：都不算
+      onRound: (notice) => {
+        if (notice.type === 'wait') clock.ms += 5000;
+      },
+      onSendRich: () => {
+        clock.ms += 10_000;
+      },
+    });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    const footer = '输入 5k · 缓存 4.1k · 输出 135 · 推理 102 · 3.2s';
+    expect(
+      sent.map(({ kind, text, footer, replyTo }) => ({ kind, text, footer, replyTo })),
+    ).toEqual([{ kind: 'rich', text: '好的', footer, replyTo: trigger.message_id }]);
+    expect(sent[0]?.message).toEqual({
+      blocks: [
+        { type: 'paragraph', text: '好的' },
+        { type: 'divider' },
+        { type: 'paragraph', text: { type: 'subscript', text: footer } },
+      ],
+    });
+  });
+
+  it('服务端没报用量：尾部只有用时', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: answering(clock, { text: '好的', ms: 65_000, tokens: 'none' }),
+      clock,
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '好的', footer: '1m05s' },
+    ]);
+  });
+
+  it('回复中又被触发、补的那一次：两次回复各有尾部，各算各的用量和用时', async () => {
+    const clock = { ms: 0 };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const model = answering(
+      clock,
+      { text: '第一次', ms: 1000, gate },
+      { text: '第二次', ms: 2000, tokens: { input: 20, cacheRead: 0, output: 4, reasoning: 0 } },
+    );
+    const { bot, sent } = setup({ model, clock });
+
+    const first = message({ text: 'nori 讲个故事' });
+    await bot.handle(first);
+    while (model.doStreamCalls.length === 0) await sleep(5);
+    const again = message({ text: 'nori 我也要听' });
+    await bot.handle(again);
+    release();
+    await bot.idle();
+
+    expect(sent.map(({ text, footer, replyTo }) => ({ text, footer, replyTo }))).toEqual([
+      { text: '第一次', footer: '输入 10 · 输出 2 · 1.0s', replyTo: first.message_id },
+      { text: '第二次', footer: '输入 20 · 输出 4 · 2.0s', replyTo: again.message_id },
+    ]);
+  });
+
+  it('富文本消息被拒收、改发普通消息：正文不变，空一行后是斜体的尾部', async () => {
+    const text = '好的 👍 **原样**';
+    const { bot, sent } = setup({
+      model: answering({ ms: 0 }, { text, ms: 0 }),
+      onSendRich: () => {
+        throw rejected();
+      },
+    });
+
+    const trigger = message({ text: 'nori 在吗' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent).toEqual([
+      {
+        kind: 'plain',
+        target: { chatId: group.id },
+        text,
+        footer: smallFooter,
+        replyTo: trigger.message_id,
+        entities: [{ type: 'italic', offset: text.length + 2, length: smallFooter.length }],
+      },
+    ]);
+  });
+
+  it('普通消息的最后一段加上尾部超过 4096、正文那条发送失败：不再发尾部那一条', async () => {
+    const fits = 'b'.repeat(telegramMessageLimit - 2 - smallFooter.length);
+    const { bot, sent, calls, entries } = setup({
+      model: answering({ ms: 0 }, { text: `${fits}c`, ms: 0 }),
+      rich: false,
+      onSend: () => {
+        throw adapterError('NetworkError', 'Network error calling Telegram sendMessage');
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 一' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(calls.plain).toBe(1);
+    expect(entries.filter((e) => e.msg === 'telegram.send_failed')).toHaveLength(1);
+  });
+
+  it('普通消息的最后一段加上尾部超过 4096：尾部单独成一条（只有斜体的那一行，不引用）；正好放得下时还是一条', async () => {
+    // 正文加空行加尾部正好 4096 个码元
+    const fits = 'b'.repeat(telegramMessageLimit - 2 - smallFooter.length);
+    const { bot, sent } = setup({
+      model: answering({ ms: 0 }, { text: `${fits}c`, ms: 0 }, { text: fits, ms: 0 }),
+      rich: false,
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(
+      sent.map(({ text, footer, replyTo, entities }) => ({
+        length: text.length,
+        footer,
+        replyTo,
+        entities,
+      })),
+    ).toEqual([
+      {
+        length: fits.length + 1,
+        footer: undefined,
+        replyTo: first.message_id,
+        entities: undefined,
+      },
+      {
+        length: 0,
+        footer: smallFooter,
+        replyTo: undefined,
+        entities: [{ type: 'italic', offset: 0, length: smallFooter.length }],
+      },
+      {
+        length: fits.length,
+        footer: smallFooter,
+        replyTo: second.message_id,
+        entities: [{ type: 'italic', offset: fits.length + 2, length: smallFooter.length }],
+      },
+    ]);
+  });
+
+  it.each([
+    { rich: true, usage: true, kind: 'rich', footer: true },
+    { rich: true, usage: false, kind: 'rich', footer: false },
+    { rich: false, usage: true, kind: 'plain', footer: true },
+    { rich: false, usage: false, kind: 'plain', footer: false },
+  ])(
+    '开关 RICH=$rich、USAGE=$usage：发 $kind 消息，尾部 $footer',
+    async ({ rich, usage, kind, footer }) => {
+      const { bot, sent, calls } = setup({
+        model: answering({ ms: 0 }, { text: '好的', ms: 0 }),
+        rich,
+        usage,
+      });
+
+      await bot.handle(message({ text: 'nori 在吗' }));
+      await bot.idle();
+
+      expect(sent.map((s) => ({ kind: s.kind, text: s.text }))).toEqual([{ kind, text: '好的' }]);
+      expect(sent[0]?.footer).toBe(footer ? smallFooter : undefined);
+      if (kind === 'rich') {
+        expect(sent[0]?.message?.blocks).toHaveLength(footer ? 3 : 1);
+        expect(calls.plain).toBe(0);
+      } else {
+        // 没有尾部的普通消息和以前一样：不带格式标记
+        expect(sent[0]?.entities).toEqual(
+          footer ? [{ type: 'italic', offset: 4, length: smallFooter.length }] : undefined,
+        );
+        expect(calls.rich).toBe(0);
+      }
+    },
+  );
+
+  it('服务退出：一步结束后被中止（没有回复完成的段），这一步的文字不发，也没有尾部', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted(finishedStep, async (abortSignal) => {
+        await new Promise((resolve) => abortSignal?.addEventListener('abort', resolve));
+        return [{ type: 'abort' }];
+      }),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await sleep(30);
+    await bot.close(0);
+
+    expect(sent).toEqual([]);
+  });
+
+  it('一步结束后流里来的是中止的段（不是 bot 自己关闭）：照样不发', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([...finishedStep, { type: 'abort' }]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+  });
+
+  it('用时从调用 reply() 之前算起：调用之后、第一个段到达之前过去的时间也算（如核心读历史、等切段）', async () => {
+    const clock = { ms: 0 };
+    const { bot, sent } = setup({
+      model: replying(),
+      clock,
+      replyStream: () =>
+        new ReadableStream<MessageChunk>({
+          async start(controller) {
+            await Promise.resolve();
+            // 第一个段还没来，时钟已经走了 0.7 秒
+            clock.ms += 700;
+            for (const chunk of [
+              ...finishedStep,
+              { type: 'finish', messageMetadata: { createdAt: '2026-11-14T00:00:00.000Z' } },
+            ] satisfies MessageChunk[]) {
+              controller.enqueue(chunk);
+            }
+            controller.close();
+          },
+        }),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '说完了', footer: '0.7s' },
+    ]);
+  });
+
+  it('一步结束后流就结束了、没有回复完成的段：不发', async () => {
+    const { bot, sent } = setup({ model: replying(), replyStream: scripted(finishedStep) });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+  });
+
+  it('一步结束后出错：这一步的文字照原样发出（不带尾部），再发固定的提示', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([...finishedStep, { type: 'error', errorText: '出错了' }]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+      { kind: 'rich', text: '说完了', footer: undefined },
+      { kind: 'plain', text: '（出错了）', footer: undefined },
+    ]);
+  });
+
+  it('一步结束后又开始了一步：这一步的文字照原样发出，尾部挂在最后一步', async () => {
+    const { bot, sent } = setup({
+      model: replying(),
+      replyStream: scripted([
+        ...finishedStep,
+        { type: 'start-step' },
+        { type: 'text-start', id: 'u' },
+        { type: 'text-delta', id: 'u', delta: '还有一句' },
+        { type: 'text-end', id: 'u' },
+        { type: 'finish-step' },
+        { type: 'finish', messageMetadata: { createdAt: '2026-11-14T00:00:00.000Z' } },
+      ]),
+    });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(sent.map(({ text, footer }) => ({ text, footer }))).toEqual([
+      { text: '说完了', footer: undefined },
+      { text: '还有一句', footer: '0.0s' },
+    ]);
+  });
+});
+
+describe('按 Markdown 排版、按富文本的上限拆分', () => {
+  const footer = '输入 1 · 输出 1 · 0.0s';
+  /** n 个长段落，每段 20000 个同一个字：一条富文本消息放一段（两段加余量就超 32768） */
+  const longParas = (...chars: string[]) => chars.map((c) => c.repeat(20_000)).join('\n\n');
+  const view = (sent: Sent[]) =>
+    sent.map(({ kind, text, footer, replyTo }) => ({
+      kind,
+      length: text.length,
+      head: text.slice(0, 1),
+      footer,
+      replyTo,
+    }));
+
+  it('一条 Markdown 的回复：发出去的是排好的块，尾部挂在块的最后', async () => {
+    const { bot, sent } = setup({
+      model: replying('# 标题\n\n正文 **粗** 和 $x^2$\n\n- 一\n- 二\n\n```py\nprint(1)\n```'),
+    });
+
+    const trigger = message({ text: 'nori 讲讲' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ kind: 'rich', replyTo: trigger.message_id, footer });
+    expect(sent[0]?.message).toEqual({
+      blocks: [
+        { type: 'heading', text: '标题', size: 1 },
+        {
+          type: 'paragraph',
+          text: [
+            '正文 ',
+            { type: 'bold', text: '粗' },
+            ' 和 ',
+            { type: 'mathematical_expression', expression: 'x^2' },
+          ],
+        },
+        {
+          type: 'list',
+          items: [
+            { blocks: [{ type: 'paragraph', text: '一' }] },
+            { blocks: [{ type: 'paragraph', text: '二' }] },
+          ],
+        },
+        { type: 'pre', text: 'print(1)', language: 'py' },
+        { type: 'divider' },
+        { type: 'paragraph', text: { type: 'subscript', text: footer } },
+      ],
+    });
+  });
+
+  it('长回复在块之间拆成几条富文本消息：第一条引用，后面的不引用；尾部只在最后一条', async () => {
+    const { bot, sent, calls } = setup({ model: replying(longParas('甲', '乙', '丙')) });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(view(sent)).toEqual([
+      { kind: 'rich', length: 20_000, head: '甲', footer: undefined, replyTo: trigger.message_id },
+      { kind: 'rich', length: 20_000, head: '乙', footer: undefined, replyTo: undefined },
+      { kind: 'rich', length: 20_000, head: '丙', footer, replyTo: undefined },
+    ]);
+    expect(calls.plain).toBe(0);
+  });
+
+  it('中间一条被拒收：这一条改发原文的普通消息（满 4096 拆），别的照常是富文本；日志里没有正文', async () => {
+    const { bot, sent, entries } = setup({
+      model: replying(longParas('甲', '乙', '丙')),
+      onSendRich: (call) => {
+        if (call === 1) throw rejected();
+      },
+    });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    const plain = { kind: 'plain', head: '乙', footer: undefined, replyTo: undefined };
+    expect(view(sent)).toEqual([
+      { kind: 'rich', length: 20_000, head: '甲', footer: undefined, replyTo: trigger.message_id },
+      ...[4096, 4096, 4096, 4096, 3616].map((length) => ({ ...plain, length })),
+      { kind: 'rich', length: 20_000, head: '丙', footer, replyTo: undefined },
+    ]);
+    expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toHaveLength(1);
+    expect(JSON.stringify(entries)).not.toContain('乙乙');
+  });
+
+  it('最后一条被拒收：改发的普通消息带斜体的尾部（在最后一段）', async () => {
+    const { bot, sent } = setup({
+      model: replying(longParas('甲', '乙')),
+      onSendRich: (call) => {
+        if (call === 1) throw rejected();
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 讲长一点' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, footer }) => ({ kind, footer }))).toEqual([
+      { kind: 'rich', footer: undefined },
+      ...[1, 2, 3, 4].map(() => ({ kind: 'plain', footer: undefined })),
+      { kind: 'plain', footer },
+    ]);
+    const last = sent.at(-1)!;
+    expect(last.entities).toEqual([
+      { type: 'italic', offset: last.text.length + 2, length: footer.length },
+    ]);
+    expect(
+      sent
+        .slice(1)
+        .map((s) => s.text)
+        .join(''),
+    ).toBe('乙'.repeat(20_000));
+  });
+
+  it.each([
+    ['限流', 'AdapterRateLimitError', 'Rate limited by telegram, retry after 5s'],
+    ['网络错误', 'NetworkError', 'Network error calling Telegram sendRichMessage'],
+  ])(
+    '拆成三条、第二条遇到别的失败（%s）：只发出第一条，不改发，第三条和尾部都不发；记 telegram.send_failed；之后的回复照常',
+    async (_, name, description) => {
+      const { bot, sent, calls, entries } = setup({
+        model: replying(longParas('甲', '乙', '丙'), '第二次'),
+        onSendRich: (call) => {
+          if (call === 1) throw adapterError(name, description);
+        },
+      });
+
+      const first = message({ text: 'nori 讲长一点' });
+      await bot.handle(first);
+      await bot.idle();
+      expect(view(sent)).toEqual([
+        { kind: 'rich', length: 20_000, head: '甲', footer: undefined, replyTo: first.message_id },
+      ]);
+      expect(calls).toEqual({ rich: 2, plain: 0 });
+      expect(entries.filter((e) => e.msg === 'telegram.send_failed').map((e) => e.fields)).toEqual([
+        {
+          conversationId: expect.any(String),
+          method: 'sendRichMessage',
+          error: { type: name, message: description },
+        },
+      ]);
+      expect(entries.filter((e) => e.msg === 'telegram.rich_fallback')).toEqual([]);
+
+      const second = message({ text: 'nori 二' });
+      await bot.handle(second);
+      await bot.idle();
+      expect(sent.slice(1)).toEqual([
+        expect.objectContaining({
+          kind: 'rich',
+          text: '第二次',
+          footer,
+          replyTo: second.message_id,
+        }),
+      ]);
+    },
+  );
+
+  it('单独超限的块改发普通消息、中途失败：这一块剩下的段、后面的块都不发；记 telegram.send_failed（sendMessage）', async () => {
+    const huge = '乙'.repeat(40_000);
+    const { bot, sent, calls, entries } = setup({
+      model: replying(`前面 **粗**\n\n${huge}\n\n后面 **粗**`),
+      onSend: (call) => {
+        if (call === 1) {
+          throw adapterError('NetworkError', 'Network error calling Telegram sendMessage');
+        }
+      },
+    });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(view(sent)).toEqual([
+      {
+        kind: 'rich',
+        length: '前面 粗'.length,
+        head: '前',
+        footer: undefined,
+        replyTo: trigger.message_id,
+      },
+      { kind: 'plain', length: 4096, head: '乙', footer: undefined, replyTo: undefined },
+    ]);
+    expect(calls).toEqual({ rich: 1, plain: 2 });
+    expect(entries.filter((e) => e.msg === 'telegram.send_failed').map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        method: 'sendMessage',
+        error: { type: 'NetworkError', message: 'Network error calling Telegram sendMessage' },
+      },
+    ]);
+  });
+
+  it('被拒收改发原文：以缩进的代码块开头时，第一行的缩进还在（只去掉开头的空行）', async () => {
+    const { bot, sent } = setup({
+      model: replying('\n\n    缩进的代码\n\n正文 **粗**\n\n'),
+      usage: false,
+      onSendRich: () => {
+        throw rejected();
+      },
+    });
+
+    await bot.handle(message({ text: 'nori 讲讲' }));
+    await bot.idle();
+
+    expect(sent.map(({ kind, text }) => ({ kind, text }))).toEqual([
+      { kind: 'plain', text: '    缩进的代码\n\n正文 **粗**' },
+    ]);
+  });
+
+  it('服务端不认识这个接口：这一条和剩下的都发原文的普通消息，之后的回复不再试富文本', async () => {
+    // 两条：第一条是「第一段」和乙，第二条是丙
+    const text = `第一段 **粗**\n\n${longParas('乙', '丙')}`;
+    const { bot, sent, calls } = setup({
+      model: replying(text, '第二次 **粗**'),
+      onSendRich: () => {
+        throw unsupported();
+      },
+    });
+
+    const first = message({ text: 'nori 一' });
+    await bot.handle(first);
+    await bot.idle();
+    const second = message({ text: 'nori 二' });
+    await bot.handle(second);
+    await bot.idle();
+
+    expect(calls.rich).toBe(1);
+    expect(sent.every((s) => s.kind === 'plain')).toBe(true);
+    const [reply1, reply2] = [sent.slice(0, -1), sent.slice(-1)];
+    // 原文照发（符号不解析），满 4096 拆；两条的原文之间的空行去掉了
+    expect(reply1[0]?.text.startsWith('第一段 **粗**\n\n乙')).toBe(true);
+    expect(reply1.map((s) => s.text).join('')).toBe(
+      `第一段 **粗**\n\n${'乙'.repeat(20_000)}${'丙'.repeat(20_000)}`,
+    );
+    expect(reply1.map((s) => s.replyTo)).toEqual([
+      first.message_id,
+      ...Array(reply1.length - 1).fill(undefined),
+    ]);
+    expect(reply1.map((s) => s.footer)).toEqual([
+      ...Array(reply1.length - 1).fill(undefined),
+      footer,
+    ]);
+    expect(reply2).toEqual([
+      expect.objectContaining({ text: '第二次 **粗**', replyTo: second.message_id, footer }),
+    ]);
+  });
+
+  it('单独一个块超限、改发原文，而且它是最后一条：斜体的尾部在它的最后一段', async () => {
+    const huge = 'x'.repeat(40_000);
+    const { bot, sent } = setup({ model: replying(`前面一段 **粗**\n\n${huge}`) });
+
+    const trigger = message({ text: 'nori 讲长一点' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(sent[0]).toMatchObject({
+      kind: 'rich',
+      text: '前面一段 粗',
+      replyTo: trigger.message_id,
+    });
+    expect(sent[0]?.footer).toBeUndefined();
+    const rest = sent.slice(1);
+    expect(rest.every((s) => s.kind === 'plain' && s.replyTo === undefined)).toBe(true);
+    expect(rest.map((s) => s.text).join('')).toBe(huge);
+    expect(rest.map((s) => s.footer)).toEqual([...Array(rest.length - 1).fill(undefined), footer]);
+  });
+
+  it('富文本关着：和以前一样，原样文字满 4096 拆，Markdown 的符号不解析', async () => {
+    const text = `${'a'.repeat(3000)}\n# 标题\n**粗** $x$\n${'b'.repeat(3000)}`;
+    const { bot, sent, calls } = setup({ model: replying(text), rich: false });
+
+    const trigger = message({ text: 'nori 讲讲' });
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(calls.rich).toBe(0);
+    expect(sent.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }))).toEqual([
+      {
+        kind: 'plain',
+        text: `${'a'.repeat(3000)}\n# 标题\n**粗** $x$\n`,
+        replyTo: trigger.message_id,
+      },
+      { kind: 'plain', text: 'b'.repeat(3000), replyTo: undefined },
+    ]);
+    expect(sent[1]?.footer).toBe(footer);
+  });
+
+  it('富文本关着：原文一字不动地发，开头、结尾的空行也留着', async () => {
+    const text = '\n\n# 标题\n\n**粗**\n\n[ref]: https://example.com\n\n';
+    const { bot, sent, calls } = setup({ model: replying(text), rich: false, usage: false });
+
+    await bot.handle(message({ text: 'nori 讲讲' }));
+    await bot.idle();
+
+    expect(calls.rich).toBe(0);
+    expect(sent.map(({ kind, text }) => ({ kind, text }))).toEqual([{ kind: 'plain', text }]);
+  });
+
+  it('回复出错时的固定提示是普通消息，里面的符号不解析', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        throw new Error('模型挂了');
+      },
+    });
+    const { bot, sent, calls } = setup({ model, errorText: '**出错了** `稍后` $x$' });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(calls.rich).toBe(0);
+    expect(sent.map(({ kind, text, entities }) => ({ kind, text, entities }))).toEqual([
+      { kind: 'plain', text: '**出错了** `稍后` $x$', entities: undefined },
+    ]);
+  });
+
+  it('只有链接定义（转不出块、又不是空白）：原文发普通消息', async () => {
+    const { bot, sent, calls } = setup({ model: replying('[ref]: https://example.com') });
+
+    await bot.handle(message({ text: 'nori 在吗' }));
+    await bot.idle();
+
+    expect(calls.rich).toBe(0);
+    expect(sent.map(({ kind, text, footer }) => ({ kind, text, footer }))).toEqual([
+      { kind: 'plain', text: '[ref]: https://example.com', footer },
+    ]);
+  });
+});
+
+describe('收到的富文本消息', () => {
+  /** 一条富文本消息（适配器的类型比文档旧，这里照文档写） */
+  const rich = (...blocks: RichBlock[]): Partial<TelegramRaw> => ({
+    rich_message: { blocks } as unknown as TelegramRaw['rich_message'],
+  });
+  const para = (text: ReceivedRichText): RichBlock => ({ type: 'paragraph', text });
+  const shown = (sent: Sent[]) => sent.map(({ kind, text, replyTo }) => ({ kind, text, replyTo }));
+
+  it.each([
+    ['唤醒词（不分大小写）', [para('大家好'), para('NORI 在吗')]],
+    ['唤醒词在列表里', [{ type: 'list', items: [{ label: '•', blocks: [para('问问 nori')] }] }]],
+    [
+      'text_mention 提到 bot',
+      [
+        para([
+          {
+            type: 'text_mention',
+            text: '洛璃',
+            user: { id: 999, is_bot: true, first_name: '洛璃' },
+          },
+          ' 看看',
+        ]),
+      ],
+    ],
+  ] as Array<[string, RichBlock[]]>)('群里：%s，触发，回复引用这条', async (_, blocks) => {
+    const { bot, sent } = setup({ model: replying('好') });
+
+    const trigger = message(rich(...blocks));
+    await bot.handle(trigger);
+    await bot.idle();
+
+    expect(shown(sent)).toEqual([{ kind: 'rich', text: '好', replyTo: trigger.message_id }]);
+  });
+
+  it('群里：没有唤醒词、没有提到 bot：只记录（转出来的文字），不触发', async () => {
+    const model = replying('好');
+    const { bot, sent, storage } = setup({ model });
+
+    for (const blocks of [
+      [para('普通的话')],
+      [{ type: 'heading', text: '标题', size: 1 }, para({ type: 'bold', text: '粗' })],
+      [
+        para([
+          {
+            type: 'text_mention',
+            text: '小明',
+            user: { id: 7, is_bot: false, first_name: '小明' },
+          },
+          ' 来了',
+        ]),
+      ],
+    ] as RichBlock[][]) {
+      await bot.handle(message(rich(...blocks)));
+    }
+    await bot.idle();
+
+    expect(sent).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(0);
+    expect((await historyOf(storage)).map((m) => m.text)).toEqual([
+      '普通的话',
+      '# 标题\n\n**粗**',
+      '小明 来了',
+    ]);
+  });
+
+  it('转换出错（套了十万层）：记「[不支持的消息]」，日志一行 telegram.rich_unreadable，没有内容；编辑时也一样', async () => {
+    const { bot, entries, storage } = setup({ model: replying('好') });
+    const deep = (word: string) => {
+      let text: unknown = word;
+      for (let i = 0; i < 100_000; i++) text = [text];
+      return para(text as ReceivedRichText);
+    };
+
+    const raw = message(rich(deep('秘密的内容')));
+    await bot.handle(raw);
+    await bot.handle({ ...raw, ...rich(deep('改过的秘密')), edit_date: raw.date + 1 });
+    await bot.idle();
+
+    expect((await historyOf(storage)).map((m) => m.text)).toEqual(['[不支持的消息]']);
+    const logged = entries.filter((e) => e.msg === 'telegram.rich_unreadable');
+    expect(logged.map((e) => e.fields)).toEqual([
+      {
+        conversationId: expect.any(String),
+        messageId: String(raw.message_id),
+        error: { type: 'RangeError' },
+      },
+      {
+        conversationId: expect.any(String),
+        messageId: String(raw.message_id),
+        error: { type: 'RangeError' },
+      },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('秘密');
   });
 });

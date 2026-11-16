@@ -33,8 +33,9 @@ export function createModel({
 
 /**
  * SDK 的用量换成存进历史的 Usage；服务端没报用量时返回 undefined。
- * openai-compatible 的 provider 在服务端没报缓存数（prompt_tokens_details.cached_tokens）时
- * 也填 0；看原始用量区分「没报」和「报了 0」，没报时 cacheRead 为 undefined
+ * openai-compatible 的 provider 在服务端没报缓存数（prompt_tokens_details.cached_tokens）、
+ * 推理数（completion_tokens_details.reasoning_tokens）时也填 0；看原始用量区分「没报」和
+ * 「报了 0」，没报时 cacheRead、reasoning 为 undefined
  */
 export function toUsage(usage: LanguageModelUsage): Usage | undefined {
   if (usage.inputTokens === undefined && usage.outputTokens === undefined) return undefined;
@@ -43,6 +44,7 @@ export function toUsage(usage: LanguageModelUsage): Usage | undefined {
     output: usage.outputTokens,
     total: usage.totalTokens,
     cacheRead: reportsCacheRead(usage.raw) ? usage.inputTokenDetails.cacheReadTokens : undefined,
+    reasoning: reportsReasoning(usage.raw) ? usage.outputTokenDetails.reasoningTokens : undefined,
   };
 }
 
@@ -91,7 +93,7 @@ export type CallTokens = Pick<
 
 /**
  * SDK 的用量换成模型调用表的 token 列；服务端没报用量时返回 undefined。
- * 输入、输出、缓存命中与 toUsage 一致；推理 token 同缓存命中：provider 没报时也填 0，看原始用量区分
+ * 4 列都取 toUsage 的结果，「没报」和「报了 0」的区分与它一致
  */
 export function toCallTokens(usage: LanguageModelUsage): CallTokens | undefined {
   const reported = toUsage(usage);
@@ -100,9 +102,7 @@ export function toCallTokens(usage: LanguageModelUsage): CallTokens | undefined 
     inputTokens: reported.input,
     cacheReadTokens: reported.cacheRead,
     outputTokens: reported.output,
-    reasoningTokens: reportsReasoning(usage.raw)
-      ? usage.outputTokenDetails.reasoningTokens
-      : undefined,
+    reasoningTokens: reported.reasoning,
   };
 }
 

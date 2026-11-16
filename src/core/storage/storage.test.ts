@@ -356,8 +356,13 @@ describe.each([
       startSeq: 1,
       startReason: 'first',
       conversationTitle: '读书会',
+      createdAt: expect.any(String),
     });
-    expect(await untitled.currentSegment()).toEqual({ startSeq: 1, startReason: 'first' });
+    expect(await untitled.currentSegment()).toEqual({
+      startSeq: 1,
+      startReason: 'first',
+      createdAt: expect.any(String),
+    });
   });
 
   it('开始新的一段：当前段是 startSeq 最大的一段，标题取会话标题；同一序号已有一段时不写入、返回 false', async () => {
@@ -373,6 +378,7 @@ describe.each([
       startReason: 'compress',
       conversationTitle: '群',
       priorSummary: '后',
+      createdAt: expect.any(String),
     });
     expect(
       await store.addSegment({ startSeq: 5, startReason: 'compress', priorSummary: '重复' }),
@@ -381,6 +387,131 @@ describe.each([
       await store.addSegment({ startSeq: 12, startReason: 'idle', priorSummary: '再后' }),
     ).toBe(true);
     expect(await store.currentSegment()).toMatchObject({ startSeq: 12, priorSummary: '再后' });
+  });
+
+  it('手动压缩与清空的段：原因与执行人能写能读，currentSegment 与 segments() 都带执行人与时间；没有 id 的执行人只有名字', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({
+        platform: 'telegram',
+        platformConversationId: '-1',
+        title: '群',
+      }),
+    );
+    const startedBy = { ...bob };
+
+    expect(
+      await store.addSegment({
+        startSeq: 3,
+        startReason: 'manual',
+        priorSummary: '手动',
+        startedBy,
+      }),
+    ).toBe(true);
+    // 存进去的是一份副本
+    startedBy.name = '改了';
+    expect(
+      await store.addSegment({
+        startSeq: 6,
+        startReason: 'clear',
+        startedBy: { name: 'cli-user' },
+      }),
+    ).toBe(true);
+
+    const segments = await store.segments();
+    expect(segments).toEqual([
+      { startSeq: 1, startReason: 'first', conversationTitle: '群', createdAt: expect.any(String) },
+      {
+        startSeq: 3,
+        startReason: 'manual',
+        conversationTitle: '群',
+        priorSummary: '手动',
+        startedBy: bob,
+        createdAt: expect.any(String),
+      },
+      {
+        startSeq: 6,
+        startReason: 'clear',
+        conversationTitle: '群',
+        startedBy: { name: 'cli-user' },
+        createdAt: expect.any(String),
+      },
+    ]);
+    expect(segments[0]).not.toHaveProperty('startedBy');
+    expect(segments[2]).not.toHaveProperty('priorSummary');
+    expect(segments[2]!.startedBy).not.toHaveProperty('id');
+    for (const segment of segments) {
+      expect(new Date(segment.createdAt).toISOString()).toBe(segment.createdAt);
+    }
+    expect(await store.currentSegment()).toEqual(segments[2]);
+    expect(
+      await store.addSegment({
+        startSeq: 6,
+        startReason: 'manual',
+        priorSummary: '重复',
+        startedBy: bob,
+      }),
+    ).toBe(false);
+    expect(await store.segments()).toEqual(segments);
+  });
+
+  it('把还没有消息的当前段改成清空的段：段数不变，原因 clear，去掉摘要，记下执行人，时间与标题取改写的时候', async () => {
+    const storage = await open();
+    const id = await storage.createConversation({
+      platform: 'telegram',
+      platformConversationId: '-1',
+      title: '旧名',
+    });
+    const store = await storage.openConversation(id);
+    await store.add(message('user', '一', { author: alice }));
+    await store.add(message('assistant', '二'));
+    await store.addSegment({ startSeq: 3, startReason: 'idle', priorSummary: '摘要' });
+    const idle = (await store.segments())[1]!;
+    await storage.updateTitle(id, '新名');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const before = new Date().toISOString();
+
+    expect(await store.clearSegment({ startSeq: 3, startedBy: bob })).toBe(true);
+
+    const segments = await store.segments();
+    expect(segments).toHaveLength(2);
+    expect(segments[1]).toEqual({
+      startSeq: 3,
+      startReason: 'clear',
+      conversationTitle: '新名',
+      startedBy: bob,
+      createdAt: expect.any(String),
+    });
+    expect(segments[1]).not.toHaveProperty('priorSummary');
+    expect(segments[1]!.createdAt >= before).toBe(true);
+    expect(segments[1]!.createdAt > idle.createdAt).toBe(true);
+    expect(await store.currentSegment()).toEqual(segments[1]);
+    // 消息不动
+    expect((await store.list()).map((m) => m.parts)).toEqual([
+      [{ type: 'text', text: '一' }],
+      [{ type: 'text', text: '二' }],
+    ]);
+  });
+
+  it('改写只在当前段没有消息时允许：当前段有消息、给的不是当前段的起点时不写入，返回 false，段原样', async () => {
+    const storage = await open();
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    await store.add(message('user', '一'));
+    // 第一段有消息
+    expect(await store.clearSegment({ startSeq: 1, startedBy: bob })).toBe(false);
+    await store.addSegment({ startSeq: 2, startReason: 'idle', priorSummary: '摘要' });
+    const before = await store.segments();
+
+    // 不是当前段的起点：之前的一段、没有的一段
+    expect(await store.clearSegment({ startSeq: 1, startedBy: bob })).toBe(false);
+    expect(await store.clearSegment({ startSeq: 5, startedBy: bob })).toBe(false);
+    // 当前段写进了一条消息
+    await store.add(message('user', '二'));
+    expect(await store.clearSegment({ startSeq: 2, startedBy: bob })).toBe(false);
+
+    expect(await store.segments()).toEqual(before);
   });
 
   it('按平台与平台会话 id 找会话；列出某平台的会话；改标题只影响之后开始的段', async () => {
@@ -718,13 +849,8 @@ describe.each([
       for (const segment of segments) {
         expect(segment.createdAt.slice(0, 4)).toBe(before.slice(0, 4));
       }
-      // currentSegment 照旧不带时间
-      expect(await store.currentSegment()).toEqual({
-        startSeq: 10,
-        startReason: 'compress',
-        conversationTitle: '读书会',
-        priorSummary: '后来',
-      });
+      // currentSegment 与 segments() 的最后一段相同，也带时间（清空的段的提示要用）
+      expect(await store.currentSegment()).toEqual(segments[2]);
     });
 
     it('overviews：全部会话，不分平台，按建立先后；最后一条消息的要点、条数、段数', async () => {
@@ -1294,7 +1420,7 @@ describe('SQLite 存储', () => {
     expect(await store.reserve()).toBe(2);
   });
 
-  it('新库：WAL 模式、user_version 为 5、六张表与索引按 ADR-0005 建好', async () => {
+  it('新库：WAL 模式、user_version 为 6、六张表与索引按 ADR-0005 建好', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1303,7 +1429,7 @@ describe('SQLite 存储', () => {
     const db = new DatabaseSync(path);
     try {
       expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
       const objects = db
         .prepare(
           "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
@@ -1359,6 +1485,8 @@ describe('SQLite 存储', () => {
         'conversation_title',
         'prior_summary',
         'created_at',
+        'started_by',
+        'started_by_id',
       ]);
       expect(columns('model_calls')).toEqual(modelCallColumns);
       expect(columns('tool_calls')).toEqual(toolCallColumns);
@@ -1394,6 +1522,7 @@ describe('SQLite 存储', () => {
       startSeq: 1,
       startReason: 'first',
       conversationTitle: '老群',
+      createdAt: (await storage.overview(id))!.createdAt,
     });
   });
 
@@ -1445,12 +1574,89 @@ describe('SQLite 存储', () => {
     }
   });
 
-  it('user_version 大于 5 时打开报错', async () => {
+  it('段的行：执行人记在 started_by、started_by_id 两列，没有 id 时为 NULL；另一个连接往当前段写了消息之后，改写不成', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    const other = openSqliteStorage(path);
+    cleanups.push(async () => {
+      storage.close();
+      other.close();
+    });
+    const id = await storage.createConversation({ platform: 'cli' });
+    const store = await storage.openConversation(id);
+    await store.add(message('user', '一'));
+    await store.addSegment({
+      startSeq: 2,
+      startReason: 'manual',
+      priorSummary: '摘要',
+      startedBy: bob,
+    });
+
+    await (await other.openConversation(id)).add(message('user', '另一个连接写的'));
+    expect(await store.clearSegment({ startSeq: 2, startedBy: { name: 'cli-user' } })).toBe(false);
+    await store.addSegment({ startSeq: 3, startReason: 'clear', startedBy: { name: 'cli-user' } });
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(
+        db
+          .prepare(
+            `SELECT start_seq, start_reason, prior_summary, started_by, started_by_id
+             FROM segments ORDER BY start_seq`,
+          )
+          .all()
+          .map((row) => ({ ...row })),
+      ).toEqual([
+        {
+          start_seq: 1,
+          start_reason: 'first',
+          prior_summary: null,
+          started_by: null,
+          started_by_id: null,
+        },
+        {
+          start_seq: 2,
+          start_reason: 'manual',
+          prior_summary: '摘要',
+          started_by: 'Bob',
+          started_by_id: 'u-bob',
+        },
+        {
+          start_seq: 3,
+          start_reason: 'clear',
+          prior_summary: null,
+          started_by: 'cli-user',
+          started_by_id: null,
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('模型调用的摘要原因 manual 照写照读', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const storage = openSqliteStorage(join(dir, 'luoli.db'));
+    cleanups.push(async () => storage.close());
+    const store = await storage.openConversation(
+      await storage.createConversation({ platform: 'cli' }),
+    );
+    const summary = call({ purpose: 'summary', summaryReason: 'manual', replyId: undefined });
+
+    await store.recordCall(summary);
+
+    expect(await store.calls()).toEqual([summary]);
+  });
+
+  it('user_version 大于 6 时打开报错', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
     const db = new DatabaseSync(path);
-    db.exec('PRAGMA user_version = 6');
+    db.exec('PRAGMA user_version = 7');
     db.close();
 
     expect(() => openSqliteStorage(path)).toThrow('数据库版本比程序新');
@@ -1764,7 +1970,107 @@ describe('SQLite 存储', () => {
     expect((await storage.createTask(newTask(id))).id).toBe(3);
   });
 
-  it('版本 4 的库：打开时升到版本 5，只加任务表，已有的数据不变；任务表能用，重新打开后能读回', async () => {
+  it('版本 5 的库：打开时升到版本 6，段多了执行人两列，原有的段不变、执行人为空，其余数据不变；之后能写手动压缩、清空的段', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    // 第七阶段到组件库第 4 步的程序建的库：六张表，user_version 为 5
+    const old = new DatabaseSync(path);
+    old.exec('PRAGMA journal_mode = WAL');
+    old.exec(version1Schema);
+    old.exec(version2Schema);
+    old.exec(version3Schema);
+    old.exec(version4Schema);
+    old.exec(version5Schema);
+    old.exec('PRAGMA user_version = 5');
+    old.exec(`
+      INSERT INTO conversations (id, platform, platform_conversation_id, title, next_seq, created_at)
+        VALUES ('c1', 'telegram', '-100', '读书会', 3, '2026-10-29T00:00:00.000Z');
+      INSERT INTO segments
+          (id, conversation_id, start_seq, start_reason, conversation_title, prior_summary, created_at)
+        VALUES ('s1', 'c1', 1, 'first', '读书会', NULL, '2026-10-29T00:00:00.000Z'),
+               ('s2', 'c1', 2, 'idle', '读书会', '昨天的摘要', '2026-10-30T00:00:00.000Z');
+      INSERT INTO model_calls
+          (conversation_id, purpose, summary_reason, model, started_at, duration_ms, attempts,
+           outcome, steps, tool_calls)
+        VALUES ('c1', 'summary', 'idle', 'test-model', '2026-10-30T00:00:00.000Z', 900, 1,
+                'completed', 1, 0);
+      INSERT INTO tasks
+          (conversation_id, action, schedule, source_author_name, source_message_id, status,
+           next_due_at, created_at)
+        VALUES ('c1', '提醒交周报', '{"kind":"once","at":"2026-11-10T01:00:00.000Z"}', 'Alice',
+                'm-src', 'active', '2026-11-10T01:00:00.000Z', '2026-10-29T00:00:00.000Z');
+    `);
+    const saved = message('user', '早', { author: alice, platformMessageId: '7' });
+    old
+      .prepare(
+        `INSERT INTO messages
+           (id, conversation_id, seq, role, author_id, platform_message_id, created_at, ui_message)
+         VALUES (?, 'c1', 1, 'user', 'u-alice', '7', ?, ?)`,
+      )
+      .run(saved.id, saved.metadata!.createdAt, JSON.stringify(saved));
+    const tables = ['conversations', 'messages', 'segments', 'model_calls', 'tool_calls', 'tasks'];
+    const dump = (db: DatabaseSync) =>
+      tables.map((table) =>
+        db
+          .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
+          .all()
+          .map((row) => ({ ...row })),
+      );
+    const before = dump(old);
+    old.close();
+
+    const storage = openSqliteStorage(path);
+    const store = await storage.openConversation('c1');
+    expect(await store.segments()).toEqual([
+      {
+        startSeq: 1,
+        startReason: 'first',
+        conversationTitle: '读书会',
+        createdAt: '2026-10-29T00:00:00.000Z',
+      },
+      {
+        startSeq: 2,
+        startReason: 'idle',
+        conversationTitle: '读书会',
+        priorSummary: '昨天的摘要',
+        createdAt: '2026-10-30T00:00:00.000Z',
+      },
+    ]);
+    expect((await store.segments()).some((segment) => 'startedBy' in segment)).toBe(false);
+    expect(await store.list()).toEqual([saved]);
+    storage.close();
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
+      expect(dump(db)).toEqual(withSegmentAuthors(before, tables.indexOf('segments')));
+    } finally {
+      db.close();
+    }
+    // 只读打开（导出脚本用）认得版本 6 的库
+    expect(readConversations(path)).toEqual([
+      { id: 'c1', platform: 'telegram', platformConversationId: '-100', title: '读书会' },
+    ]);
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    const again = await reopened.openConversation('c1');
+    await again.addSegment({
+      startSeq: 3,
+      startReason: 'manual',
+      priorSummary: '手动',
+      startedBy: bob,
+    });
+    expect(await again.clearSegment({ startSeq: 3, startedBy: { name: 'cli-user' } })).toBe(true);
+    expect(await again.currentSegment()).toMatchObject({
+      startSeq: 3,
+      startReason: 'clear',
+      startedBy: { name: 'cli-user' },
+    });
+  });
+
+  it('版本 4 的库：打开时升到版本 6，加任务表与段的执行人两列，已有的数据不变；任务表能用，重新打开后能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1823,8 +2129,8 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
-      expect(dump(db)).toEqual(before);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
+      expect(dump(db)).toEqual(withSegmentAuthors(before, tables.indexOf('segments')));
       expect(
         db
           .prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'tasks' ORDER BY name")
@@ -1834,7 +2140,7 @@ describe('SQLite 存储', () => {
     } finally {
       db.close();
     }
-    // 只读打开（导出脚本用）认得版本 5 的库
+    // 只读打开（导出脚本用）认得版本 6 的库
     expect(readConversations(path)).toEqual([
       { id: 'c1', platform: 'telegram', platformConversationId: '-100', title: '读书会' },
     ]);
@@ -1845,7 +2151,7 @@ describe('SQLite 存储', () => {
     expect(await reopened.dueTasks('2026-11-10T01:00:00.000Z')).toStrictEqual([created]);
   });
 
-  it('版本 3 的库：打开时升到版本 5，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {
+  it('版本 3 的库：打开时升到版本 6，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1873,7 +2179,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
       expect(
         db
           .prepare('SELECT tool_call_id FROM tool_calls ORDER BY id')
@@ -1891,7 +2197,7 @@ describe('SQLite 存储', () => {
     expect(rows[0]!.toolCallId).toBeUndefined();
   });
 
-  it('版本 2 的库：打开时升到版本 5，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
+  it('版本 2 的库：打开时升到版本 6，旧的模型调用行两列为空，新写入的有值；能写工具调用', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -1925,7 +2231,7 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
       const rows = db
         .prepare('SELECT * FROM model_calls ORDER BY id')
         .all()
@@ -1944,7 +2250,7 @@ describe('SQLite 存储', () => {
     expect(await (await reopened.openConversation('c1')).toolCalls()).toEqual([toolCall()]);
   });
 
-  it('版本 1 的库：打开时升到版本 5，原有的表与数据不变，能写模型调用；重新打开后能读回', async () => {
+  it('版本 1 的库：打开时升到版本 6，原有的表与数据不变（段多了执行人两列，都为空），能写模型调用；重新打开后能读回', async () => {
     const dir = await tempDir();
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const path = join(dir, 'luoli.db');
@@ -2001,8 +2307,8 @@ describe('SQLite 存储', () => {
 
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(5);
-      expect(dump(db)).toEqual(before);
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(6);
+      expect(dump(db)).toEqual(withSegmentAuthors(before, 2));
       expect(
         db
           .prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'model_calls' ORDER BY name")
@@ -2211,6 +2517,41 @@ describe('SQLite 存储', () => {
     }
   });
 });
+
+/**
+ * 升到版本 6 之后，dump 出来的各表里，段那张表（第 index 张）的每一行多了执行人两列，都为空；
+ * 其余照旧
+ */
+function withSegmentAuthors(
+  tables: Array<Array<Record<string, unknown>>>,
+  index: number,
+): Array<Array<Record<string, unknown>>> {
+  return tables.map((rows, i) =>
+    i === index ? rows.map((row) => ({ ...row, started_by: null, started_by_id: null })) : rows,
+  );
+}
+
+// 第七阶段（表结构版本 5）加的任务表，接在 version4Schema 之后
+const version5Schema = `
+CREATE TABLE tasks (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id            TEXT NOT NULL REFERENCES conversations(id),
+  action                     TEXT NOT NULL,
+  schedule                   TEXT NOT NULL,
+  source_author_id           TEXT,
+  source_author_name         TEXT NOT NULL,
+  source_message_id          TEXT NOT NULL,
+  source_platform_message_id TEXT,
+  status                     TEXT NOT NULL,
+  next_due_at                TEXT,
+  last_due_at                TEXT,
+  due_count                  INTEGER NOT NULL DEFAULT 0,
+  created_at                 TEXT NOT NULL,
+  ended_at                   TEXT
+);
+CREATE INDEX tasks_due          ON tasks(status, next_due_at);
+CREATE INDEX tasks_conversation ON tasks(conversation_id, status);
+`;
 
 // 第六阶段第 7 步（表结构版本 4）加的工具调用 id，接在 version3Schema 之后
 const version4Schema = `

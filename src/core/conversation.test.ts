@@ -1118,12 +1118,15 @@ describe('中止', () => {
 });
 
 describe('用量', () => {
-  /** 模型报的用量：输入 input（其中缓存命中 cacheRead）、输出 output */
+  /** 模型报的用量：输入 input（其中缓存命中 cacheRead）、输出 output（其中推理 reasoning） */
   function usageOf(
     input: number,
     output: number,
-    cacheRead?: number,
-    raw?: FinishPart['usage']['raw'],
+    {
+      cacheRead,
+      reasoning,
+      raw,
+    }: { cacheRead?: number; reasoning?: number; raw?: FinishPart['usage']['raw'] } = {},
   ): FinishPart['usage'] {
     return {
       inputTokens: {
@@ -1132,7 +1135,7 @@ describe('用量', () => {
         cacheRead,
         cacheWrite: undefined,
       },
-      outputTokens: { total: output, text: output, reasoning: undefined },
+      outputTokens: { total: output, text: output - (reasoning ?? 0), reasoning },
       ...(raw ? { raw } : {}),
     };
   }
@@ -1145,10 +1148,12 @@ describe('用量', () => {
     });
   }
 
-  it('正常完成：finish 段与写入历史的助手消息都带用量（含缓存命中），createdAt 仍在', async () => {
-    const { chunks, messages } = await replyOnce(modelReporting(usageOf(120, 30, 100)));
+  it('正常完成：finish 段与写入历史的助手消息都带用量（含缓存命中、推理 token），createdAt 仍在', async () => {
+    const { chunks, messages } = await replyOnce(
+      modelReporting(usageOf(120, 30, { cacheRead: 100, reasoning: 12 })),
+    );
 
-    const expected = { input: 120, output: 30, total: 150, cacheRead: 100 };
+    const expected = { input: 120, output: 30, total: 150, cacheRead: 100, reasoning: 12 };
     const finishChunk = chunks.find((c) => c.type === 'finish');
     expect(finishChunk?.type === 'finish' && finishChunk.messageMetadata?.usage).toEqual(expected);
 
@@ -1161,22 +1166,30 @@ describe('用量', () => {
     );
   });
 
-  it('模型不报缓存数：cacheRead 为 undefined', async () => {
-    const { messages } = await replyOnce(modelReporting(usageOf(10, 2)));
+  it('模型不报缓存数、推理数：cacheRead、reasoning 为 undefined', async () => {
+    const { chunks, messages } = await replyOnce(modelReporting(usageOf(10, 2)));
 
-    expect(messages[1]?.metadata?.usage).toEqual({
+    const expected = {
       input: 10,
       output: 2,
       total: 12,
       cacheRead: undefined,
-    });
+      reasoning: undefined,
+    };
+    const finishChunk = chunks.find((c) => c.type === 'finish');
+    expect(finishChunk?.type === 'finish' && finishChunk.messageMetadata?.usage).toEqual(expected);
+    expect(messages[1]?.metadata?.usage).toEqual(expected);
+    expect(messages[1]?.metadata?.usage?.reasoning).toBeUndefined();
   });
 
   it('openai 格式的原始用量没报 cached_tokens 时 cacheRead 为 undefined，报了 0 时为 0', async () => {
     // openai-compatible 的 provider 在没报时也把 cacheRead 填成 0，只能看原始用量区分
     const notReported = { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 };
     const reportedZero = { ...notReported, prompt_tokens_details: { cached_tokens: 0 } };
-    const model = modelReporting(usageOf(10, 2, 0, notReported), usageOf(10, 2, 0, reportedZero));
+    const model = modelReporting(
+      usageOf(10, 2, { cacheRead: 0, raw: notReported }),
+      usageOf(10, 2, { cacheRead: 0, raw: reportedZero }),
+    );
     const conversation = createConversation({ model, prompts });
 
     await conversation.append({ author: alice, text: '一' });
@@ -1187,6 +1200,34 @@ describe('用量', () => {
     const [, first, , second] = await conversation.messages();
     expect(first?.metadata?.usage?.cacheRead).toBeUndefined();
     expect(second?.metadata?.usage?.cacheRead).toBe(0);
+  });
+
+  it('openai 格式的原始用量没报 reasoning_tokens 时 reasoning 为 undefined，报了 0 时为 0', async () => {
+    // 同缓存数：provider 在没报 completion_tokens_details.reasoning_tokens 时也把推理数填成 0
+    const notReported = { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 };
+    const reportedZero = { ...notReported, completion_tokens_details: { reasoning_tokens: 0 } };
+    const model = modelReporting(
+      usageOf(10, 2, { reasoning: 0, raw: notReported }),
+      usageOf(10, 2, { reasoning: 0, raw: reportedZero }),
+    );
+    const conversation = createConversation({ model, prompts });
+
+    await conversation.append({ author: alice, text: '一' });
+    const firstChunks = await readAll(conversation.reply());
+    await conversation.append({ author: alice, text: '二' });
+    await readAll(conversation.reply());
+
+    const firstFinish = firstChunks.find((c) => c.type === 'finish');
+    expect(firstFinish?.type === 'finish' && firstFinish.messageMetadata?.usage).toMatchObject({
+      input: 10,
+      output: 2,
+    });
+    expect(
+      firstFinish?.type === 'finish' && firstFinish.messageMetadata?.usage?.reasoning,
+    ).toBeUndefined();
+    const [, first, , second] = await conversation.messages();
+    expect(first?.metadata?.usage?.reasoning).toBeUndefined();
+    expect(second?.metadata?.usage?.reasoning).toBe(0);
   });
 
   it('模型没报用量：metadata 不带 usage', async () => {
@@ -1243,7 +1284,7 @@ describe('用量', () => {
           ? { stream: simulateReadableStream({ chunks: streamError('半截').parts }) }
           : {
               stream: simulateReadableStream({
-                chunks: [...textParts('完整'), finish('stop', usageOf(50, 5, 40))],
+                chunks: [...textParts('完整'), finish('stop', usageOf(50, 5, { cacheRead: 40 }))],
               }),
             },
     });
@@ -1258,11 +1299,13 @@ describe('用量', () => {
     });
   });
 
-  it('日志 reply.end 的 usage 与 metadata 相同，含 cacheRead', async () => {
-    const { entries, messages } = await replyOnce(modelReporting(usageOf(120, 30, 100)));
+  it('日志 reply.end 的 usage 与 metadata 相同，含 cacheRead、reasoning', async () => {
+    const { entries, messages } = await replyOnce(
+      modelReporting(usageOf(120, 30, { cacheRead: 100, reasoning: 12 })),
+    );
 
     const logged = logsOf(entries, 'reply.end')[0]?.fields.usage;
-    expect(logged).toEqual({ input: 120, output: 30, total: 150, cacheRead: 100 });
+    expect(logged).toEqual({ input: 120, output: 30, total: 150, cacheRead: 100, reasoning: 12 });
     expect(logged).toEqual(messages[1]?.metadata?.usage);
   });
 });

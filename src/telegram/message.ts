@@ -1,6 +1,9 @@
 import type { TelegramChat, TelegramMessage, TelegramUser } from '@chat-adapter/telegram';
 
-/** Telegram 原始消息。改群名的服务消息带 new_chat_title（适配器的类型里没有这一项） */
+/**
+ * Telegram 原始消息。改群名的服务消息带 new_chat_title（适配器的类型里没有这一项）。
+ * rich_message 的类型是适配器的，比文档旧；读它的 rich-received.ts 不靠这个类型，每一处都先看
+ */
 export type TelegramRaw = TelegramMessage & { new_chat_title?: string };
 
 /** 显示名：名 + 空格 + 姓，没有姓时只有名 */

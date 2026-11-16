@@ -193,6 +193,9 @@ importers:
       '@joplin/turndown-plugin-gfm':
         specifier: ^1.0.68
         version: 1.0.68
+      '@luoli/markdown':
+        specifier: workspace:*
+        version: link:packages/markdown
       '@luoli/ui':
         specifier: workspace:*
         version: link:packages/ui
@@ -276,11 +279,20 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(@types/node@22.20.5)(vite@8.3.5(@types/node@22.20.5)(esbuild@0.28.2)(tsx@4.23.15))
 
+  packages/markdown:
+    dependencies:
+      marked:
+        specifier: ^18.1.3
+        version: 18.1.3
+
   packages/ui:
     dependencies:
       '@base-ui/react':
         specifier: 1.9.0
         version: 1.9.0(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      '@luoli/markdown':
+        specifier: workspace:*
+        version: link:../markdown
       '@tanstack/react-virtual':
         specifier: ^3.14.26
         version: 3.14.26(react-dom@19.3.1(react@19.3.1))(react@19.3.1)

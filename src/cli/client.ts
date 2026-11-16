@@ -2,11 +2,14 @@ import { Agent, fetch as undiciFetch } from 'undici';
 import type {
   ChatChunk,
   ChatRequest,
+  CommandEvent,
+  CommandKind,
+  CommandRequest,
   ConversationRow,
   ConversationsResponse,
   ErrorResponse,
 } from '../server/types.js';
-import { readChatStream } from './chat-stream.js';
+import { readChatStream, readEventStream } from './chat-stream.js';
 
 /** 发 HTTP 请求（测试里换成直接调服务的 app） */
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -22,6 +25,11 @@ export class ServiceUnreachable extends Error {
 /** 发出去了：回复的流（会话 id 取自响应头），或者服务拒绝的原因 */
 export type Sent =
   | { ok: true; conversationId?: string; chunks: AsyncGenerator<ChatChunk, void, undefined> }
+  | { ok: false; status: number; error: string };
+
+/** 指令发出去了：事件的流，或者服务拒绝的原因 */
+export type CommandSent =
+  | { ok: true; events: AsyncGenerator<CommandEvent, void, undefined> }
   | { ok: false; status: number; error: string };
 
 /** 健康检查、读会话列表最多等这么久 */
@@ -113,18 +121,36 @@ export function createClient({ port, fetch }: { port: number; fetch?: Fetch }) {
         body: JSON.stringify(body),
         signal,
       });
-      if (!response.ok || !response.body) {
-        const error = await response
-          .json()
-          .then((json) => (json as ErrorResponse).error)
-          .catch(() => `HTTP ${response.status}`);
-        return { ok: false, status: response.status, error };
-      }
+      if (!response.ok || !response.body) return refused(response);
       return {
         ok: true,
         conversationId: response.headers.get('x-conversation-id') ?? undefined,
         chunks: readChatStream(response.body),
       };
+    },
+
+    /**
+     * 执行一条指令：POST /api/conversations/:id/compact 或 /clear，执行人是 author。signal 中止时
+     * 断开请求（服务把断开当作取消：等着的不执行，进行中的压缩中止）。连不上抛 ServiceUnreachable
+     */
+    async command(
+      conversationId: string,
+      kind: CommandKind,
+      author: string,
+      signal?: AbortSignal,
+    ): Promise<CommandSent> {
+      const body: CommandRequest = { author };
+      const response = await request(
+        `/api/conversations/${encodeURIComponent(conversationId)}/${kind}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+      if (!response.ok || !response.body) return refused(response);
+      return { ok: true, events: readEventStream<CommandEvent>(response.body) };
     },
 
     /** 中止这个会话的回复：POST /api/chat/:id/abort（JSON {}）。出错不抛 */
@@ -159,6 +185,15 @@ export function createClient({ port, fetch }: { port: number; fetch?: Fetch }) {
 }
 
 export type Client = ReturnType<typeof createClient>;
+
+/** 服务拒绝了请求：状态码与原因（ErrorResponse 的 error；读不出时写状态码） */
+async function refused(response: Response): Promise<{ ok: false; status: number; error: string }> {
+  const error = await response
+    .json()
+    .then((json) => (json as ErrorResponse).error)
+    .catch(() => `HTTP ${response.status}`);
+  return { ok: false, status: response.status, error };
+}
 
 /** 连不上时的提示（用户定的原话），地址取实际要连的那个 */
 export function unreachableText(address: string): string {

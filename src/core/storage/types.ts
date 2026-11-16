@@ -3,15 +3,31 @@ import type { Author, ConversationEvent, Message, Trigger } from '../message.js'
 /** 序号区间：from 起（含）到 before 之前（不含），不给的一端不限 */
 export type SeqRange = { from?: number; before?: number };
 
+/**
+ * 段的开始原因。first：会话开始；idle：空闲太久；compress：上下文太长，自动压缩；
+ * manual：有人手动压缩；clear：有人清空了上下文（这一段没有摘要）
+ */
+export type SegmentReason = 'first' | 'idle' | 'compress' | 'manual' | 'clear';
+
 /** 会话中连续的一段：从 startSeq 起，到下一段的 startSeq 之前（ADR-0004、ADR-0005） */
 export type Segment = {
   startSeq: number;
-  startReason: 'first' | 'idle' | 'compress';
+  startReason: SegmentReason;
   /** 段开始时会话标题的快照；一段之内不变 */
   conversationTitle?: string;
-  /** 本段开始之前全部内容的滚动摘要；第一段没有 */
+  /** 本段开始之前全部内容的滚动摘要；第一段、清空的段没有 */
   priorSummary?: string;
+  /** 谁开始的这一段：手动压缩、清空的段才有 */
+  startedBy?: Author;
 };
+
+/**
+ * 新开的一段（addSegment）。空闲切段、压缩都带摘要；手动压缩、清空还记下执行人，清空的段没有摘要
+ */
+export type NewSegment =
+  | { startSeq: number; startReason: 'idle' | 'compress'; priorSummary: string }
+  | { startSeq: number; startReason: 'manual'; priorSummary: string; startedBy: Author }
+  | { startSeq: number; startReason: 'clear'; startedBy: Author };
 
 /**
  * 一次模型调用（一次回复或一次摘要，期间的重试都合在一起）的结果，对应 model_calls 的一行
@@ -19,8 +35,8 @@ export type Segment = {
  */
 export type ModelCall = {
   purpose: 'reply' | 'summary';
-  /** 摘要才有 */
-  summaryReason?: 'idle' | 'compress';
+  /** 摘要才有。manual：有人手动压缩 */
+  summaryReason?: 'idle' | 'compress' | 'manual';
   /** 回复才有：与写入历史的助手消息 id、日志里的 replyId 相同 */
   replyId?: string;
   /** 模型 id */
@@ -183,21 +199,23 @@ export type ConversationStore = {
   /** 预留一个序号。之后写入的消息排在它后面；预留了没写入时序号空着 */
   reserve(): Promise<number>;
   /**
-   * 当前段：startSeq 最大的一段。会话还没有段（第 2 步建的库）时，
-   * 视为从序号 1 开始、标题取会话标题、没有摘要的第一段
+   * 当前段（startSeq 最大的一段），连同它写入的时间。会话还没有段（第 2 步建的库）时，
+   * 视为从序号 1 开始、标题取会话标题、没有摘要的第一段，时间取会话的建立时间
    */
-  currentSegment(): Promise<Segment>;
+  currentSegment(): Promise<StoredSegment>;
   /** 全部段，按开始的序号升序。会话还没有段时同 currentSegment，视为一段 */
   segments(): Promise<StoredSegment[]>;
   /**
    * 开始新的一段；标题取会话此刻的标题。
    * 这个序号已经有一段时（如另一个进程刚切过）不写入，返回 false
    */
-  addSegment(segment: {
-    startSeq: number;
-    startReason: 'idle' | 'compress';
-    priorSummary: string;
-  }): Promise<boolean>;
+  addSegment(segment: NewSegment): Promise<boolean>;
+  /**
+   * 把还没有消息的当前段改成清空的段：原因改成 clear，去掉摘要，记下执行人，时间改成现在，
+   * 标题取会话此刻的标题（与在这个序号新开一段清空的段相同）；段数不变。一次原子的写入。
+   * startSeq 不是当前段的起点（期间切过段）、或这一段里已经有消息时不写入，返回 false
+   */
+  clearSegment(segment: { startSeq: number; startedBy: Author }): Promise<boolean>;
   /** 记一次模型调用，只追加 */
   recordCall(call: ModelCall): Promise<void>;
   /** 本会话记下的模型调用，按写入先后 */

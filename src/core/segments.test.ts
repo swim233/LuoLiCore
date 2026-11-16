@@ -244,7 +244,11 @@ const headingsOf = (system: string | undefined) =>
 describe('请求的组成', () => {
   it('新会话：当前段是 first 段；没有标题、没有摘要时 system 只有人设与格式说明', async () => {
     const { model, store, round } = setup({ turns: ['好'] });
-    expect(await store.currentSegment()).toEqual({ startSeq: 1, startReason: 'first' });
+    expect(await store.currentSegment()).toEqual({
+      startSeq: 1,
+      startReason: 'first',
+      createdAt: start,
+    });
 
     await round('你好');
 
@@ -290,6 +294,7 @@ describe('空闲切段', () => {
       startReason: 'idle',
       conversationTitle: '读书会',
       priorSummary: 'Alice 打了招呼。',
+      createdAt: '2026-10-30T06:03:00.000Z',
     });
     expect(logsOf(entries, 'summary.end')[0]?.fields).toMatchObject({
       conversationId: 'c1',
@@ -669,6 +674,7 @@ describe('压缩', () => {
         startSeq,
         startReason: 'compress',
         priorSummary: '压缩后的摘要',
+        createdAt: '2026-10-30T06:08:00.000Z',
       });
       expect(logsOf(entries, 'summary.end')[0]?.fields).toMatchObject({
         modelId: model.modelId,

@@ -1,7 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '@chat-adapter/telegram';
+import { richParts, richRejection } from './fake-rich.js';
+import type { MessageEntity } from './footer.js';
 import type { TelegramRaw } from './message.js';
+import type { InputRichMessage } from './rich.js';
+
+export { richParts } from './fake-rich.js';
 
 /** 测试用的本地 Bot API：收到的请求都记下来，更新由测试推送 */
 export type FakeTelegram = Awaited<ReturnType<typeof startFakeTelegram>>;
@@ -15,14 +20,34 @@ export const fakeBot: TelegramUser = {
   username: 'nori_test_bot',
 };
 
-/** 群里看得到的一条 bot 发的消息：在哪个聊天、文字、引用了哪条（没引用时没有） */
-export type Delivered = { chatId: string; messageId: number; text: string; replyTo?: number };
+/**
+ * 群里看得到的一条 bot 发的消息：哪一种（plain 是 sendMessage 发的普通消息，rich 是 sendRichMessage
+ * 发的富文本消息）、在哪个聊天、正文、尾部（有时）、引用了哪条（没引用时没有）。正文与尾部怎么分见
+ * richParts（fake-rich.ts）、plainParts。rich 是收到的 rich_message 原样，entities 是普通消息收到的
+ * 格式标记原样
+ */
+export type Delivered = {
+  kind: 'plain' | 'rich';
+  chatId: string;
+  messageId: number;
+  text: string;
+  footer?: string;
+  replyTo?: number;
+  rich?: InputRichMessage;
+  entities?: MessageEntity[];
+};
+
+/** 让发送失败：状态码与 Telegram 的说明文字 */
+export type SendFailure = { status: number; description: string };
 
 /**
  * 只实现前端用到的方法：getMe、deleteWebhook、getUpdates（长轮询）、
- * sendMessage、sendChatAction、getFile，以及文件下载（/file/bot<token>/<路径>）。其他返回 404。
- * sendMessage 的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
- * 带 allow_sending_without_reply 就不带引用发出，否则 400
+ * sendMessage、sendRichMessage、sendChatAction、getFile、setMyCommands，以及文件下载
+ * （/file/bot<token>/<路径>）。其他返回 404（真的 Bot API 对不认识的方法也是 404）。
+ * 两种发送的引用照真的 Bot API：被引用的消息不在这个聊天里（没发过、被删了）时，
+ * 带 allow_sending_without_reply 就不带引用发出，否则 400。
+ * 富文本消息照真的接口收（认哪些块、守哪些上限，见 fake-rich.ts）；普通消息的 entities 只认斜体，
+ * 超出文字的范围也不认。不认的回 400，和真的 Bot API 拒收一样
  */
 export async function startFakeTelegram() {
   const updates: TelegramUpdate[] = [];
@@ -32,10 +57,17 @@ export async function startFakeTelegram() {
   const waiting = new Set<() => void>();
   let nextUpdateId = 1;
   let nextMessageId = 5000;
-  // sendMessage 依次按这里的状态码失败；空了就成功
-  const sendFailures: number[] = [];
+  // sendMessage、sendRichMessage 依次按这里失败；空了就成功
+  const sendFailures: SendFailure[] = [];
+  const richFailures: SendFailure[] = [];
+  // 为 false 时不认识 sendRichMessage（像旧版的服务端），和别的不认识的方法一样回 404
+  let richSupported = true;
   // 为 true 时 getUpdates 一律返回 502（模拟连不上 Telegram）
   let pollsFailing = false;
+  // setMyCommands 以这个状态码失败；没有时成功
+  let setCommandsFailure: number | undefined;
+  // 有时 setMyCommands 等它放行才回应
+  let setCommandsHold: Promise<void> | undefined;
   // 可下载的文件：file_id → 内容；在 failingFiles 里的下载时返回 500
   const files = new Map<string, Uint8Array>();
   const failingFiles = new Set<string>();
@@ -72,6 +104,16 @@ export async function startFakeTelegram() {
       case 'deleteWebhook':
       case 'sendChatAction':
         return ok(response, true);
+      case 'setMyCommands':
+        await setCommandsHold;
+        if (setCommandsFailure) {
+          return reply(response, setCommandsFailure, {
+            ok: false,
+            error_code: setCommandsFailure,
+            description: setCommandsFailure === 401 ? 'Unauthorized' : 'Internal Server Error',
+          });
+        }
+        return ok(response, true);
       case 'getUpdates':
         polls.push(body);
         if (pollsFailing) {
@@ -89,48 +131,73 @@ export async function startFakeTelegram() {
         }
         return ok(response, { file_id: fileId, file_path: `files/${fileId}` });
       }
-      case 'sendMessage': {
-        const failure = sendFailures.shift();
-        if (failure) {
-          return reply(response, failure, {
-            ok: false,
-            error_code: failure,
-            description: 'Internal Server Error',
-          });
-        }
-        const chatId = String(body.chat_id);
-        const quoted = body.reply_parameters as
-          { message_id: number; allow_sending_without_reply?: boolean } | undefined;
-        const replyTo = quoted && exists(chatId, quoted.message_id) ? quoted.message_id : undefined;
-        if (quoted && replyTo === undefined && !quoted.allow_sending_without_reply) {
-          return reply(response, 400, {
-            ok: false,
-            error_code: 400,
-            description: 'Bad Request: message to be replied not found',
-          });
-        }
-        const sent: TelegramMessage = {
-          message_id: nextMessageId++,
-          chat: {
-            id: Number(body.chat_id),
-            type: Number(body.chat_id) < 0 ? 'supergroup' : 'private',
-          },
-          date: Math.floor(Date.now() / 1000),
-          from: fakeBot,
-          text: String(body.text),
-        };
-        remember(chatId, sent.message_id);
-        delivered.push({
-          chatId,
-          messageId: sent.message_id,
-          text: sent.text!,
-          ...(replyTo === undefined ? {} : { replyTo }),
-        });
-        return ok(response, sent);
-      }
+      case 'sendMessage':
+        return send(response, 'plain', body);
+      case 'sendRichMessage':
+        if (!richSupported) return notFound(response);
+        return send(response, 'rich', body);
       default:
-        return reply(response, 404, { ok: false, error_code: 404, description: 'Not Found' });
+        return notFound(response);
     }
+  }
+
+  /** sendMessage、sendRichMessage：先看有没有安排好的失败，再看引用，然后发出、记进 delivered */
+  function send(
+    response: ServerResponse,
+    kind: Delivered['kind'],
+    body: Record<string, unknown>,
+  ): void {
+    const failure = (kind === 'rich' ? richFailures : sendFailures).shift();
+    if (failure) return fail(response, failure.status, failure.description);
+    const rich = kind === 'rich' ? (body.rich_message as InputRichMessage | undefined) : undefined;
+    const rejection = kind === 'rich' ? richRejection(rich) : undefined;
+    if (rejection) return fail(response, 400, rejection);
+    const entities = body.entities as MessageEntity[] | undefined;
+    if (kind === 'plain' && entities !== undefined) {
+      const length = String(body.text).length;
+      const valid =
+        Array.isArray(entities) &&
+        entities.every(
+          (entity) =>
+            entity.type === 'italic' &&
+            Number.isInteger(entity.offset) &&
+            Number.isInteger(entity.length) &&
+            entity.offset >= 0 &&
+            entity.length > 0 &&
+            entity.offset + entity.length <= length,
+        );
+      if (!valid) return fail(response, 400, "Bad Request: can't parse entities");
+    }
+    const chatId = String(body.chat_id);
+    const quoted = body.reply_parameters as
+      { message_id: number; allow_sending_without_reply?: boolean } | undefined;
+    const replyTo = quoted && exists(chatId, quoted.message_id) ? quoted.message_id : undefined;
+    if (quoted && replyTo === undefined && !quoted.allow_sending_without_reply) {
+      return fail(response, 400, 'Bad Request: message to be replied not found');
+    }
+    const seen = rich ? richParts(rich) : plainParts(String(body.text), entities);
+    const sent = {
+      message_id: nextMessageId++,
+      chat: {
+        id: Number(body.chat_id),
+        type: Number(body.chat_id) < 0 ? 'supergroup' : 'private',
+      },
+      date: Math.floor(Date.now() / 1000),
+      from: fakeBot,
+      // 富文本消息没有 text，内容在 rich_message 里
+      ...(rich ? { rich_message: rich } : { text: String(body.text) }),
+    } as TelegramMessage;
+    remember(chatId, sent.message_id);
+    delivered.push({
+      kind,
+      chatId,
+      messageId: sent.message_id,
+      ...seen,
+      ...(replyTo === undefined ? {} : { replyTo }),
+      ...(rich ? { rich } : {}),
+      ...(entities ? { entities } : {}),
+    });
+    return ok(response, sent);
   }
 
   function download(fileId: string, response: ServerResponse): void {
@@ -176,6 +243,19 @@ export async function startFakeTelegram() {
     downloads,
     /** bot 发出、群里看得到的消息，按发出先后 */
     delivered,
+    /** 之后的 setMyCommands 以这个状态码失败（如 401）；undefined 时恢复。收到的内容记在 calls 里 */
+    failSetCommands(status: number | undefined) {
+      setCommandsFailure = status;
+    },
+    /** 之后的 setMyCommands 先不回应，等调用返回的函数才回应 */
+    holdSetCommands(): () => void {
+      let release!: () => void;
+      setCommandsHold = new Promise<void>((resolve) => (release = resolve));
+      return () => {
+        setCommandsHold = undefined;
+        release();
+      };
+    },
     /** 推送一批更新（同一次 getUpdates 里返回），返回各自的 message_id */
     push(...messages: Array<Omit<TelegramRaw, 'message_id' | 'date'> & { date?: number }>) {
       const ids = messages.map((message) => {
@@ -216,9 +296,19 @@ export async function startFakeTelegram() {
       pollsFailing = failing;
       if (failing) for (const wake of [...waiting]) wake();
     },
-    /** 之后的 sendMessage 依次以这些状态码失败 */
+    /** 之后的 sendMessage 依次以这些状态码失败（说明文字是 Internal Server Error） */
     failSends(...statuses: number[]) {
-      sendFailures.push(...statuses);
+      sendFailures.push(
+        ...statuses.map((status) => ({ status, description: 'Internal Server Error' })),
+      );
+    },
+    /** 之后的 sendRichMessage 依次这样失败 */
+    failRichSends(...failures: SendFailure[]) {
+      richFailures.push(...failures);
+    },
+    /** 之后不认识 sendRichMessage（像旧版的服务端）：和别的不认识的方法一样回 404 */
+    dropRichMessages() {
+      richSupported = false;
     },
     /** 等到满足条件的请求出现 */
     async waitFor(predicate: (calls: ApiCall[]) => boolean, timeoutMs = 3000): Promise<void> {
@@ -253,8 +343,34 @@ export function tagOf(data: Uint8Array): string {
   return new TextDecoder().decode(data).split('|').at(-1)!;
 }
 
+/**
+ * 普通消息里看到的正文与尾部：末尾被标成斜体的那一段是尾部，它前面的是正文（去掉隔开它们的空行）；
+ * 只有尾部的消息正文是空的。没有斜体时整段都是正文
+ */
+export function plainParts(
+  text: string,
+  entities: readonly MessageEntity[] | undefined,
+): { text: string; footer?: string } {
+  const tail = entities?.find(
+    (entity) => entity.type === 'italic' && entity.offset + entity.length === text.length,
+  );
+  if (!tail) return { text };
+  return {
+    text: text.slice(0, tail.offset).replace(/\n\n$/, ''),
+    footer: text.slice(tail.offset),
+  };
+}
+
 function ok(response: ServerResponse, result: unknown): void {
   reply(response, 200, { ok: true, result });
+}
+
+function fail(response: ServerResponse, status: number, description: string): void {
+  reply(response, status, { ok: false, error_code: status, description });
+}
+
+function notFound(response: ServerResponse): void {
+  fail(response, 404, 'Not Found');
 }
 
 function reply(response: ServerResponse, status: number, body: unknown): void {

@@ -21,6 +21,12 @@ export type TelegramLink = {
   username?: string;
 };
 
+/** 启动时登记的指令菜单（setMyCommands） */
+export const menuCommands = [
+  { command: 'compact', description: '压缩上下文：之前的对话并成摘要' },
+  { command: 'clear', description: '清空上下文：忘掉之前的对话，不能撤销' },
+] as const;
+
 /**
  * 启动 Telegram 前端：Chat SDK 轮询收消息（平台状态放内存），每条消息交给 bot 处理。
  * 会话对象由 open 提供（洛璃服务里是会话管理）。
@@ -35,6 +41,7 @@ export async function startTelegram({
   pollTimeoutSeconds = 30,
   typingIntervalMs,
   wait,
+  now,
   state = createMemoryState(),
   onRound,
   onConnectionChange,
@@ -50,6 +57,8 @@ export async function startTelegram({
   typingIntervalMs?: number;
   /** 等待合并的两个时长；测试里调小 */
   wait?: { idleMs: number; maxMs: number };
+  /** 量回复用时的时钟，见 createTelegramBot；测试里换成可控的 */
+  now?: () => number;
   /** Chat SDK 的平台状态（去重、轮询进度等），默认放内存；测试里可以换成记录调用的 */
   state?: StateAdapter;
   /** 一轮回复里的等待合并、回复中又被触发、这一轮结束，见 RoundNotice */
@@ -80,33 +89,49 @@ export async function startTelegram({
 
   const threadId = ({ chatId, messageThreadId }: ChatTarget) =>
     adapter.encodeThreadId({ chatId: String(chatId), messageThreadId });
+  // bot 的用户名（不带 @）：拿到 bot 的身份（getMe 成功过）之前 userName 是占位的 bot，不算
+  const username = () => (adapter.botUserId ? adapter.userName : undefined);
   const bot = createTelegramBot({
     storage,
     open,
     sender: {
       typing: (target) => adapter.startTyping(threadId(target)),
-      // 传字符串：适配器按纯文本发送，不转 Markdown
-      send: async (target, text, replyTo) => {
-        if (replyTo === undefined) await adapter.postMessage(threadId(target), text);
-        else await adapter.reply(threadId(target), String(replyTo), text);
+      // 传字符串：适配器按纯文本发普通消息，不转 Markdown，也不自己试富文本。带格式标记（尾部的
+      // 斜体）的另走 postTextMessage：文字原样发出，offset 才对得上
+      send: async (target, text, replyTo, entities) => {
+        const quoted = replyTo === undefined ? undefined : String(replyTo);
+        if (entities) await adapter.postTextMessage(threadId(target), text, entities, quoted);
+        else if (quoted === undefined) await adapter.postMessage(threadId(target), text);
+        else await adapter.reply(threadId(target), quoted, text);
       },
+      sendRich: (target, message, replyTo) =>
+        adapter.postRichMessage(
+          threadId(target),
+          message,
+          replyTo === undefined ? undefined : String(replyTo),
+        ),
     },
     download: (fileId) => adapter.download(fileId),
     albumOf: (raw) => adapter.takeAlbum(raw),
     logger,
-    bot: () => ({ id: adapter.botUserId, username: adapter.userName }),
+    bot: () => ({ id: adapter.botUserId, username: username() }),
     chats: config.chats,
     users: config.users,
     wakeWords: config.wakeWords,
     errorText: config.errorText,
     staleMs: config.staleMs,
+    rich: config.rich,
+    usage: config.usage,
+    now,
     typingIntervalMs,
     wait,
     onRound,
   });
 
   // 不订阅任何线程：私聊进 onDirectMessage，@bot 进 onNewMention，其余进不带模式的
-  // onNewMessage，每条消息恰好到其中一个。/命令 由适配器单独派发，也按普通消息处理
+  // onNewMessage，每条消息恰好到其中一个。/命令 由适配器单独派发（开头是 bot_command 实体、没有
+  // @ 或 @ 的是本 bot 时只走 onSlashCommand，不再进上面三个），同样交给 handle：/compact、/clear
+  // 由 bot 认成指令，其余照普通消息处理
   const handle = (raw: unknown) => bot.handle(raw as TelegramRaw);
   chat.onDirectMessage((_thread, message) => handle(message.raw));
   chat.onNewMention((_thread, message) => handle(message.raw));
@@ -121,6 +146,16 @@ export async function startTelegram({
       users: config.users.size,
     },
     'telegram.start',
+  );
+  // 登记指令菜单：每次启动一次，不拖住启动；失败（网络、token）只记日志，不重试
+  const commandsRegistered = adapter.setCommands(menuCommands).then(
+    () => logger.info({ commands: menuCommands.length }, 'telegram.commands_registered'),
+    (error: unknown) => {
+      logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'telegram.commands_failed',
+      );
+    },
   );
   // 离线积压（含相册）处理完之后，再打开其余的已知会话补做空闲切段。积压里的会话在收到消息时
   // 已经打开，按消息之间的间隔判断；先补做的话会按「距今」在停机前最后一条与积压之间多切一段
@@ -139,12 +174,13 @@ export async function startTelegram({
     adapter,
     /** 离线积压处理完、其余会话也已打开（测试用） */
     caughtUp,
+    /** 指令菜单登记完（成功或失败都算，测试用） */
+    commandsRegistered,
     link(): TelegramLink {
       return {
         connected: adapter.connected,
         lastOnlineAt: adapter.lastPolledAt,
-        // 拿到 bot 的身份之前 userName 是占位的 bot
-        username: adapter.botUserId ? adapter.userName : undefined,
+        username: username(),
       };
     },
     async stop(): Promise<void> {

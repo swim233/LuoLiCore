@@ -451,6 +451,8 @@ describe('Telegram 前端从会话管理取会话', () => {
         wakeWords: ['nori'],
         errorText: '（出了点问题）',
         staleMs: 60 * 60_000,
+        rich: true,
+        usage: true,
       },
       open: (conversationId, options) => sessions.open(conversationId, options),
       storage,
@@ -464,14 +466,13 @@ describe('Telegram 前端从会话管理取会话', () => {
     });
 
     api.push({ chat: group, from: alice, text: 'nori 在吗' });
-    await api.waitFor((calls) => calls.some((call) => call.method === 'sendMessage'));
+    await api.waitFor(() => api.delivered.length > 0);
     await app.bot.idle();
 
     const info = await storage.findConversation('telegram', String(group.id));
     expect(heard).toEqual([{ conversationId: info?.id, text: '你好呀' }]);
-    expect(
-      api.calls.filter((call) => call.method === 'sendMessage').map((call) => call.body.text),
-    ).toEqual(['你好呀']);
+    // 群里看到的（富文本消息或普通消息）
+    expect(api.delivered.map((message) => message.text)).toEqual(['你好呀']);
     // Telegram 前端退出时对会话对象调 close()，会话仍由会话管理关闭
     stopped = true;
     await app.stop();

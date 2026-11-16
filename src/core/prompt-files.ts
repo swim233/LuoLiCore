@@ -11,6 +11,8 @@ const builtins = {
   messageFormat: { file: 'message-format.md', required: [], optional: [] },
   conversation: { file: 'conversation.md', required: ['title'], optional: [] },
   priorSummary: { file: 'prior-summary.md', required: ['summary'], optional: [] },
+  // 清空的段：在原来放摘要的位置说明更早的对话已被清空，time 是清空的时刻
+  cleared: { file: 'cleared.md', required: ['time'], optional: [] },
   summary: { file: 'summary.md', required: ['scope'], optional: ['maxChars'] },
   scopeIdle: { file: 'summary-scope-idle.md', required: [], optional: [] },
   scopeBefore: { file: 'summary-scope-before.md', required: ['time'], optional: [] },

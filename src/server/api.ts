@@ -11,6 +11,8 @@ import type { TaskService } from './tasks/service.js';
 import type {
   AbortResponse,
   CancelTaskResponse,
+  CommandEvent,
+  CommandRequest,
   ConversationResponse,
   ConversationRow,
   ConversationsResponse,
@@ -25,8 +27,10 @@ import { defaultMessages, maxMessages, type Views } from './views.js';
  * 对话的接口（挂在 /api 下，经过访问控制），网页会话与 CLI 会话共用，见 types.ts 的 ChatRequest：
  * - POST /chat  ChatRequest → 回复的 UI message stream（ChatChunk），响应头 X-Conversation-Id
  * - POST /chat/:id/abort  {} → AbortResponse
- * 请求体最多 1 MB；参数不对 400。回复的流每 heartbeat 毫秒（默认 25 秒，与 SSE 相同）插一行注释
- * `: ping`，排队等别人的回复时也有数据，客户端可以设一个有限的读取超时
+ * - POST /conversations/:id/compact、/clear  CommandRequest → 指令的事件流（CommandEvent），
+ *   见 types.ts 的 CommandRequest；现在只收 CLI 会话
+ * 请求体最多 1 MB；参数不对 400。回复与指令的流每 heartbeat 毫秒（默认 25 秒，与 SSE 相同）插一行
+ * 注释 `: ping`，排队等别人的回复时也有数据，客户端可以设一个有限的读取超时
  */
 export function chatRoutes({
   chats,
@@ -50,6 +54,10 @@ export function chatRoutes({
       retry: z.undefined().optional(),
     }),
   ]);
+  // 指令的执行人：去掉首尾空白后不能是空的，由 chats.command 判断
+  const commandBody = z.object({
+    author: z.string().min(1).max(maxAuthorChars),
+  }) satisfies z.ZodType<CommandRequest>;
   return new Hono()
     .post(
       '/chat',
@@ -77,7 +85,55 @@ export function chatRoutes({
     )
     .post('/chat/:id/abort', zValidator('param', z.object({ id: conversationId }), invalid), (c) =>
       c.json<AbortResponse>({ aborted: chats.abort(c.req.valid('param').id) }),
+    )
+    .post(
+      '/conversations/:id/:command{compact|clear}',
+      limitBody(1024 * 1024, () =>
+        Response.json({ error: '请求体太大' } satisfies ErrorResponse, { status: 413 }),
+      ),
+      zValidator(
+        'param',
+        z.object({ id: conversationId, command: z.enum(['compact', 'clear']) }),
+        invalid,
+      ),
+      zValidator('json', commandBody, invalid),
+      async (c) => {
+        const { id, command } = c.req.valid('param');
+        const result = await chats.command(
+          id,
+          command,
+          c.req.valid('json').author,
+          c.req.raw.signal,
+        );
+        if (!result.ok) return c.json<ErrorResponse>({ error: result.error }, result.status);
+        return new Response(withHeartbeat(eventStream(result.stream), heartbeat), {
+          headers: {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          },
+        });
+      },
     );
+}
+
+/**
+ * 指令的事件流写成 SSE 的字节：一个事件一行 `data: {JSON}`，事件之间空一行，结束时一行
+ * `data: [DONE]`（和对话接口的流一样）。对面不读了时取消原来的流（即取消这条指令）
+ */
+function eventStream(events: ReadableStream<CommandEvent>): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return events.pipeThrough(
+    new TransformStream<CommandEvent, Uint8Array>({
+      transform(event, controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      },
+      flush(controller) {
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      },
+    }),
+  );
 }
 
 /**

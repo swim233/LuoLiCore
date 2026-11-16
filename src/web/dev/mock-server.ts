@@ -221,6 +221,7 @@ export class MockServer implements Api {
     reason: ApiSegment['startReason'],
     at: number,
     summary: string | null,
+    startedBy?: ApiSegment['startedBy'],
   ): ApiSegment {
     const c = this.convs.get(convId)!;
     const seg: ApiSegment = {
@@ -228,6 +229,7 @@ export class MockServer implements Api {
       startReason: reason,
       conversationTitle: c.title,
       ...(summary ? { priorSummary: summary } : {}),
+      ...(startedBy ? { startedBy } : {}),
       createdAt: new Date(at).toISOString(),
     };
     c.segs.push(seg);

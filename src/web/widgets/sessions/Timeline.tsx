@@ -29,6 +29,8 @@ const SEG_REASON = {
   first: '会话开始',
   idle: '空闲 4 小时后开始新的一段',
   compress: '上下文太长，压缩后开始新的一段',
+  manual: '手动压缩',
+  clear: '清空',
 };
 
 function SegView({ seg }: { seg: Segment }) {
@@ -47,7 +49,18 @@ function SegView({ seg }: { seg: Segment }) {
   return (
     <div className="seg">
       <div className="seg-line">
-        <span>{`${SEG_REASON[seg.startReason]} · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+        {seg.startedBy?.name ? (
+          <span className="seg-text">
+            <span className="seg-reason">{SEG_REASON[seg.startReason]}</span>
+            <span className="seg-dot"> · </span>
+            <span className="seg-who" title={seg.startedBy.name}>
+              {seg.startedBy.name}
+            </span>
+            <span className="seg-time">{` · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+          </span>
+        ) : (
+          <span>{`${SEG_REASON[seg.startReason]} · ${fmtDay(Date.parse(seg.createdAt))}`}</span>
+        )}
         {seg.priorSummary && (
           <Button size="xs" aria-expanded={open} onClick={() => setOpen(!open)}>
             摘要

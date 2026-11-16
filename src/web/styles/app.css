@@ -2037,11 +2037,28 @@ body::before {
   height: 1px;
   background: var(--ll-line);
 }
-.seg-line span {
+.seg-line > span {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+/* 手动压缩、清空的分隔线：「原因 · 名字 · 时间」，窄了只截名字，原因和时间完整 */
+.seg-line > .seg-text {
+  display: flex;
+}
+.seg-reason,
+.seg-dot,
+.seg-time {
+  flex: none;
+  white-space: pre;
+}
+.seg-who {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 「以下是新消息」：金色的字和淡金的线 */
 .seg-line.is-new {
