@@ -6,14 +6,14 @@
 
 - `latitude`（必填）：纬度，最多两位小数，如 `39.92`。
 - `longitude`（必填）：经度，最多两位小数，如 `116.41`。
-- `localTime`：`true` 返回当地时间，不写是 UTC。建议总是写 `true`。
+- `localTime`：`true` 返回当地时间，不写是 UTC。一定写 `true`。
 - `lang`：语言，见总说明。预警的内容不一定有指定的语言。
 
 ## 返回
 
-- `metadata.zeroResult`：`true` 表示这个地点现在没有预警。
+- `metadata.zeroResult`：`true` 表示这个地点现在没有预警，这时 `alerts` 是空的列表。
 - `alerts`：正在生效的预警的列表，每条有：
-  - `id`：这条预警信息的编号。
+  - `id`：这条预警信息的编号，是一串很长的数字，写成字符串。
   - `headline`：标题，如「上海中心气象台发布大风蓝色预警信号」。`description`：详细内容。
   - `senderName`：发布机构，可能为空。
   - `eventType.name`：预警的种类，如「大风」「暴雨」；`eventType.code` 是它的代码。
