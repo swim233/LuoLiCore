@@ -8,7 +8,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）、第四阶段（fetch 工具与工具结果里的图片，ADR-0007）、第五阶段（请求记录与导出，ADR-0008）、第六阶段（洛璃服务与网页面板，ADR-0009）、第七阶段（定时任务，ADR-0010）已完成。第七阶段之后修过一轮网页面板（11 个问题，拷问记录在 `.grill/ui-fixes/`，已完成），又打磨过一轮（模糊过渡的曲线、平滑滚动、气泡的毛玻璃和洛璃气泡的配色、逐字输出时气泡的形变；拷问记录在 `.grill/ui-polish/`，结论和参数在那里的 `final.md`，已完成）。两轮留下没做的小问题记在 `.handoff/ui-fixes/notes-for-later.md`。
 
-正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 9 步（建包、设计变量、展示页、两批基础控件、滚动、浮层、表单控件、聊天内容）已完成；11 步做完再进第八阶段。
+正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 10 步（建包、设计变量、展示页、两批基础控件、滚动、浮层、表单控件、聊天内容、特效）已完成；11 步做完再进第八阶段。
 
 之后的第八阶段是监视器、插件与动态，结论已写进 ADR-0010 的「以后怎么接」，开始前再确认一轮。登录与公网部署是第九阶段，设置的修改是第十阶段，各自开始前再拷问。
 
@@ -25,6 +25,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
   - 浮层用库的（`@luoli/ui/overlay`）：弹出框 `Popover`、下拉菜单 `Menu`、提示气泡 `Tooltip`、对话框 `Dialog` 和确认框 `ConfirmDialog`、`toast()`。用下拉钮（`MenuButton`、`PopoverButton`）打开的菜单和弹出框是「长开」：钮的底长成浮层的底，内容再出来；选值的钮用槽（`kind="slot"`），动作菜单用胶囊。面板这样接：根上挂一次 `<Toaster />`，`toast` 从 `state/ui` 转出；顶栏、胶囊、「此刻」徽记共用的那个悬停弹出框经 `popHandle`（`state/ui`）开关，形变、拖动开始时由面板关掉它；窗口里的菜单和弹出框把 `container` 设成所在的窗口，跟着窗口走；拖动、形变用的副本里把浮层去掉。点名外壳状态的样式留在 `app.css`，对着库的类名写。
   - 表单控件在 `@luoli/ui/forms`：单行输入 `Input`、密码 `PasswordInput`、数字 `NumberInput`、多行 `Textarea`、下拉选择 `Select`（和菜单一样「长开」）、复选框、单选、滑块 `Slider`、带校验的表单项 `Form` 与 `FormField`、列表编辑 `ListEdit`。默认尺寸是宽松档（高 32、字 13）。面板还没有用到（设置的修改是第十阶段）；`@luoli/ui/controls` 里只管摆放的表单项 `Field` 照旧。
   - 聊天内容用库的（`@luoli/ui/chat`）：气泡 `ChatBubble`（含思考与工具的折叠）、`Markdown`、逐字输出 `Typed` 和光标 `Cursor`、正文高亮 `Hl`、图片 `Pic`、打字的三个点 `ChatTyping`、名字的颜色 `colorOf`。样式是单独的一份 `@luoli/ui/chat.css`，不在 `styles.css` 里，面板在入口另引一次；Markdown 的纯逻辑（一行预览等）另有不带组件的入口 `@luoli/ui/md`，面板的模型层引它。库不认识 AI SDK 的消息，由面板在 `model/bubble.ts` 里转成库的块（`ChatPart`），工具那一行写的话也在那里算好。面板这样接：根上放一次 `<ChatMentions>`（助手的名字、唤醒词、@用户名，正文里「提到她」的高亮用）；`boot.ts` 里调 `installBubbleFrame({ busy })`；气泡的毛玻璃经 `glass` 传进去，「预先糊好的星空」整套留在面板。点名面板部件的样式留在 `app.css`，对着库的类名写。库里的 `marked` 版本写死（`markdown.ts` 靠它内部的正则写法，升级靠测试把关）。
+  - 特效用库的（`@luoli/ui/fx`）：背景星空 `sky`、星尘粒子 `fx`（迸发、汇聚成形、散开）、三种悬停效果（流光 `sweep`、边光 `glow`、倾斜 `tilt`）和放一圈流光的 `edgeRun`。样式是单独的一份 `@luoli/ui/fx.css`，面板在入口另引一次。星空的 Worker 由库自己建；星尘的 Worker 由面板建好传进去，和徽记共用一个（面板的 `fx/fx.worker.ts` 先问徽记、再交给库的 `particleMessage`）。库里建 Worker 的那一句 `new Worker(new URL('…', import.meta.url), …)` 必须写成一整句：拆开写的话 Vite 构建时不当 Worker 处理，而且不报错。库不读 `@luoli/ui/env`，窄屏、性能低由面板传进去。悬停：窗口加 `ll-hover` 类，根元素的 `data-ll-hover` 说用哪一种，面板的偏好值 `B`、`C`、`D` 自己对应过去；什么时候不倾斜、不放流光，由面板经 `hoverHandlers`、`edgeRun` 的选项传进去；窗口大小变了徽记要跟着改，经 `fx.onResize` 登记。窗口自己的阴影和 `transform` 不在层里、盖得过库的，所以流光的淡光、全屏和拖动副本不倾斜这两条留在 `app.css`。徽记、`MiniSky`、出错脉冲留在面板。
   - 库有自己的展示页：`pnpm ui:dev`（`127.0.0.1:5174`），不经过面板。
 - 洛璃服务（ADR-0009）：
   - 进程与入口：一个常驻进程。`pnpm start` 先构建网页（`pnpm web:build`），成功后再启动服务，构建失败就不启动；`pnpm serve` 只启动服务、不构建。设了 Telegram token 才启动 bot，没设时 stderr 提示一行；网页服务用 `LUOLI_WEB=off` 关闭，端口由 `LUOLI_WEB_PORT` 配置（默认 7310），被占用时报错退出。两个都没开时报错退出。
