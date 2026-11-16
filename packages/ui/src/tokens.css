@@ -193,6 +193,8 @@
     --ll-bubble-leading: 1.6;
     --ll-bubble-radius: 16px;
     --ll-bubble-radius-tail: 5px;
+    /* 专门调过的值：气泡的毛玻璃（气泡后面的画面被糊开）。和面板里「预先糊好」做法的那对数字（lib/winSky.ts 的 SKY_BLUR、SKY_SATURATE）一致，改了要一起改 */
+    --ll-bubble-blur: blur(20px) saturate(1.3);
     /* 专门调过的值：统计数字（今日概况里的大数字）：数字格里的 28px、头条的 42px */
     --ll-text-figure: 28px;
     --ll-text-figure-lg: 42px;

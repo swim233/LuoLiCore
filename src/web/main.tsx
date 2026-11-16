@@ -3,6 +3,7 @@ import '@fontsource/jetbrains-mono/500.css';
 import '@fontsource-variable/noto-sans-sc';
 import { createRoot } from 'react-dom/client';
 import '@luoli/ui/styles.css';
+import '@luoli/ui/chat.css';
 import './styles/app.css';
 import './lib/debug';
 import { App } from './app';

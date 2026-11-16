@@ -253,6 +253,11 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       t('bubble-leading', 'number', '气泡的行高（专用）'),
       t('bubble-radius', 'length', '气泡的圆角（专用）'),
       t('bubble-radius-tail', 'length', '气泡靠近说话人的下角（专用）'),
+      t(
+        'bubble-blur',
+        'text',
+        '气泡的毛玻璃（backdrop-filter 的值，专用；和面板里「预先糊好」的那对数字一致）',
+      ),
       t('text-figure', 'length', '今日概况数字格里的数字（专用）'),
       t('text-figure-lg', 'length', '今日概况头条的大数字（专用）'),
     ],

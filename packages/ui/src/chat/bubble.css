@@ -1,0 +1,300 @@
+/* 聊天气泡 ChatBubble / ChatTyping（Bubble.tsx）。
+   一条消息 .ll-msg：data-role（other、self、assistant）决定底色和名字的颜色，data-side（start、end）决定靠哪边、哪个下角收尖，
+   data-blur（实时模糊）、data-new（刚出现，放出现动画）。里面：名字一行 .ll-msg-meta，气泡 .ll-bubble，（出错时）下面的东西。
+   气泡：毛玻璃（气泡后面的画面被糊开），没有边，圆角 --ll-bubble-radius，靠近说话人的那个下角收尖（--ll-bubble-radius-tail）；
+   实时模糊 backdrop-filter: var(--ll-bubble-blur)（和面板里「预先糊好」做法的那对数字 blur(20px) saturate(1.3) 一致，改了要一起改）。
+   backdrop-filter 的坑：祖先带 opacity < 1、filter、mask、clip-path、mix-blend-mode（或 will-change 这些）时，那个祖先就是「背景根」，
+   气泡只拿得到它里面的画面，拿不到它外面，模糊就没有了，那层效果去掉的一瞬又突然糊上。所以气泡和它后面那层背景之间的祖先上不能有这些，
+   要淡入淡出的话放在气泡自己身上（气泡自己的 opacity 会连它的模糊一起淡）：新消息的出现动画见下面的 ll-msg-in-*（淡入在气泡自己身上，.ll-msg 只做位移）。
+   去掉了原来 1px 的边，内边距加 1px 补上：气泡的大小和文字的位置不变。 */
+@layer ll.controls {
+  .ll-msg {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--ll-space-4);
+    max-width: min(78%, 640px);
+    min-width: 0;
+  }
+  .ll-msg[data-side='end'] {
+    align-self: flex-end;
+    align-items: flex-end;
+  }
+  /* 窄屏：消息能占的宽度多一点 */
+  @media (max-width: 719px) {
+    .ll-msg {
+      max-width: 88%;
+    }
+  }
+  /* 名字一行：名字每人一色、调淡（颜色取自 --ll-msg-who，ChatBubble 按 colorKey 写在 .ll-msg 上），助手的名字是点睛色 */
+  .ll-msg-meta {
+    font-size: 11.5px; /* 气泡自己的尺寸：名字一行比正文小 */
+    color: var(--ll-fg-dim);
+    margin: 0 var(--ll-space-4);
+    display: flex;
+    gap: var(--ll-space-6);
+    align-items: baseline;
+  }
+  .ll-msg-meta b {
+    font-weight: 600;
+    color: color-mix(in srgb, var(--ll-msg-who, var(--ll-fg-2)) 55%, var(--ll-fg-2));
+  }
+  .ll-msg[data-role='assistant'] .ll-msg-meta b {
+    color: var(--ll-star);
+  }
+  .ll-msg-meta time {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 气泡的外框 */
+  .ll-bubble {
+    position: relative;
+    isolation: isolate;
+    padding: 9px 14px; /* 气泡自己的内边距 */
+    border-radius: var(--ll-bubble-radius) var(--ll-bubble-radius) var(--ll-bubble-radius)
+      var(--ll-bubble-radius-tail);
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    font-size: var(--ll-bubble-text);
+    line-height: var(--ll-bubble-leading);
+    --ll-bubble-tint: var(--ll-bubble-other-bg);
+    color: var(--ll-bubble-other-fg);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    user-select: text;
+  }
+  /* 底色：叠在后面的画面上 */
+  .ll-bubble::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    background: var(--ll-bubble-tint);
+  }
+  .ll-bubble[data-blur] {
+    -webkit-backdrop-filter: var(--ll-bubble-blur);
+    backdrop-filter: var(--ll-bubble-blur);
+  }
+  /* 气泡里面的一层：平时只是个普通的块（装下所有内容，外框的大小就是它的大小）。
+     内容自己变大变小时外框在补间（bubble-frame.ts）：外框的宽高写死、裁住内容（data-tw），内容脱离排版流、
+     按自然的大小排版（位置 left、top 和最大宽度由脚本按内边距和 .ll-msg 的上限写成行内样式，补间结束时去掉） */
+  .ll-bubble-in {
+    display: flow-root;
+  }
+  .ll-bubble[data-tw] {
+    overflow: hidden;
+  }
+  .ll-bubble[data-tw] > .ll-bubble-in {
+    position: absolute;
+    width: max-content;
+  }
+  .ll-msg[data-side='end'] .ll-bubble {
+    border-radius: var(--ll-bubble-radius) var(--ll-bubble-radius) var(--ll-bubble-radius-tail)
+      var(--ll-bubble-radius);
+  }
+  /* 助手：淡的星紫配接近白色的字。气泡里的 Markdown 在这层底上的调整：行内代码、代码块的底，加粗用白 */
+  .ll-msg[data-role='assistant'] .ll-bubble {
+    --ll-bubble-tint: var(--ll-bubble-assistant-bg);
+    color: var(--ll-bubble-assistant-fg);
+  }
+  .ll-msg[data-role='self'] .ll-bubble {
+    --ll-bubble-tint: var(--ll-bubble-self-bg);
+    color: var(--ll-bubble-self-fg);
+  }
+  .ll-bubble .ll-md strong {
+    color: var(--ll-white);
+  }
+  .ll-bubble .ll-md-ic {
+    background: var(--ll-bubble-code-inline);
+  }
+  .ll-bubble .ll-md-code {
+    background: var(--ll-bubble-code-block);
+  }
+  /* 淡紫的底上线要看得清：引用的竖线、表格的线、分隔线比平时（没有气泡时）亮一点 */
+  .ll-bubble .ll-md-q {
+    border-left-color: color-mix(in srgb, var(--ll-accent) 75%, transparent);
+  }
+  .ll-bubble .ll-md-t th,
+  .ll-bubble .ll-md-t td {
+    border-color: color-mix(in srgb, var(--ll-fg) 18%, transparent);
+  }
+  .ll-bubble .ll-md-hr {
+    background: color-mix(in srgb, var(--ll-fg) 24%, transparent);
+  }
+  .ll-msg[data-role='self'] .ll-bubble .ll-hi-num,
+  .ll-msg[data-role='self'] .ll-bubble .ll-hi-url {
+    color: var(--ll-white);
+  }
+
+  /* 出现：从下面 10px 淡入上来 */
+  @keyframes ll-msg-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+  }
+  .ll-msg[data-new] {
+    animation: ll-msg-in 0.35s var(--ll-ease-out) both;
+  }
+  /* 实时模糊的气泡：淡入不能放在 .ll-msg 上（带 opacity 的祖先会让里面的 backdrop-filter 看不到后面的画面，这 0.35 秒气泡没有模糊，结束时突然糊上），
+     所以 .ll-msg 只做位移，淡入放在它的几个子元素上（名字那一行、气泡自己、下面的按钮）：气泡自己的 opacity 会把它的模糊一起淡入，
+     和预先糊好的气泡整个淡入是同一个混合，时长、缓动一样 */
+  @keyframes ll-msg-in-move {
+    from {
+      transform: translateY(10px);
+    }
+  }
+  @keyframes ll-msg-in-fade {
+    from {
+      opacity: 0;
+    }
+  }
+  .ll-msg[data-blur][data-new] {
+    animation: ll-msg-in-move 0.35s var(--ll-ease-out) backwards;
+  }
+  .ll-msg[data-blur][data-new] > * {
+    animation: ll-msg-in-fade 0.35s var(--ll-ease-out) backwards;
+  }
+
+  /* 中止、出错的标记 */
+  .ll-mark {
+    display: block;
+    margin-top: var(--ll-space-2);
+    font-size: var(--ll-text-sm);
+    font-style: italic;
+    color: var(--ll-fg-dim);
+  }
+  .ll-mark[data-err] {
+    color: var(--ll-danger);
+  }
+
+  /* 思考、工具调用：折叠（库的 Fold，展开收起时气泡外框每帧跟着内容变）。思考是一颗强调色的小胶囊（「思考了 3 秒」），工具是一行等宽字（「◇ fetch · 网址 ✓ 0.6s」） */
+  .ll-cfold {
+    margin: 0 0 5px;
+    font-size: 11.5px; /* 气泡自己的尺寸 */
+    color: var(--ll-fg-3);
+    white-space: normal;
+  }
+  /* 思考的头是一颗标签（库的 Tag）：键盘焦点环跟着药丸的全圆角，里面字和箭头隔 6 */
+  .ll-cfold[data-kind='think'] > summary {
+    border-radius: var(--ll-radius-full);
+  }
+  .ll-cfold[data-kind='think'] .ll-tag {
+    gap: var(--ll-space-6);
+  }
+  .ll-cfold-tag {
+    font-style: italic;
+  }
+  .ll-cfold[data-kind='tool'] summary {
+    font: 11.5px/1.6 var(--ll-font-mono);
+    color: var(--ll-tool);
+  }
+  .ll-cfold[data-kind='tool'] summary > span:first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  /* 工具调用折叠行右边的状态（✓、× 出错）不换行 */
+  .ll-cfold summary > span + span {
+    flex: none;
+    white-space: nowrap;
+  }
+  /* 转圈和前面的字之间的空隙 */
+  .ll-cfold-spin {
+    margin-left: 0.6ch;
+  }
+  .ll-cfold-body {
+    margin-top: var(--ll-space-6);
+    padding: var(--ll-space-8) var(--ll-space-10);
+    color: var(--ll-fg-2);
+    font-size: 12.5px; /* 气泡自己的尺寸 */
+  }
+  /* 思考的内容太长时在框里滚动（思考中展开着，跟着滚到最新的一行：Bubble.tsx 的 ThinkBody） */
+  .ll-cfold[data-kind='think'] .ll-cfold-body {
+    max-height: 240px; /* 气泡自己的尺寸 */
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .ll-cfold-ok {
+    color: var(--ll-ok);
+  }
+  .ll-cfold-bad {
+    color: var(--ll-danger);
+  }
+  /* 工具调用展开后：参数、结果、错误各一块，等宽字，太长在块里滚动 */
+  .ll-cfold-k {
+    font-size: 11.5px;
+    color: var(--ll-fg-3);
+    margin: var(--ll-space-6) 0 var(--ll-space-2);
+  }
+  .ll-cfold-k:first-child {
+    margin-top: 0;
+  }
+  .ll-cfold-k[data-bad] {
+    color: var(--ll-danger);
+  }
+  .ll-cfold-pre {
+    margin: 0;
+    max-height: 220px; /* 气泡自己的尺寸 */
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 12px/1.5 var(--ll-font-mono);
+    color: var(--ll-fg-2);
+    scrollbar-width: thin;
+  }
+
+  /* 图片一排：连着的图片并成一排，结果里的图片在折叠里 */
+  .ll-msg-imgs {
+    display: flex;
+    gap: var(--ll-space-6);
+    flex-wrap: wrap;
+    margin-bottom: var(--ll-space-6);
+  }
+  .ll-msg-imgs[data-out] {
+    margin: var(--ll-space-6) 0 0;
+  }
+  /* 消息里的文字段：每段一块（一次回复里工具调用前后的话分开显示） */
+  .ll-msg-text {
+    display: block;
+  }
+  .ll-msg-text + .ll-msg-text {
+    margin-top: var(--ll-space-6);
+  }
+
+  /* 正在回复：助手的气泡里三个点（动画只在页面根上有 motion 类时放） */
+  .ll-typing {
+    display: inline-flex;
+    gap: var(--ll-space-4);
+    padding: var(--ll-space-8) var(--ll-space-4);
+  }
+  .ll-typing i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ll-star);
+    opacity: 0.4;
+  }
+  @keyframes ll-typing {
+    0%,
+    100% {
+      opacity: 0.3;
+      transform: translateY(0);
+    }
+    50% {
+      opacity: 1;
+      transform: translateY(-3px);
+    }
+  }
+  :root.motion .ll-typing i {
+    animation: ll-typing 1s ease-in-out infinite;
+  }
+  :root.motion .ll-typing i:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  :root.motion .ll-typing i:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+}

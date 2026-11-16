@@ -1,14 +1,14 @@
-import { Fragment, memo } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
-import { cpLen, makeCuts } from '../lib/typing';
-import type { Batch } from '../lib/typing';
-import { linkHref, splitUrlTail } from '@luoli/ui/url';
-import type { ImagePart } from '../model/types';
-import { assistant, useAssistant } from '../model/who';
+import { Fragment, memo, useContext } from 'react';
+import type { ReactNode } from 'react';
+import { Link } from '../controls';
+import { linkHref, splitUrlTail } from '../url';
 import { freshNodes } from './Fresh';
-import { Link } from '@luoli/ui/controls';
+import { ChatMentions } from './mentions';
+import { cpLen, makeCuts } from './typing';
+import type { Batch } from './typing';
+import type { ChatMentionsValue } from './types';
 
-/* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由服务告诉面板）、数字。
+/* 正文高亮：网址、@提及、引号里的话、提到助手（名字、唤醒词，由用的项目经 ChatMentions 告诉库；没有就不高亮「提到」，别的照常）、数字。
    @提及里认名字、唤醒词和 bot 的 @用户名：提到她的 @ 加亮 */
 const URL_RE = String.raw`https?:\/\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]+|\b(?:[a-z0-9-]+\.)+(?:com|org|net|cn|io|dev|me|jp|edu|gov|info)(?:\/[^\s，。！？、；：（）()《》“”"'‘’「」<>]*)?`;
 const QUOTE_RE = String.raw`“[^”]*”|「[^」]*」|"[^"\n]*"|‘[^’]*’`;
@@ -20,14 +20,13 @@ interface Matcher {
   at: RegExp | null;
 }
 let cache: { key: string; m: Matcher } | null = null;
-function matcher(): Matcher {
-  const a = assistant.get();
-  const key = JSON.stringify([a.name, a.wakeWords, a.username]);
+function matcher(a: ChatMentionsValue | null): Matcher {
+  const key = JSON.stringify(a ? [a.name, a.wakeWords, a.username] : null);
   if (cache?.key === key) return cache.m;
-  const uniq = (xs: string[]) =>
+  const uniq = (xs: readonly string[]) =>
     [...new Set(xs.map((x) => x.trim()).filter(Boolean))].sort((p, q) => q.length - p.length);
-  const names = uniq([a.name, ...a.wakeWords]);
-  const handles = uniq([a.name, ...a.wakeWords, ...(a.username ? [a.username] : [])]);
+  const names = a ? uniq([a.name, ...a.wakeWords]) : [];
+  const handles = a ? uniq([a.name, ...a.wakeWords, ...(a.username ? [a.username] : [])]) : [];
   const mention = names.length ? `(${names.map(word).join('|')})` : '(\\b\\B)';
   const re = new RegExp(
     `(${URL_RE})|(@[\\w一-龥]+)|(${QUOTE_RE})|${mention}|(\\d+(?:[.:]\\d+)*%?)`,
@@ -41,20 +40,24 @@ export interface Tok {
   t: string;
   c: string;
 }
-export function hlTokens(text: string, hits: boolean): Tok[] {
+export function hlTokens(
+  text: string,
+  hits: boolean,
+  mentions: ChatMentionsValue | null = null,
+): Tok[] {
   const out: Tok[] = [];
   let last = 0,
     m: RegExpExecArray | null;
-  const { re: base, at } = matcher();
+  const { re: base, at } = matcher(mentions);
   const re = new RegExp(base.source, base.flags);
   while ((m = re.exec(text))) {
     if (m.index > last) out.push({ t: text.slice(last, m.index), c: '' });
     let c = '';
-    if (m[1]) c = 'hl-url';
-    else if (m[2]) c = 'hl-at' + (hits && at?.test(m[2]) ? ' hl-hit' : '');
-    else if (m[3]) c = 'hl-q';
-    else if (m[4]) c = hits ? 'hl-hit' : '';
-    else if (m[5]) c = 'hl-num';
+    if (m[1]) c = 'll-hi-url';
+    else if (m[2]) c = 'll-hi-at' + (hits && at?.test(m[2]) ? ' ll-hi-hit' : '');
+    else if (m[3]) c = 'll-hi-q';
+    else if (m[4]) c = hits ? 'll-hi-hit' : '';
+    else if (m[5]) c = 'll-hi-num';
     out.push({ t: m[0], c });
     last = m.index + m[0].length;
   }
@@ -75,7 +78,7 @@ export const Hl = memo(function Hl({
   links?: boolean;
   fresh?: readonly Batch[];
 }) {
-  useAssistant(); // 名字、唤醒词变了要重新高亮
+  const mentions = useContext(ChatMentions); // 名字、唤醒词变了（context 的值换了）要重新高亮
   const cuts = fresh?.length ? makeCuts(cpLen(text), fresh) : null;
   let pos = 0; // 已经处理到第几个字，按文字的顺序往后数
   const piece = (str: string): ReactNode => {
@@ -86,14 +89,14 @@ export const Hl = memo(function Hl({
   };
   return (
     <>
-      {hlTokens(text, hits).map((x, i) => {
-        if (x.c === 'hl-url') {
+      {hlTokens(text, hits, mentions).map((x, i) => {
+        if (x.c === 'll-hi-url') {
           const [url, tail] = splitUrlTail(x.t);
           const href = links ? linkHref(url) : null;
           if (href)
             return (
               <Fragment key={i}>
-                <Link href={href} variant="auto" className="hl-url">
+                <Link href={href} variant="auto" className="ll-hi-url">
                   {piece(url)}
                 </Link>
                 {piece(tail)}
@@ -112,34 +115,3 @@ export const Hl = memo(function Hl({
     </>
   );
 });
-
-/* 缩略图：生成的色块代替图片（真实的图片只出现在网页对话里用户自己拖进来的） */
-export function Thumb({
-  part,
-  w,
-  h,
-}: {
-  part: Partial<ImagePart> & { blob?: string };
-  w?: number;
-  h?: number;
-}) {
-  const style: CSSProperties = {};
-  if (w) {
-    style['--tw'] = w + 'px';
-    style['--th'] = h + 'px';
-  }
-  if (part.blob) {
-    style['--img'] = `url("${part.blob}")`;
-    return (
-      <span className="thumb is-real" role="img" aria-label={part.name || '图片'} style={style} />
-    );
-  }
-  const d = part.demo || { h1: 230, h2: 40, label: '图片' };
-  style['--h1'] = d.h1;
-  style['--h2'] = d.h2;
-  return (
-    <span className="thumb" role="img" aria-label={'图片 ' + d.label} style={style}>
-      <span>{d.label}</span>
-    </span>
-  );
-}

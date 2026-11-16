@@ -1,17 +1,19 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Token } from 'marked';
-import { lexMarkdown } from '../lib/markdown';
-import { PENDING_HREF } from '../lib/stream-md';
-import { cpLen, makeCuts } from '../lib/typing';
-import type { Batch } from '../lib/typing';
-import { linkHref } from '@luoli/ui/url';
+import { Link } from '../controls';
+import { linkHref } from '../url';
 import { freshNodes } from './Fresh';
 import { Hl } from './Hl';
-import { Link } from '@luoli/ui/controls';
+import { useLabels } from './labels';
+import type { ChatLabels } from './labels';
+import { lexMarkdown } from './markdown';
+import { PENDING_HREF } from './stream-md';
+import { cpLen, makeCuts } from './typing';
+import type { Batch } from './typing';
 
 /* 洛璃的回复按 Markdown 画：marked 只管把文字拆成词元（lib/markdown.ts），这里把词元画成 React 元素。
-   不用 marked 的 HTML 输出，不用 dangerouslySetInnerHTML；原始 HTML 当普通文字显示；图片不加载（面板不访问外网），画成链接。
+   不用 marked 的 HTML 输出，不用 dangerouslySetInnerHTML；原始 HTML 当普通文字显示；图片不加载（不访问外网），画成链接。
    支持：加粗、斜体、删除线、行内代码、代码块（语言名、复制）、列表（有序、无序、嵌套、任务）、引用、标题、表格、分隔线、链接。
    没闭合的写法（半个 **、没写完的代码块）marked 本来就不当格式，原样显示（逐字输出时，lib/stream-md.ts 先把放出来的文字改成最终的样子再交给这里，见 Typed.tsx）。
 
@@ -25,7 +27,8 @@ import { Link } from '@luoli/ui/controls';
      把末尾这几批字各包一个落下的 span；最后一个词元是加粗、斜体、删除线、链接、行内代码时，进到它里面的最后一个文字片段里落
      （逐字时没写完的加粗、行内代码、链接一出现就是最终的样子，里面的字也要一个个落下）；
    - 逐字时没写完的链接（lib/stream-md.ts 把网址换成占位 PENDING_HREF）：画成不能点的链接色文字，只有方括号里的字；
-   - tokens：调用方自己分好的词元（逐字时用增量分析，不走缓存）；不给就按 text 分。 */
+   - tokens：调用方自己分好的词元（逐字时用增量分析，不走缓存）；不给就按 text 分；
+   - labels：代码块的「复制」「已复制」、任务列表方框的读屏名字，要换时给（见 labels.ts）。 */
 interface Tk {
   type: string;
   raw: string;
@@ -49,6 +52,7 @@ interface Cell {
 }
 interface Ctx {
   hits: boolean;
+  labels: ChatLabels;
 }
 /** 画在最后一个字后面的东西和刚放出的字（见文件开头），一起往最后一个孩子里传。
  *  node 为空：只传刚放出的字（走进加粗、链接这类行内元素里面，光标画在它们外面） */
@@ -82,7 +86,7 @@ function inlines(tokens: Tk[] | undefined, c: Ctx, inLink: boolean, tail?: Tail)
         return <del key={i}>{inlines(t.tokens, c, inLink, into)}</del>;
       case 'codespan':
         return (
-          <code key={i} className="md-ic">
+          <code key={i} className="ll-md-ic">
             {fresh ? freshNodes(t.text ?? '', 0, makeCuts(cpLen(t.text ?? ''), fresh)) : t.text}
           </code>
         );
@@ -159,19 +163,29 @@ const COPIED_MS = 1600;
 const stopEv = (e: React.SyntheticEvent) => e.stopPropagation();
 
 /* 代码块：等宽字体、不着色、太宽时横向滚动；上面一条小字：左边语言名（有的话），右边「复制」，点了变成「已复制」一会儿再变回来 */
-function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: Tail }) {
+function CodeBlock({
+  lang,
+  code,
+  tail,
+  labels,
+}: {
+  lang?: string;
+  code: string;
+  tail?: Tail;
+  labels: ChatLabels;
+}) {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const name = (lang ?? '').trim().split(/\s+/)[0];
   return (
-    <div className="md-code">
-      <div className="md-code-bar">
-        <span className="md-lang">{name}</span>
+    <div className="ll-md-code">
+      <div className="ll-md-code-bar">
+        <span className="ll-md-lang">{name}</span>
         <button
-          className="md-copy"
+          className="ll-md-copy"
           type="button"
-          aria-label="复制代码"
+          aria-label={labels.copyCode}
           onPointerDown={stopEv}
           onClick={(e) => {
             e.stopPropagation();
@@ -183,7 +197,7 @@ function CodeBlock({ lang, code, tail }: { lang?: string; code: string; tail?: T
             });
           }}
         >
-          {copied ? '已复制' : '复制'}
+          {copied ? labels.copied : labels.copy}
         </button>
       </div>
       <pre>
@@ -208,7 +222,7 @@ function blocks(tokens: Tk[] | undefined, c: Ctx, tail?: Tail): ReactNode[] {
 function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
   switch (t.type) {
     case 'paragraph':
-      return <p className="md-p">{inlines(t.tokens, c, false, tail)}</p>;
+      return <p className="ll-md-p">{inlines(t.tokens, c, false, tail)}</p>;
     case 'text':
       // 紧凑列表里的文字：不带段落的间距
       return (
@@ -217,25 +231,25 @@ function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
     case 'heading': {
       const d = t.depth ?? 1;
       return (
-        <div className={'md-h md-h' + Math.min(d, 4)} role="heading" aria-level={d}>
+        <div className={'ll-md-h ll-md-h' + Math.min(d, 4)} role="heading" aria-level={d}>
           {inlines(t.tokens, c, false, tail)}
         </div>
       );
     }
     case 'code':
-      return <CodeBlock lang={t.lang} code={t.text ?? ''} tail={tail} />;
+      return <CodeBlock lang={t.lang} code={t.text ?? ''} tail={tail} labels={c.labels} />;
     case 'blockquote':
-      return <blockquote className="md-q">{blocks(t.tokens, c, tail)}</blockquote>;
+      return <blockquote className="ll-md-q">{blocks(t.tokens, c, tail)}</blockquote>;
     case 'list': {
       const Tag = t.ordered ? 'ol' : 'ul';
       const items = t.items ?? [];
       return (
         <Tag
-          className="md-l"
+          className="ll-md-l"
           start={t.ordered && typeof t.start === 'number' && t.start !== 1 ? t.start : undefined}
         >
           {items.map((it, i) => (
-            <li key={i} className={it.task ? 'md-task' : undefined}>
+            <li key={i} className={it.task ? 'll-md-task' : undefined}>
               {blocks(it.tokens, c, i === items.length - 1 ? tail : undefined)}
             </li>
           ))}
@@ -244,13 +258,17 @@ function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
     }
     case 'checkbox':
       return (
-        <span className="md-box" role="img" aria-label={t.checked ? '已完成' : '未完成'}>
+        <span
+          className="ll-md-box"
+          role="img"
+          aria-label={t.checked ? c.labels.taskDone : c.labels.taskTodo}
+        >
           {t.checked ? '☑' : '☐'}
         </span>
       );
     case 'hr':
       // 光标不放在分隔线后面：要另起一行放，结束时去掉这一行高度会跳
-      return <hr className="md-hr" />;
+      return <hr className="ll-md-hr" />;
     case 'table': {
       const rows = t.rows ?? [];
       const head = t.header ?? [];
@@ -270,8 +288,8 @@ function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
         </Tag>
       );
       return (
-        <div className="md-tw">
-          <table className="md-t">
+        <div className="ll-md-tw">
+          <table className="ll-md-t">
             <thead>
               <tr>{head.map((x, k) => cell(x, -1, k, 'th'))}</tr>
             </thead>
@@ -287,7 +305,7 @@ function block(t: Tk, c: Ctx, tail?: Tail): ReactNode {
     default:
       // 原始 HTML 块和不认得的：当普通文字，保留换行
       return (
-        <p className="md-p md-raw">
+        <p className="ll-md-p ll-md-raw">
           {(t.text ?? t.raw).replace(/\n+$/, '')}
           {tail?.node}
         </p>
@@ -300,7 +318,8 @@ const Block = memo(
   function Block({ t, c, tail }: { t: Tk; c: Ctx; tail?: Tail }) {
     return <>{block(t, c, tail)}</>;
   },
-  (a, b) => a.t.raw === b.t.raw && a.c.hits === b.c.hits && a.tail === b.tail,
+  (a, b) =>
+    a.t.raw === b.t.raw && a.c.hits === b.c.hits && a.c.labels === b.c.labels && a.tail === b.tail,
 );
 
 export const Markdown = memo(function Markdown({
@@ -309,6 +328,7 @@ export const Markdown = memo(function Markdown({
   tail,
   fresh,
   tokens,
+  labels,
 }: {
   text: string;
   /** 提到洛璃的名字、唤醒词是不是加亮（洛璃自己的回复不加） */
@@ -319,15 +339,18 @@ export const Markdown = memo(function Markdown({
   fresh?: readonly Batch[];
   /** text 已经分好的词元（逐字时用增量分析）；不给就按 text 分 */
   tokens?: Token[];
+  /** 要换的话（复制、已复制……），见 labels.ts */
+  labels?: Partial<ChatLabels>;
 }) {
+  const L = useLabels(labels);
   const shown = ((tokens ?? lexMarkdown(text)) as unknown as Tk[]).filter((t) => !isBlank(t));
-  const c: Ctx = { hits };
+  const c: Ctx = { hits, labels: L };
   const end = useMemo<Tail | undefined>(
     () => (tail ? { node: tail, fresh } : undefined),
     [tail, fresh],
   );
   return (
-    <div className="md">
+    <div className="ll-md">
       {shown.length
         ? shown.map((t, i) => (
             <Block key={i} t={t} c={c} tail={i === shown.length - 1 ? end : undefined} />

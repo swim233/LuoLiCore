@@ -1,4 +1,4 @@
-import { plainPreview } from '../lib/markdown';
+import { plainPreview } from '@luoli/ui/md';
 import { firstSentence } from './events';
 import { assistantName } from './who';
 import type { Conversation, MsgRow, Segment, TaskRow, TodaySummary } from './types';

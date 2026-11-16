@@ -2,14 +2,14 @@ import { motionOn } from '@luoli/ui/motion';
 import { fx } from '../../fx/client';
 import { desk } from '../../state/desk';
 import { faces } from '../../shell/faces';
-import type { CursorRef } from '../../components/Typed';
+import type { CursorRef } from '@luoli/ui/chat';
 
 /* 回复正常完成：每个看得见的地方，在自己的最后一个字出现时，从自己的光标那里散开一团星尘。
-   - 时机：逐字输出（Typed.tsx）每一处把队列放空、最后一个字出现时调 stardustAt(convId, 取光标的函数)，不是服务说回复结束（reply:end）的时候：
+   - 时机：逐字输出（库的 Typed）每一处把队列放空、最后一个字出现时调 stardustAt(convId, 取光标的函数)，不是服务说回复结束（reply:end）的时候：
      那时队列里可能还有字没出现，光标还不在末尾；对话部件和「此刻」的逐字各按各的进度放，所以各自在自己放完的那一刻散；
    - 位置等排定了再量：放完的那一刻刚渲染完、还没画出来，页面上这一刻的排版还可能要变（对话里回复一结束，输入框上方多出「正在回复」
      一行、时间线滚到最底下都要隔一两帧才排定，光标跟着挪几十像素），所以从下一帧起每帧量，连着两帧一样才散。
-     光标不占宽度，位置取光标里那颗星（.cur .st4）；
+     光标不占宽度，位置取光标里那颗星（库的 .ll-cursor-star）；
    - 哪些地方：只有看得见的光标才散：藏着的、形变中的、浮起前的副本（[data-hide]、[data-lifted]、.fs-morph、.ghosts）不散，
      全屏时只有全屏里的散；一次回复最多两处（MAX_BURSTS）；
    - 没有看得见的光标（「此刻」缩成胶囊、对话部件不在）：reply:end 时从顶栏或胶囊里的徽记散开（stardustAtEnd）；
@@ -50,7 +50,7 @@ function replyOf(convId: string): Reply {
 function visibleStar(c: Element): DOMRect | null {
   if (c.closest('[data-hide], [data-lifted], .fs-morph, .ghosts')) return null;
   if (desk.get().full && !c.closest('#fs')) return null;
-  const r = (c.querySelector('.st4') ?? c).getBoundingClientRect();
+  const r = (c.querySelector('.ll-cursor-star') ?? c).getBoundingClientRect();
   const inView =
     r.width > 0 &&
     r.height > 0 &&
@@ -63,8 +63,8 @@ function visibleStar(c: Element): DOMRect | null {
 
 /** 这个会话现在看得见的光标里那颗星的范围，最多两处 */
 function visibleStars(convId: string): DOMRect[] {
-  return [...document.querySelectorAll<HTMLElement>('.cur')]
-    .filter((c) => c.dataset.conv === convId)
+  return [...document.querySelectorAll<HTMLElement>('.ll-cursor')]
+    .filter((c) => c.dataset.stream === convId)
     .map(visibleStar)
     .filter((r): r is DOMRect => !!r)
     .slice(0, MAX_BURSTS);

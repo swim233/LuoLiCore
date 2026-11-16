@@ -3,8 +3,11 @@ import '@fontsource/jetbrains-mono/500.css';
 import '@fontsource-variable/noto-sans-sc';
 import { createRoot } from 'react-dom/client';
 import '../src/styles.css';
+import '../src/chat/chat.css';
 import '../src/easing';
 import './showcase.css';
+import './showcase-chat.css';
+import { installBubbleFrame } from '../src/chat';
 import { motionOn, subscribeMotion } from '../src/motion';
 import { startSkyStars } from '../src/sky-stars';
 import { App } from './App';
@@ -31,6 +34,8 @@ subscribeMotion(applyMotion);
 startSkyStars();
 /* 滚轮缓动：展示页默认也装上，「滚动」一节里有开关能拆掉对比 */
 setWheelEase(true);
+/* 气泡外框的补间：展示页没有大动画，不用 busy */
+installBubbleFrame();
 
 const refresh = () => {
   runAnimCheck();

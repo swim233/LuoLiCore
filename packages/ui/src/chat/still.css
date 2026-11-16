@@ -1,0 +1,21 @@
+/* 动画关掉时（页面根上有 still 类，或系统开了「减少动态效果」而页面根上没有 motion 类）：聊天内容里装饰性的动画不放。
+   新消息的出现动画去掉（直接出现）；光标那颗星不一明一暗（光标淡出的过渡照旧，由项目统一缩成很短的淡入淡出）。
+   打字的三个点只在页面根上有 motion 类时才动（bubble.css），这里不用管。 */
+@layer ll.controls {
+  :root.still .ll-msg[data-new],
+  :root.still .ll-msg[data-new] > * {
+    animation: none;
+  }
+  :root.still .ll-cursor-star {
+    animation: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root:not(.motion) .ll-msg[data-new],
+    :root:not(.motion) .ll-msg[data-new] > * {
+      animation: none;
+    }
+    :root:not(.motion) .ll-cursor-star {
+      animation: none;
+    }
+  }
+}

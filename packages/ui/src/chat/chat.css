@@ -1,0 +1,13 @@
+/* 聊天内容的样式入口：@luoli/ui/chat.css。不在总样式 styles.css 里，用的项目在入口另引一次，排在 styles.css 后面
+   （设计变量、折叠、标签、半透明面板这些底子在 styles.css 里；这里的规则和它们同在 ll.controls 层，同一层里后写的盖过先写的）。
+   和库的约定一样：纯 CSS、都在 @layer 里、类名 ll- 开头、变体用 data-*、不写 important 标记。
+   - bubble.css：气泡（消息、名字一行、气泡外框与内层、毛玻璃、标记）、思考与工具的折叠、图片一排、打字的三个点；
+   - markdown.css：Markdown 的排版（标题、列表、引用、代码、表格……）；
+   - text.css：正文高亮、逐字落下的字、光标、图片；
+   - still.css：关动画时。 */
+@layer ll.tokens, ll.base, ll.controls;
+
+@import './bubble.css';
+@import './markdown.css';
+@import './text.css';
+@import './still.css';

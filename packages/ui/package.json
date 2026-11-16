@@ -8,11 +8,14 @@
     "./src/**/*.css"
   ],
   "exports": {
+    "./chat": "./src/chat/index.ts",
+    "./chat.css": "./src/chat/chat.css",
     "./controls": "./src/controls/index.ts",
     "./easing": "./src/easing.ts",
     "./env": "./src/env.ts",
     "./forms": "./src/forms/index.ts",
     "./icons": "./src/icons/index.ts",
+    "./md": "./src/chat/md.ts",
     "./motion": "./src/motion.ts",
     "./overlay": "./src/overlay/index.ts",
     "./scroll": "./src/scroll/index.ts",
@@ -39,6 +42,7 @@
   },
   "dependencies": {
     "@base-ui/react": "1.9.0",
-    "@tanstack/react-virtual": "^3.14.26"
+    "@tanstack/react-virtual": "^3.14.26",
+    "marked": "18.1.3"
   }
 }

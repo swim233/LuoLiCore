@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MOON_GRAD } from './components/badge/geometry';
 import { fx, sky } from './fx/client';
 import { MotionConfig } from 'motion/react';
+import { ChatMentions } from '@luoli/ui/chat';
 import { useMotionOn } from '@luoli/ui/motion';
 import { usePrefs } from './lib/prefs';
 import { DeskWrap } from './shell/Desk';
@@ -13,6 +14,7 @@ import { ArrangeBar, Pop, Tray } from './shell/Overlays';
 import { devSlot } from './lib/dev-slot';
 import { setArranging } from './state/actions';
 import { useDesk } from './state/desk';
+import { useAssistant } from './model/who';
 
 export function App() {
   const DevPanel = devSlot.Panel;
@@ -32,6 +34,8 @@ export function App() {
     return () => clearTimeout(t);
   }, [motionPref]);
   const hover = usePrefs((p) => p.hover);
+  /* 正文里「提到洛璃」的高亮要认的名字（助手的显示名、唤醒词、bot 的 @用户名，由服务告诉面板）：在根上交给库的 ChatMentions */
+  const assistant = useAssistant();
   const arranging = useDesk((s) => s.arranging);
   const arrLeaving = useDesk((s) => s.arrLeaving);
   const skyRef = useRef<HTMLCanvasElement>(null);
@@ -70,63 +74,65 @@ export function App() {
   }, [arranging, arrLeaving]);
   return (
     <MotionConfig reducedMotion={motion ? 'never' : 'always'}>
-      <svg
-        width="0"
-        height="0"
-        style={{ position: 'absolute' }}
-        aria-hidden="true"
-        focusable="false"
-      >
-        <defs>
-          {/* 徽记的渐变：星星从上到下由淡金到金，弯月由里向外（凹处一侧偏暗）；徽记的几张 <svg> 共用 */}
-          <linearGradient id="g-bd-star" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" style={{ stopColor: 'var(--ll-star-pale)' }} />
-            <stop offset=".55" style={{ stopColor: 'var(--ll-star)' }} />
-            <stop offset="1" style={{ stopColor: 'var(--ll-star-deep)' }} />
-          </linearGradient>
-          <radialGradient
-            id="g-bd-moon"
-            gradientUnits="userSpaceOnUse"
-            cx={MOON_GRAD.cx}
-            cy={MOON_GRAD.cy}
-            r={MOON_GRAD.r}
-          >
-            <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo)' }} />
-            <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi)' }} />
-          </radialGradient>
-          {/* 弯月提亮的一层：同一个渐变，亮度 ×1.35、更饱和（等待合并时弯月醒着，聚散时闪一下） */}
-          <radialGradient
-            id="g-bd-moon-hot"
-            gradientUnits="userSpaceOnUse"
-            cx={MOON_GRAD.cx}
-            cy={MOON_GRAD.cy}
-            r={MOON_GRAD.r}
-          >
-            <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo-hot)' }} />
-            <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi-hot)' }} />
-          </radialGradient>
-        </defs>
-      </svg>
-      <canvas id="sky" className="sky" ref={skyRef} aria-hidden="true" />
-      <div className="app" id="app">
-        <h1 className="sr-only">
-          {import.meta.env.DEV ? 'LuoLi 星夜桌面（开发模式，模拟数据）' : 'LuoLi 星夜桌面'}
-        </h1>
-        <TopBar />
-        <ArrangeBar onDone={() => setArranging(false)} />
-        <main className="main" id="main">
-          <DeskWrap />
-        </main>
-      </div>
-      <Tray />
-      <FullscreenLayer />
-      <div className="ghosts" id="ghosts" aria-hidden="true">
-        <MorphHost host="ghosts" />
-      </div>
-      <canvas id="fx" className="fx" ref={fxRef} aria-hidden="true" />
-      <Pop />
-      {DevPanel && <DevPanel />}
-      <Toaster duration={2600} />
+      <ChatMentions value={assistant}>
+        <svg
+          width="0"
+          height="0"
+          style={{ position: 'absolute' }}
+          aria-hidden="true"
+          focusable="false"
+        >
+          <defs>
+            {/* 徽记的渐变：星星从上到下由淡金到金，弯月由里向外（凹处一侧偏暗）；徽记的几张 <svg> 共用 */}
+            <linearGradient id="g-bd-star" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style={{ stopColor: 'var(--ll-star-pale)' }} />
+              <stop offset=".55" style={{ stopColor: 'var(--ll-star)' }} />
+              <stop offset="1" style={{ stopColor: 'var(--ll-star-deep)' }} />
+            </linearGradient>
+            <radialGradient
+              id="g-bd-moon"
+              gradientUnits="userSpaceOnUse"
+              cx={MOON_GRAD.cx}
+              cy={MOON_GRAD.cy}
+              r={MOON_GRAD.r}
+            >
+              <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo)' }} />
+              <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi)' }} />
+            </radialGradient>
+            {/* 弯月提亮的一层：同一个渐变，亮度 ×1.35、更饱和（等待合并时弯月醒着，聚散时闪一下） */}
+            <radialGradient
+              id="g-bd-moon-hot"
+              gradientUnits="userSpaceOnUse"
+              cx={MOON_GRAD.cx}
+              cy={MOON_GRAD.cy}
+              r={MOON_GRAD.r}
+            >
+              <stop offset=".6" style={{ stopColor: 'var(--bd-moon-lo-hot)' }} />
+              <stop offset="1" style={{ stopColor: 'var(--bd-moon-hi-hot)' }} />
+            </radialGradient>
+          </defs>
+        </svg>
+        <canvas id="sky" className="sky" ref={skyRef} aria-hidden="true" />
+        <div className="app" id="app">
+          <h1 className="sr-only">
+            {import.meta.env.DEV ? 'LuoLi 星夜桌面（开发模式，模拟数据）' : 'LuoLi 星夜桌面'}
+          </h1>
+          <TopBar />
+          <ArrangeBar onDone={() => setArranging(false)} />
+          <main className="main" id="main">
+            <DeskWrap />
+          </main>
+        </div>
+        <Tray />
+        <FullscreenLayer />
+        <div className="ghosts" id="ghosts" aria-hidden="true">
+          <MorphHost host="ghosts" />
+        </div>
+        <canvas id="fx" className="fx" ref={fxRef} aria-hidden="true" />
+        <Pop />
+        {DevPanel && <DevPanel />}
+        <Toaster duration={2600} />
+      </ChatMentions>
     </MotionConfig>
   );
 }

@@ -1,0 +1,95 @@
+/* 正文里的几样：高亮（Hl.tsx）、逐字落下的字（Fresh.tsx）、光标（Typed.tsx 的 Cursor）、图片（Pic.tsx）。 */
+@layer ll.controls {
+  /* 正文高亮：网址（库的 .ll-link，auto）、数字用淡的强调色；@ 某人是强调色的底；引号里的话斜体；提到助手（名字、唤醒词、@bot）是点睛色 */
+  .ll-hi-num {
+    color: color-mix(in srgb, var(--ll-accent) 60%, var(--ll-fg));
+  }
+  .ll-hi-at {
+    background: var(--ll-accent-soft);
+    color: var(--ll-fg);
+    border-radius: 5px; /* 专用值：一小条的圆角 */
+    padding: 0 var(--ll-space-4);
+  }
+  .ll-hi-q {
+    color: var(--ll-quote);
+    font-style: italic;
+  }
+  .ll-hi-hit {
+    color: var(--ll-star);
+  }
+
+  /* 逐字（Typed.tsx）：刚放出的字每一批包一个行内 span，从上方轻轻落下。
+     行内元素加 position: relative 的 top 和透明度，不用 inline-block 加 transform：折行规则和静态文字完全一样。
+     落下的动画不在样式表里：Fresh.tsx 用 Web Animations 按每个字自己的开始时刻做（8 像素的位移加淡入，0.3 秒） */
+  .ll-drop {
+    position: relative;
+  }
+
+  /* 光标：一颗点睛色的小星，一明一暗。不占宽度（零宽的行内块，星浮在它右边），所以有没有光标折行都一样，结束时去掉它排版不动。
+     淡出（data-gone）：整个光标的透明度过渡到 0。星的样子自己写全（不靠用的项目里的四角星通用类） */
+  @keyframes ll-cursor-star {
+    0%,
+    100% {
+      transform: scale(0.8);
+      opacity: 0.5;
+    }
+    50% {
+      transform: scale(1.1);
+      opacity: 1;
+    }
+  }
+  .ll-cursor {
+    display: inline-block;
+    position: relative;
+    width: 0;
+    height: 0;
+    color: var(--ll-star);
+    line-height: 1;
+    transition: opacity 0.5s;
+  }
+  .ll-cursor-star {
+    display: inline-block;
+    position: absolute;
+    left: 2px;
+    bottom: -0.1em;
+    width: 0.8em;
+    height: 0.8em;
+    fill: currentColor;
+    flex: none;
+    vertical-align: baseline;
+    animation: ll-cursor-star 1.2s ease-in-out infinite;
+  }
+  .ll-cursor[data-gone] {
+    opacity: 0;
+  }
+
+  /* 真实的图片：宽高按原图比例算好（Pic.tsx），读不到的显示「图片已丢失」 */
+  .ll-pic {
+    display: inline-block;
+    position: relative;
+    width: 160px;
+    height: 120px;
+    max-width: 100%;
+    border-radius: var(--ll-radius-md);
+    overflow: hidden;
+    vertical-align: middle;
+    background: var(--ll-inset-bg);
+    box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--ll-black) 70%, transparent);
+  }
+  .ll-pic img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .ll-pic[data-lost] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 120px;
+    height: 84px;
+    box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-sm);
+  }
+}

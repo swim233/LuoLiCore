@@ -14,6 +14,7 @@ import { TODAY_DEF } from './widgets/today/Today';
 import { desk, registerWidget } from './state/desk';
 import { closeFull, installPressTracking, setArranging } from './state/actions';
 import { popHandle } from './state/ui';
+import { installBubbleFrame } from '@luoli/ui/chat';
 import { hideGlides, installWheel } from '@luoli/ui/scroll';
 import { morphStore, motionBusy } from './shell/morph';
 import { chatEscAbort } from './widgets/chat/chatEsc';
@@ -47,6 +48,8 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
   });
   /* 滚轮缓动：形变、让位动画、拖动副本飞回期间不接管（motionBusy 是外壳的判断） */
   installWheel({ busy: motionBusy });
+  /* 气泡外框的补间（库的聊天气泡）也一样：形变、让位动画期间不补间 */
+  installBubbleFrame({ busy: motionBusy });
   /* Esc：① 对话正在生成且对话是当前操作的部件 → 中止；② 额外的处理（开发模式：演示面板开着且焦点在里面 → 收起）；③ 全屏 → 退出；④ 整理模式 → 退出；⑤ 收起弹出框 */
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

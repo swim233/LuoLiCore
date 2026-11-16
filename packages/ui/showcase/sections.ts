@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react';
+import { Chat } from './sections/Chat';
 import { Controls } from './sections/Controls';
 import { Forms } from './sections/Forms';
 import { Overlay } from './sections/Overlay';
@@ -25,7 +26,7 @@ export const SECTIONS: SectionDef[] = [
   { id: 'scroll', title: '滚动', Component: Scroll, steps: '6' },
   { id: 'overlay', title: '浮层', Component: Overlay, steps: '7' },
   { id: 'forms', title: '表单', Component: Forms, steps: '8' },
-  { id: 'chat', title: '聊天内容', steps: '9' },
+  { id: 'chat', title: '聊天内容', Component: Chat, steps: '9' },
   { id: 'fx', title: '特效', steps: '10' },
 ];
 export const DEFAULT_SECTION = 'tokens';

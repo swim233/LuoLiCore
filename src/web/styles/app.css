@@ -1720,11 +1720,11 @@ body::before {
 .tl-pics {
   display: block;
 }
-.tl-body .pic {
+.tl-body .ll-pic {
   margin: 4px 6px 2px 0;
   border-radius: 6px;
 }
-.tl-body .pic.is-lost {
+.tl-body .ll-pic[data-lost] {
   width: 84px;
   height: 58px;
   font-size: 11px;
@@ -1755,61 +1755,9 @@ body::before {
   color: var(--ll-fg-dim);
   font-style: normal;
 }
-/* 正文高亮：网址（库的 .ll-link，auto）、数字用淡的强调色；@ 某人是强调色的底；提到洛璃（名字、唤醒词、@bot）是金色 */
-.hl-num {
-  color: color-mix(in srgb, var(--ll-accent) 60%, var(--ll-fg));
-}
-.hl-at {
-  background: var(--ll-accent-soft);
-  color: var(--ll-fg);
-  border-radius: 5px;
-  padding: 0 4px;
-}
-.hl-q {
-  color: var(--ll-quote);
-  font-style: italic;
-}
-.hl-hit {
-  color: var(--ll-star);
-}
-.k-stats .hl-num {
+/* 「此刻」的统计行里的数字不加高亮色（正文高亮是库的，.ll-hi-num） */
+.k-stats .ll-hi-num {
   color: inherit;
-}
-/* 逐字（Typed.tsx）：刚放出的字每一批包一个行内 span，从上方轻轻落下。
-   行内元素加 position: relative 的 top 和透明度，不用 inline-block 加 transform：折行规则和静态文字完全一样。
-   落下的动画不在样式表里：Fresh.tsx 用 Web Animations 按每个字自己的开始时刻做（8 像素的位移加淡入，0.3 秒） */
-.tw-in {
-  position: relative;
-}
-/* 光标：一颗金色小星，一明一暗。不占宽度（零宽的行内块，星浮在它右边），所以有没有光标折行都一样，结束时去掉它排版不动 */
-@keyframes cur-star {
-  0%,
-  100% {
-    transform: scale(0.8);
-    opacity: 0.5;
-  }
-  50% {
-    transform: scale(1.1);
-    opacity: 1;
-  }
-}
-.cur {
-  display: inline-block;
-  position: relative;
-  width: 0;
-  height: 0;
-  color: var(--ll-star);
-  line-height: 1;
-  transition: opacity 0.5s;
-}
-.cur .st4 {
-  position: absolute;
-  left: 2px;
-  bottom: -0.1em;
-  width: 0.8em;
-  height: 0.8em;
-  vertical-align: baseline;
-  animation: cur-star 1.2s ease-in-out infinite;
 }
 /* 四角星（内联 SVG），颜色跟随文字 */
 .st4 {
@@ -1824,10 +1772,6 @@ body::before {
   width: 0.74em;
   height: 0.74em;
   vertical-align: -0.04em;
-}
-.cur.is-gone {
-  opacity: 0 !important;
-  animation: none;
 }
 /* 缩略图（生成的色块代替图片） */
 .thumb {
@@ -2021,180 +1965,40 @@ body::before {
   flex-direction: column;
   gap: 12px;
 }
-.msg {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  max-width: min(78%, 640px);
-  min-width: 0;
-}
-.msg.is-me {
-  align-self: flex-end;
-  align-items: flex-end;
-}
-.msg-meta {
-  font-size: 11.5px;
-  color: var(--ll-fg-dim);
-  margin: 0 4px;
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-}
-/* 名字：每人一色，调淡；洛璃的是金色 */
-.msg-meta b {
-  font-weight: 600;
-  color: color-mix(in srgb, var(--who, var(--ll-fg-2)) 55%, var(--ll-fg-2));
-}
-.msg-meta time {
-  font-variant-numeric: tabular-nums;
-}
-/* 气泡：毛玻璃，没有边，圆角 16，靠近说话人的那个下角收尖（5）；群友在左，自己和洛璃在右。
-   毛玻璃是「气泡后面的星空被糊开」，有两种做法（lib/glass.ts：正式页面里用实时模糊，预先糊好只在下面说的一处用到，
-   开发模式的演示控制面板里能整个切过去），气泡的大小、文字、配色两种完全一样：
-   - 实时模糊（.has-blur，默认）：气泡自己 backdrop-filter: blur(20px) saturate(1.3)，不垫 .bubble-sky（元素都不渲染），没有对位的脚本。
-     两种静止时逐像素比过：气泡内部平均色差 ≤ 0.91/255、最大 4。
-     backdrop-filter 的坑：祖先带 opacity < 1、filter、mask、clip-path、mix-blend-mode（或 will-change 这些）时，那个祖先就是「背景根」，
-     气泡只拿得到它里面的画面，拿不到它外面（窗口的星空），模糊就没有了，那层效果去掉的一瞬又突然糊上。所以气泡和窗口的星空之间的祖先上不能有这些，
-     要淡入淡出的话放在气泡自己身上（气泡自己的 opacity 会连它的模糊一起淡）：
-     · 新消息的出现动画见下面的 msg-in-*（淡入在气泡自己身上，.msg 只做位移）；
-     · 形变（缩成胶囊、展开、全屏、退出全屏、整理拖动）里，带 opacity、filter 的是窗口的外框 .w-card 自己，窗口的星空是它自己的背景、在这一层里面，
-       气泡拿得到，所以形变期间气泡照常模糊，不用换成别的做法（副本换成真窗口那一下气泡底色差 ≤ 4/255）；
-     · 会话窗口里列表、时间线两层的切换是整层在淡入淡出（sessions/Sessions.tsx），层在气泡的祖先上，放不到气泡身上：
-       那 0.26 秒里面的气泡暂时按预先糊好的画（components/Bubble.tsx 的 BakedGlass），放完换回来。
-   - 预先糊好：气泡后面只有窗口里的星空，它不动，所以预先糊好。.bubble-sky 是垫在气泡里的一层，画着和窗口同一套背景
-     （压暗层、两层星点、两团光晕、底色），星点换成页面空闲时糊好的那两张（20 像素），颜色整体 saturate(1.3)；
-     各自的底色（--tint）是 ::after，叠在它上面。这层的背景规则由 lib/winSky.ts 生成（图和颜色都要写在里面，原因见那里），
-     这里只管它的位置和形状。背景要和窗口里的星空对齐：光晕的位置是按窗口大小算的，星点贴图的起点是窗口的左上角，所以每层背景都按
-     窗口的大小铺、按「窗口的左上角相对这个气泡的左上角」挪（--sk-x、--sk-y、--sk-w、--sk-h，components/bubble-sky.ts 在滚动、变大变小、
-     窗口变大变小时写在这一层自己身上）。
-   去掉了原来 1px 的边，内边距加 1px 补上：气泡的大小和文字的位置不变 */
-.bubble {
-  position: relative;
-  isolation: isolate;
-  padding: 9px 14px;
-  border-radius: 16px 16px 16px 5px;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
-  font-size: 13.5px;
-  line-height: 1.6;
-  --tint: var(--ll-bubble-other-bg);
-  color: var(--ll-bubble-other-fg);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  user-select: text;
-}
-.bubble-sky,
-.bubble::after {
+/* 「预先糊好」的气泡星空（气泡本身是库的聊天气泡，样式见 @luoli/ui/chat.css 的 bubble.css；毛玻璃的两种做法见 lib/glass.ts）：
+   实时模糊是默认的做法，气泡自己 backdrop-filter，不垫这一层。预先糊好只在会话窗口里列表、时间线两层整层淡入淡出的那 0.26 秒用
+   （components/Bubble.tsx 的 BakedGlass），开发模式的演示控制面板里能整个切过去：
+   气泡后面只有窗口里的星空，它不动，所以预先糊好。.bubble-sky 是垫在气泡里的一层（库的气泡经 glass.layer 留的位置：气泡里第一个子元素），
+   画着和窗口同一套背景（压暗层、两层星点、两团光晕、底色），星点换成页面空闲时糊好的那两张（20 像素），颜色整体 saturate(1.3)；
+   库的气泡自己的底色（--ll-bubble-tint）是气泡的 ::after，叠在它上面。这层的背景规则由 lib/winSky.ts 生成（图和颜色都要写在里面，原因见那里），
+   这里只管它的位置和形状。背景要和窗口里的星空对齐：光晕的位置是按窗口大小算的，星点贴图的起点是窗口的左上角，所以每层背景都按
+   窗口的大小铺、按「窗口的左上角相对这个气泡的左上角」挪（--sk-x、--sk-y、--sk-w、--sk-h，components/bubble-sky.ts 在滚动、变大变小、
+   窗口变大变小时写在这一层自己身上）。 */
+.bubble-sky {
   content: '';
   position: absolute;
   inset: 0;
   z-index: -1;
   border-radius: inherit;
   pointer-events: none;
-}
-.bubble-sky {
   --sk-x: 0px;
   --sk-y: 0px;
   --sk-w: 100%;
   --sk-h: 100%;
 }
-.bubble::after {
-  background: var(--tint);
-}
-.bubble.has-blur {
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  backdrop-filter: blur(20px) saturate(1.3);
-}
-/* 气泡里面的一层：平时只是个普通的块（装下所有内容，外框的大小就是它的大小）。
-   内容自己变大变小时外框在补间（components/bubble-frame.ts）：外框的宽高写死、裁住内容（data-tw），内容脱离排版流、
-   按自然的大小排版（位置 left、top 和最大宽度由脚本按内边距和 .msg 的上限写成行内样式，补间结束时去掉） */
-.bubble-in {
-  display: flow-root;
-}
-.bubble[data-tw] {
-  overflow: hidden;
-}
-.bubble[data-tw] > .bubble-in {
-  position: absolute;
-  width: max-content;
-}
-.msg.is-me .bubble {
-  border-radius: 16px 16px 5px 16px;
-}
-/* 洛璃：淡的星紫配接近白色的字；名字仍是金色。气泡里的 Markdown 在这层底上的调整：行内代码、代码块的底，加粗用白 */
-.msg.is-luoli .bubble {
-  --tint: var(--ll-bubble-assistant-bg);
-  color: var(--ll-bubble-assistant-fg);
-}
-.msg.is-luoli .msg-meta b {
-  color: var(--ll-star);
-}
-.msg.is-you .bubble {
-  --tint: var(--ll-bubble-self-bg);
-  color: var(--ll-bubble-self-fg);
-}
-.bubble .md strong {
-  color: var(--ll-white);
-}
-.bubble .md-ic {
-  background: var(--ll-bubble-code-inline);
-}
-.bubble .md-code {
-  background: var(--ll-bubble-code-block);
-}
-/* 淡紫的底上线要看得清：引用的竖线、表格的线、分隔线比平时（「此刻」里的）亮一点 */
-.bubble .md-q {
-  border-left-color: color-mix(in srgb, var(--ll-accent) 75%, transparent);
-}
-.bubble .md-t th,
-.bubble .md-t td {
-  border-color: color-mix(in srgb, var(--ll-fg) 18%, transparent);
-}
-.bubble .md-hr {
-  background: color-mix(in srgb, var(--ll-fg) 24%, transparent);
-}
-/* 对话部件里洛璃在左、左下角收尖（用户定的，同演示页）；全屏时间线里照旧在右 */
-.chat .msg.is-luoli {
+/* 对话部件里洛璃在左（用户定的，同演示页）：外框按内容收紧，不撑满（时间线里靠左的别人的消息撑满，照旧） */
+.chat .ll-msg[data-side='start'] {
   align-self: flex-start;
-  align-items: flex-start;
 }
-.chat .msg.is-luoli .bubble {
-  border-radius: 16px 16px 16px 5px;
-}
-.msg.is-you .bubble .hl-num,
-.msg.is-you .bubble .hl-url {
-  color: var(--ll-white);
-}
+/* 事件的出现：从下面淡入上来（气泡的出现动画在库里，ll-msg-in） */
 @keyframes msg-in {
   from {
     opacity: 0;
     transform: translateY(10px);
   }
 }
-.msg.is-new,
 .evt.is-new {
   animation: msg-in 0.35s var(--ll-ease-out) both;
-}
-/* 实时模糊的气泡：淡入不能放在 .msg 上（带 opacity 的祖先会让里面的 backdrop-filter 看不到窗口的星空，这 0.35 秒气泡没有模糊，结束时突然糊上），
-   所以 .msg 只做位移，淡入放在它的几个子元素上（名字那一行、气泡自己、下面的按钮）：气泡自己的 opacity 会把它的模糊一起淡入，
-   和预先糊好的气泡整个淡入是同一个混合（透明度 α 的「糊好的底 + 底色」叠在清楚的星空上），时长、缓动一样 */
-@keyframes msg-in-move {
-  from {
-    transform: translateY(10px);
-  }
-}
-@keyframes msg-in-fade {
-  from {
-    opacity: 0;
-  }
-}
-.msg.has-blur.is-new {
-  animation: msg-in-move 0.35s var(--ll-ease-out) backwards;
-}
-.msg.has-blur.is-new > * {
-  animation: msg-in-fade 0.35s var(--ll-ease-out) backwards;
 }
 /* 事件（任务到点、任务超时）：不是气泡，居中的一行三级文字色的灰字，没有头像、名字；时间在末尾、小一号 */
 .evt {
@@ -2213,388 +2017,76 @@ body::before {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* 中止、出错的标记 */
-.mark {
-  display: block;
-  margin-top: 2px;
-  font-size: 12px;
-  font-style: italic;
-  color: var(--ll-fg-dim);
-}
-.mark.is-err {
-  color: var(--ll-danger);
-}
-/* 思考、工具调用：折叠。思考是一颗强调色的小胶囊（「思考了 3 秒」），工具是一行等宽字（「◇ fetch · 网址 ✓ 0.6s」） */
-/* （折叠的展开收起、头、小箭头是库的 Fold：展开收起时气泡外框每帧跟着内容变，时间线贴着底部时 VirtualLog 每帧跟到底） */
-.fold {
-  margin: 0 0 5px;
-  font-size: 11.5px;
-  color: var(--ll-fg-3);
-  white-space: normal;
-}
-/* 思考的头是一颗标签（库的 Tag）：键盘焦点环跟着药丸的全圆角，里面字和箭头隔 6 */
-.fold.is-think > summary {
-  border-radius: 999px;
-}
-.fold.is-think .ll-tag {
-  gap: 6px;
-}
-.fold-tag {
-  font-style: italic;
-}
-.fold.is-tool summary {
-  font: 11.5px/1.6 var(--ll-font-mono);
-  color: var(--ll-tool);
-}
-.fold.is-tool summary > span:first-child {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.fold-body {
-  margin-top: 6px;
-  padding: 8px 10px;
-  color: var(--ll-fg-2);
-  font-size: 12.5px;
-}
-/* 思考的内容太长时在框里滚动（思考中展开着，跟着滚到最新的一行：Bubble.tsx 的 ThinkBody） */
-.fold.is-think .fold-body {
-  max-height: 240px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-.fold .ok {
-  color: var(--ll-ok);
-}
-.fold .bad {
-  color: var(--ll-danger);
-}
-.msg-imgs {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-.msg-imgs.is-out {
-  margin: 6px 0 0;
-}
-.msg-imgs .thumb {
-  --tw: 120px;
-  --th: 84px;
-  margin: 0;
-}
-/* 消息里的文字段：每段一块（一次回复里工具调用前后的话分开显示） */
-.msg-text {
-  display: block;
-}
-.msg-text + .msg-text {
-  margin-top: 6px;
-}
-
-/* ---------- Markdown（洛璃的回复，components/Markdown.tsx）----------
-   气泡（玻璃）里和「此刻」（等宽终端）里各调一套：气泡里按气泡的行距，终端里更紧凑。
-   不加新的配色：链接是强调色（蓝），不是金色；行内代码、代码块用比气泡更深一点的底（黑加透明度）；引用左边一道细的蓝色竖线；表格的线很淡。
-   .bubble 的 white-space 是 pre-wrap（保留别人发的消息里的换行），Markdown 里的换行已经变成 <br>，这里用 normal；
-   代码块、原始 HTML 块自己再设回 pre / pre-wrap */
-.md {
-  white-space: normal;
-  min-width: 0;
-}
-.md > :first-child {
-  margin-top: 0;
-}
-.md > :last-child {
-  margin-bottom: 0;
-}
-.md-p {
-  margin: 0 0 0.55em;
-}
-.md-raw {
-  white-space: pre-wrap;
-}
-.md strong {
-  font-weight: 650;
-}
-.md del {
-  opacity: 0.7;
-}
-/* 标题：加粗、稍大一号的一行，不要大标题 */
-.md-h {
-  margin: 0.75em 0 0.3em;
-  font-weight: 650;
-  line-height: 1.4;
-}
-.md-h1,
-.md-h2 {
-  font-size: 1.1em;
-}
-.md-h3 {
-  font-size: 1.05em;
-}
-/* 列表 */
-.md-l {
-  margin: 0.25em 0 0.55em;
-  padding-left: 1.45em;
-}
-.md-l .md-l {
-  margin: 0.15em 0;
-}
-.md-l li {
-  margin: 0.15em 0;
-}
-.md-l li::marker {
-  color: var(--ll-fg-dim);
-  font-variant-numeric: tabular-nums;
-}
-.md-l li > .md-p {
-  margin-bottom: 0.3em;
-}
-.md-box {
-  margin-right: 0.4em;
-  color: var(--ll-fg-dim);
-}
-/* 任务列表：方框代替圆点，放在圆点的位置 */
-.md-l li.md-task {
-  list-style: none;
-  margin-left: -1.15em;
-}
-/* 引用 */
-.md-q {
-  margin: 0.45em 0 0.55em;
-  padding: 0.05em 0 0.05em 0.85em;
-  border-left: 2px solid color-mix(in srgb, var(--ll-accent) 55%, transparent);
-  color: color-mix(in srgb, currentColor 82%, transparent);
-}
-.md-q > :last-child {
-  margin-bottom: 0;
-}
-/* 行内代码 */
-.md-ic {
-  padding: 0.08em 0.4em;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--ll-black) 30%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 7%, transparent);
-  color: var(--ll-fg);
-  font: 0.9em/1.4 var(--ll-font-mono);
-  overflow-wrap: anywhere;
-}
-/* 代码块：上面一条小字（左语言名，右「复制」），下面代码，太宽时横向滚动 */
-.md-code {
-  margin: 0.45em 0 0.6em;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--ll-black) 34%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 8%, transparent);
-  max-width: 100%;
-  overflow: hidden;
-}
-.md-code-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 24px;
-  padding: 2px 6px 0 11px;
-  font-size: 11px;
-  line-height: 1;
-  color: var(--ll-fg-dim);
-  user-select: none;
-}
-.md-lang {
-  letter-spacing: 0.02em;
-}
-.md-copy {
-  all: unset;
-  box-sizing: border-box;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  color: var(--ll-fg-dim);
-  transition:
-    background-color var(--ll-dur-hover),
-    color var(--ll-dur-hover);
-}
-.md-copy:hover {
-  background: var(--ll-ctl-bg);
-  color: var(--ll-fg);
-}
-.md-copy:focus-visible {
-  outline: 2px solid var(--ll-accent);
-  outline-offset: -1px;
-}
-/* 右边的内边距比左边宽：逐字时光标的小星星画在 <code> 里最后一个字的右边（左偏 2px、宽 0.8em，一共伸出约 12px），
-   紧贴着内容区的右沿时会超出 pre，撑出横向滚动条（高度 ±10px 来回跳）；右边多留的这几像素把它装在里面，
-   有没有光标滚动条都一样 */
-.md-code pre {
-  margin: 0;
-  padding: 2px 16px 10px 12px;
-  overflow-x: auto;
-  white-space: pre;
-  tab-size: 2;
-  color: var(--ll-fg);
-  font: 12.5px/1.55 var(--ll-font-mono);
-  scrollbar-width: thin;
-  scrollbar-color: var(--ll-scrollbar) transparent;
-}
-.md-code code {
-  font: inherit;
-}
-/* 表格：线很淡；太宽时横向滚动（不拆单词，不撑破气泡） */
-/* 右边留 4px：逐字时光标的小星星画在最后一格里最后一个字的右边（伸出约 12px，比单元格的右内边距多 1px 左右），
-   气泡是按内容收缩的，表格就是最宽的那样东西，星星刚好超出表格右沿时撑出横向滚动条（高度 ±10px 来回跳）。
-   多出的这 4px 把它装在里面，有没有光标都一样；表格真的比气泡宽时照旧横向滚动 */
-.md-tw {
-  box-sizing: border-box;
-  margin: 0.45em 0 0.6em;
-  padding-right: 4px;
-  max-width: 100%;
-  overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--ll-scrollbar) transparent;
-}
-.md-t {
-  border-collapse: collapse;
-  font-size: 0.95em;
-}
-.md-t th,
-.md-t td {
-  padding: 4px 11px;
-  border: 1px solid color-mix(in srgb, var(--ll-fg) 11%, transparent);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: normal;
-  word-break: normal;
-}
-.md-t th {
-  font-weight: 650;
-  background: color-mix(in srgb, var(--ll-black) 18%, transparent);
-}
-.md-hr {
-  height: 1px;
-  margin: 0.75em 0;
-  border: 0;
-  background: color-mix(in srgb, var(--ll-fg) 14%, transparent);
-}
 /* 「此刻」里的洛璃：等宽字、行距 1.6，排版跟着收紧 */
-.tl-body .md-p {
+.tl-body .ll-md-p {
   margin-bottom: 0.2em;
 }
-.tl-body .md-h {
+.tl-body .ll-md-h {
   margin: 0.3em 0 0.1em;
   font-size: 1em;
   font-weight: 700;
 }
-.tl-body .md-l {
+.tl-body .ll-md-l {
   margin: 0.1em 0 0.2em;
   padding-left: 2.4ch;
 }
-.tl-body .md-l li {
+.tl-body .ll-md-l li {
   margin: 0;
 }
-.tl-body .md-l li.md-task {
+.tl-body .ll-md-l li.ll-md-task {
   margin-left: -2ch;
 }
-.tl-body .md-q {
+.tl-body .ll-md-q {
   margin: 0.2em 0;
   padding-left: 1.2ch;
 }
-.tl-body .md-code {
+.tl-body .ll-md-code {
   margin: 0.25em 0 0.3em;
   border-radius: 6px;
 }
-.tl-body .md-code-bar {
+.tl-body .ll-md-code-bar {
   min-height: 20px;
   padding: 1px 4px 0 8px;
   font-size: 10.5px;
 }
-.tl-body .md-copy {
+.tl-body .ll-md-copy {
   padding: 3px 6px;
   font-size: 10.5px;
 }
-.tl-body .md-code pre {
+.tl-body .ll-md-code pre {
   padding: 1px 14px 7px 8px;
   font-size: 12px;
   line-height: 1.5;
 }
-.tl-body .md-ic {
+.tl-body .ll-md-ic {
   font-size: 0.95em;
   padding: 0.04em 0.35em;
 }
-.tl-body .md-tw {
+.tl-body .ll-md-tw {
   margin: 0.25em 0 0.3em;
 }
-.tl-body .md-t {
+.tl-body .ll-md-t {
   font-size: 12px;
 }
-.tl-body .md-t th,
-.tl-body .md-t td {
+.tl-body .ll-md-t th,
+.tl-body .ll-md-t td {
   padding: 2px 8px;
 }
-.tl-body .md-hr {
+.tl-body .ll-md-hr {
   margin: 0.4em 0;
 }
-/* 上面这些「此刻」的规则和 .md > :first-child、:last-child 权重相同、写在后面，会把「第一块没有上边距、最后一块没有下边距」盖掉
+/* 上面这些「此刻」的规则和 .ll-md > :first-child、:last-child 权重相同、写在后面，会把「第一块没有上边距、最后一块没有下边距」盖掉
    （洛璃的每一行就多出 0.2em）；终端的虚拟列表按固定行高估算，行高变了第 3 步的贴底就失灵。这里再清一次，权重比它们高 */
-.tl-body .md > :first-child {
+.tl-body .ll-md > :first-child {
   margin-top: 0;
 }
-.tl-body .md > :last-child {
+.tl-body .ll-md > :last-child {
   margin-bottom: 0;
 }
-/* 真实的图片：宽高按原图比例算好（Pic.tsx），读不到的显示「图片已丢失」 */
-.pic {
-  display: inline-block;
-  position: relative;
-  width: 160px;
-  height: 120px;
-  max-width: 100%;
-  border-radius: 10px;
-  overflow: hidden;
-  vertical-align: middle;
-  background: var(--ll-inset-bg);
-  box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--ll-black) 70%, transparent);
-}
-.pic img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.pic.is-lost {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 120px;
-  height: 84px;
-  box-shadow: inset 0 0 0 1px var(--ll-inset-line);
-  color: var(--ll-fg-3);
-  font-size: 12px;
-}
-/* 工具调用展开后：参数、结果、错误各一块，等宽字，太长在块里滚动 */
-.fold-k {
-  font-size: 11.5px;
-  color: var(--ll-fg-3);
-  margin: 6px 0 2px;
-}
-.fold-k:first-child {
-  margin-top: 0;
-}
-.fold-k.bad {
-  color: var(--ll-danger);
-}
-.fold-pre {
-  margin: 0;
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: 12px/1.5 var(--ll-font-mono);
-  color: var(--ll-fg-2);
-  scrollbar-width: thin;
-}
-/* 工具调用折叠行右边的状态（✓、× 出错）不换行 */
-.fold summary > span + span {
-  flex: none;
-  white-space: nowrap;
+/* 代码块「复制」钮的键盘焦点环（库的 .ll-md-copy 自己写的，画在钮里面的一圈）：上面那条全局的 :focus-visible 不在层里，会盖过库里的，所以这里留一条 */
+.ll-md-copy:focus-visible {
+  outline: 2px solid var(--ll-accent);
+  outline-offset: -1px;
 }
 /* 时间线、对话顶上的小提示（样子是库的 .ll-notice）：外层 .ll-pane-ov 不收鼠标事件，这里要收，「重试」才点得到 */
 .log-pill {
@@ -2652,40 +2144,6 @@ body::before {
   margin-bottom: 2px;
   letter-spacing: 0.06em;
 }
-/* 正在回复：洛璃的气泡里三个点 */
-.typing {
-  display: inline-flex;
-  gap: 4px;
-  padding: 8px 4px;
-}
-.typing i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ll-star);
-  opacity: 0.4;
-}
-@keyframes typing {
-  0%,
-  100% {
-    opacity: 0.3;
-    transform: translateY(0);
-  }
-  50% {
-    opacity: 1;
-    transform: translateY(-3px);
-  }
-}
-.motion .typing i {
-  animation: typing 1s ease-in-out infinite;
-}
-.motion .typing i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-.motion .typing i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
 /* ---------- 对话 ----------
    一个窗格：选会话、新对话那一行浮在上面，输入框浮在下面，消息铺满整块 */
 .chat-bar {
@@ -2798,7 +2256,7 @@ body::before {
   color: var(--ll-danger);
 }
 /* 出错的回复下面的「重试」 */
-.msg .chat-retry {
+.ll-msg .chat-retry {
   margin: 4px 4px 0;
 }
 .att button {
@@ -3297,9 +2755,6 @@ body::before {
     --ll-pane-sc-pt: 14px;
     padding-inline: 16px;
   }
-  .msg {
-    max-width: 88%;
-  }
   .w-head {
     cursor: pointer;
   }
@@ -3353,12 +2808,7 @@ body::before {
   animation-delay: 0s !important;
 }
 .still .tl.is-new,
-.still .msg.is-new,
-.still .msg.is-new > *,
 .still .evt.is-new {
-  animation: none !important;
-}
-.still .cur .st4 {
   animation: none !important;
 }
 /* 「预先糊好」的气泡里垫的那层星空（.bubble-sky）：新挂上时先按默认的 --sk-x、--sk-y、--sk-w、--sk-h 算出第一份样式，脚本马上写进对好的值；

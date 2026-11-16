@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { VirtualLog } from '@luoli/ui/scroll';
 import { skyLogHooks } from '../../components/bubble-sky';
 import type { LogItem, ScrollState } from '@luoli/ui/scroll';
+import { ChatTyping } from '@luoli/ui/chat';
+import type { ChatRole, ChatSide } from '@luoli/ui/chat';
 import { MsgBubble, useGlass } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
 import { Button, Chevron, Empty, Notice } from '@luoli/ui/controls';
@@ -72,7 +74,7 @@ function NewDivider() {
   );
 }
 
-/* 一条消息：段的画法（思考、工具调用、文字、图片）与对话部件共用，见 components/Bubble.tsx */
+/* 一条消息：段的画法（思考、工具调用、文字、图片）与对话部件共用，见库的 ChatBubble（@luoli/ui/chat），面板的 components/Bubble.tsx 接上毛玻璃 */
 export const MsgView = memo(function MsgView({
   row,
   convId,
@@ -92,12 +94,15 @@ export const MsgView = memo(function MsgView({
   const who = authorOf(row);
   const you = !isA && !!conv && conv.platform === 'web';
   const meta = row.message.metadata;
+  /* 时间线里：群友在左，自己和洛璃在右 */
+  const role: ChatRole = isA ? 'assistant' : you ? 'self' : 'other';
+  const side: ChatSide = isA || you ? 'end' : 'start';
   return (
     <MsgBubble
-      isA={isA}
-      you={you}
+      role={role}
+      side={side}
       name={isA ? luoli : (who?.name ?? '')}
-      who={who?.id || who?.name || ''}
+      colorKey={who?.id || who?.name || ''}
       label={fmtDay(Date.parse(row.createdAt))}
       parts={partsOfRow(row)}
       aborted={meta?.aborted}
@@ -107,25 +112,11 @@ export const MsgView = memo(function MsgView({
     />
   );
 });
-export function TypingView() {
+/** 正在回复：洛璃的气泡里三个点（库的 ChatTyping）。side：时间线里在右，对话部件里在左 */
+export function TypingView({ side }: { side: ChatSide }) {
   const luoli = useAssistantName();
-  const { blur, layer } = useGlass();
-  return (
-    <div className={'msg is-luoli is-me typing-msg' + (blur ? ' has-blur' : '')}>
-      <div className="msg-meta">
-        <b>{luoli}</b>
-        <time>正在回复</time>
-      </div>
-      <div className={'bubble' + (blur ? ' has-blur' : '')}>
-        {layer}
-        <span className="typing" aria-label="正在回复">
-          <i />
-          <i />
-          <i />
-        </span>
-      </div>
-    </div>
-  );
+  const glass = useGlass();
+  return <ChatTyping side={side} name={luoli} glass={glass} />;
 }
 /* 时间线的条目：段分隔、空状态、打字气泡直接带着要画的节点；消息只带 row，画的时候再决定是不是新来的 */
 type Entry = LogItem | { key: string; row: MsgRow };
@@ -153,7 +144,7 @@ function entriesOf(convId: string, web: boolean, unreadSeq: number | null): Entr
       key: 'empty',
       node: <Empty title="还没有消息">{web ? '在下面说点什么吧' : '有人发言后会出现在这里'}</Empty>,
     });
-  if (!web && status.conv.has(convId)) out.push({ key: 'typing', node: <TypingView /> });
+  if (!web && status.conv.has(convId)) out.push({ key: 'typing', node: <TypingView side="end" /> });
   return out;
 }
 

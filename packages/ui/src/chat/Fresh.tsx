@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { EASE_OUT_CSS } from '@luoli/ui/easing';
-import { motionOn } from '@luoli/ui/motion';
-import { DROP_MS } from '../lib/typing';
-import type { Cut } from '../lib/typing';
+import { EASE_OUT_CSS } from '../easing';
+import { motionOn } from '../motion';
+import { DROP_MS } from './typing';
+import type { Cut } from './typing';
 
-/* 逐字输出时刚出现的字：每个字（开始时刻几乎相同的相邻几个字合成一批）包一个行内 span（.tw-in），轻轻落下。
+/* 逐字输出时刚出现的字：每个字（开始时刻几乎相同的相邻几个字合成一批）包一个行内 span（.ll-drop），轻轻落下。
    - 只是行内元素加 position: relative 的 top 和透明度，不是 inline-block 加 transform：折行规则和不包的文字完全一样；
    - 落下用 Web Animations 做，开始时刻（startTime）直接设成这个字自己的开始时刻（和 Pacer 同一个时间轴：performance.now()）：
      每个字都从自己的时刻起完整落 DROP_MS，8 像素的位移加淡入；span 因为外面的高亮、Markdown 排版变了被重新建出来、
@@ -33,7 +33,7 @@ function Drop({ at, children }: { at: number; children: ReactNode }) {
     return () => a.cancel();
   }, [at]);
   return (
-    <span ref={ref} className="tw-in">
+    <span ref={ref} className="ll-drop">
       {children}
     </span>
   );

@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { Chat, useChat } from '@ai-sdk/react';
 import { MsgBubble } from '../../components/Bubble';
 import { EventLine } from '../../components/EventLine';
-import { Thumb } from '../../components/Hl';
+import { Thumb } from '../../components/Thumb';
 import { VirtualLog } from '@luoli/ui/scroll';
 import { skyLogHooks } from '../../components/bubble-sky';
 import { Pane } from '@luoli/ui/scroll';
@@ -95,10 +95,10 @@ const UserBubble = memo(function UserBubble({
   const who = authorOf(row);
   return (
     <MsgBubble
-      isA={false}
-      you
+      role="self"
+      side="end"
       name={who?.name ?? me}
-      who={who?.id || who?.name || me}
+      colorKey={who?.id || who?.name || me}
       label={fmtDay(Date.parse(row.createdAt))}
       queued={queued}
       parts={partsOfRow(row)}
@@ -114,10 +114,10 @@ function PendingBubble({ req }: { req: Req }) {
   const me = useWebAuthor();
   return (
     <MsgBubble
-      isA={false}
-      you
+      role="self"
+      side="end"
       name={me}
-      who={me}
+      colorKey={me}
       label={fmtDay(req.startedAt)}
       parts={[
         ...req.preview.images.map((src) => ({ kind: 'image' as const, info: { src } })),
@@ -161,15 +161,15 @@ const ReplyBubble = memo(function ReplyBubble({
   const at = row ? Date.parse(row.createdAt) : (req?.startedAt ?? 0);
   return (
     <MsgBubble
-      isA
-      you={false}
+      role="assistant"
+      side="start"
       name={luoli}
       label={streaming ? '正在回复' : fmtDay(at)}
       parts={parts}
       live={
         req
           ? {
-              convId,
+              streamId: convId,
               streaming,
               lingerUntil: req.lingerUntil,
               onRevealed: req.how === 'end' ? (cursor) => stardustAt(convId, cursor) : undefined,
@@ -374,7 +374,7 @@ function ChatLog({ convId }: { convId: string }) {
   if (!entries.length) items.push(emptyItem());
   entries.forEach((e, i) => {
     if (e.typing) {
-      items.push({ key: e.key, node: <TypingView /> });
+      items.push({ key: e.key, node: <TypingView side="start" /> });
       return;
     }
     const isNew = !seen.current.ids.has(e.key) && (e.row ? e.row.seq > seen.current.minSeq : true);

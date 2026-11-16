@@ -1,14 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Ref } from 'react';
-import { IncrementalLexer } from '../lib/markdown';
-import { Star4 } from '@luoli/ui/icons';
-import { motionOn } from '@luoli/ui/motion';
-import { hiddenTail, linkTailSpans, settleMarkdown } from '../lib/stream-md';
-import { advanceCp, cpLen, cpSpans, DROP_MS, Pacer, Spans, trimBatches } from '../lib/typing';
-import type { Batch } from '../lib/typing';
+import { Star4 } from '../icons';
+import { motionOn } from '../motion';
+import type { ChatLabels } from './labels';
 import { Markdown } from './Markdown';
+import { IncrementalLexer } from './markdown';
+import { hiddenTail, linkTailSpans, settleMarkdown } from './stream-md';
+import { advanceCp, cpLen, cpSpans, DROP_MS, Pacer, Spans, trimBatches } from './typing';
+import type { Batch } from './typing';
 
-/* 正在逐字输出的回复：光标打字。对话部件的气泡、「此刻」终端里洛璃正在说的那一行用的是同一个。
+/* 正在逐字输出的回复：光标打字。气泡里正在出的回复、终端里正在说的那一行用的是同一个。
    - 到达的文字排成一条队（lib/typing.ts 的 Pacer），一个字一个字轮到：每个字的开始时刻 = max(到达的时刻, 上一个字的开始时刻 + 间隔)，
      间隔平时 28 ms，来得快时缩短，显示最多落后到达约 0.3 秒。轮到的字才出现；没轮到的字不进 DOM、不占位置；
    - 已经出现的部分按 Markdown 排版（Markdown.tsx）：换行（breaks）逐字时就显示；排版只往前走，已经显示出来的字和块不因为
@@ -30,26 +31,29 @@ const FADE_MS = 500;
  *  落下的起点最多差 8 ms（top 差不到半个像素），看不出来；好处是追赶（间隔缩到 1 ms）、切回标签页时一帧里的 span 少几倍 */
 const MERGE_MS = 8;
 
-/** 取这一处现在的光标：最后一个字出现时，星尘（widgets/now/stardust.ts）按它在页面上的位置散开 */
+/** 取这一处现在的光标：最后一个字出现时，用的项目（面板的星尘）按它在页面上的位置放特效 */
 export type CursorRef = () => HTMLElement | null;
 
+/* 光标：<span class="ll-cursor" data-stream=这一处的标识><svg class="ll-cursor-star"/></span>。
+   用的项目要按「这一处看得见的光标」找它时，靠这三样（类名 ll-cursor、属性 data-stream、里面那颗星 ll-cursor-star）；gone（淡出中）时带 data-gone */
 export function Cursor({
-  convId,
+  streamId,
   gone,
   elRef,
 }: {
-  convId: string;
+  streamId: string;
   gone: boolean;
   elRef?: Ref<HTMLSpanElement>;
 }) {
   return (
     <span
-      className={'cur' + (gone ? ' is-gone' : '')}
-      data-conv={convId}
+      className="ll-cursor"
+      data-gone={gone ? '' : undefined}
+      data-stream={streamId}
       aria-hidden="true"
       ref={elRef}
     >
-      <Star4 className="st4" />
+      <Star4 className="ll-cursor-star" />
     </span>
   );
 }
@@ -75,14 +79,16 @@ interface Run {
 }
 
 export function Typed({
-  convId,
+  streamId,
   text,
   streaming,
   lingerUntil,
   onSettled,
   onRevealed,
+  labels,
 }: {
-  convId: string;
+  /** 这一处逐字输出的标识（光标上的 data-stream） */
+  streamId: string;
   text: string;
   streaming: boolean;
   lingerUntil: number;
@@ -91,6 +97,8 @@ export function Typed({
   /** 回复结束、最后一个字出现的那一刻（刚渲染完，光标已经在最后一个字后面）：回复正常完成时用它放星尘。每次回复只调一次；
    *  参数是取这一处光标的函数（星尘等画面画出来以后再量它的位置） */
   onRevealed?: (cursor: CursorRef) => void;
+  /** 要换的话（复制、已复制……），传给里面的 Markdown，见 labels.ts */
+  labels?: Partial<ChatLabels>;
 }) {
   const run = useRef<Run | null>(null);
   if (!run.current) {
@@ -229,10 +237,10 @@ export function Typed({
 
   const shown = text.slice(0, Math.min(view.end, text.length));
   const cursor = useMemo(
-    () => <Cursor convId={convId} gone={phase === 'fade'} elRef={cursorEl} />,
-    [convId, phase],
+    () => <Cursor streamId={streamId} gone={phase === 'fade'} elRef={cursorEl} />,
+    [streamId, phase],
   );
-  if (phase === 'done') return <Markdown text={text} />;
+  if (phase === 'done') return <Markdown text={text} labels={labels} />;
   // 回复结束、全部放完：用原文（和结束后的静态显示完全一样）；还在放的时候改一遍，排版只往前走
   const whole = !streaming && r.pacer.pending === 0;
   const lexed = r.lexer.lex(whole ? shown : settleMarkdown(shown));
@@ -241,5 +249,5 @@ export function Typed({
   const hidden = hiddenTail(shown, lexed);
   const end = cpLen(shown);
   const fresh = trimBatches(view.fresh, hidden - r.free.count(end - hidden, end));
-  return <Markdown text={shown} tokens={lexed} tail={cursor} fresh={fresh} />;
+  return <Markdown text={shown} tokens={lexed} tail={cursor} fresh={fresh} labels={labels} />;
 }

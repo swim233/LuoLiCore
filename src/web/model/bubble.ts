@@ -1,41 +1,23 @@
 import { getToolName, isToolUIPart } from 'ai';
+import type { ChatPart } from '@luoli/ui/chat';
 import type { ChatMessage } from '../../server/types';
-import { isFile, isReasoning, isText, isTool, toolName, toolOutput } from './parts';
+import { argsLine, isFile, isReasoning, isText, isTool, toolName, toolOutput } from './parts';
 import type { ReplyEntry } from './replyInfo';
-import type { ImageInfo, MsgRow } from './types';
+import type { MsgRow } from './types';
 
-/* 气泡里画的东西：一条消息按段的先后变成这几种块。
+/* 气泡里画的东西：一条消息按段的先后变成库的块（@luoli/ui/chat 的 ChatPart：文字、图片、思考、工具）。库不认识 AI SDK 的消息，转换在这里。
    两个来源：历史消息（服务给的整条消息，时间线、对话都用）和自己这个标签页里正在逐字出的回复（useChat 的消息，
    流里没有思考用了几秒、工具的摘要与耗时、工具结果里图片的地址，这些取自 replyInfo.ts 记下的服务的实时事件）。
-   回复写入历史后，同一条消息改用历史里的数据，两边是同一种块。 */
-export type BPart =
-  | { kind: 'text'; text: string }
-  | { kind: 'image'; info: ImageInfo | null | undefined; name?: string }
-  | { kind: 'think'; text: string; sec?: number; streaming: boolean }
-  | {
-      kind: 'tool';
-      name: string;
-      state: 'running' | 'ok' | 'error';
-      input: unknown;
-      /** 工具给界面看的一句话；没有时界面显示工具名加参数的前一截 */
-      summary?: string;
-      /** 用了多少毫秒 */
-      ms?: number;
-      /** 结果的文字（接口里截短过的）与原来的长度 */
-      outText?: string;
-      chars?: number;
-      truncated?: boolean;
-      images: (ImageInfo | null | undefined)[];
-      errorText?: string;
-    };
+   回复写入历史后，同一条消息改用历史里的数据，两边是同一种块。
+   工具那一行写的话（块里的 label）在这里算好：工具给界面看的一句话，没有就是参数的前一截（argsLine）。 */
 
 /** 思考用了几秒：毫秒四舍五入，至少 1 秒 */
 export const secOf = (ms: number | null | undefined) =>
   typeof ms === 'number' ? Math.max(1, Math.round(ms / 1000)) : undefined;
 
 /** 历史消息 → 块 */
-export function partsOfRow(row: MsgRow): BPart[] {
-  const out: BPart[] = [];
+export function partsOfRow(row: MsgRow): ChatPart[] {
+  const out: ChatPart[] = [];
   let k = 0;
   for (const p of row.message.parts) {
     if (isFile(p)) {
@@ -59,7 +41,7 @@ export function partsOfRow(row: MsgRow): BPart[] {
         name: toolName(p),
         state: err ? 'error' : done ? 'ok' : 'running',
         input: (p as { input?: unknown }).input,
-        summary: info?.summary,
+        label: info?.summary ?? argsLine((p as { input?: unknown }).input),
         ms: info?.durationMs,
         outText: out_?.text,
         chars: info ? info.chars : (out_?.text.length ?? errorText?.length),
@@ -76,8 +58,8 @@ export function partsOfRow(row: MsgRow): BPart[] {
 const OUT_CHARS = 2000;
 
 /** 自己这个标签页里正在逐字出的回复（useChat 的消息）→ 块 */
-export function partsOfChat(m: ChatMessage, info: ReplyEntry | undefined): BPart[] {
-  const out: BPart[] = [];
+export function partsOfChat(m: ChatMessage, info: ReplyEntry | undefined): ChatPart[] {
+  const out: ChatPart[] = [];
   let k = 0;
   const reasonings = info?.reasonings ?? [];
   for (const p of m.parts) {
@@ -104,7 +86,7 @@ export function partsOfChat(m: ChatMessage, info: ReplyEntry | undefined): BPart
         name: getToolName(p as never),
         state: err ? 'error' : done ? 'ok' : 'running',
         input: t.input,
-        summary: live?.summary,
+        label: live?.summary ?? argsLine(t.input),
         ms: live?.ms,
         outText: o ? o.text.slice(0, OUT_CHARS) : undefined,
         chars: o?.text.length ?? t.errorText?.length,

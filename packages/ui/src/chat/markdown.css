@@ -1,0 +1,186 @@
+/* Markdown 的排版（Markdown.tsx）：助手的回复按 Markdown 画，marked 只管把文字拆成词元，画成 React 元素。
+   不加新的配色：链接是强调色（蓝），不是金色；行内代码、代码块用比气泡更深一点的底（黑加透明度）；引用左边一道细的蓝色竖线；表格的线很淡。
+   .ll-bubble 的 white-space 是 pre-wrap（保留别人发的消息里的换行），Markdown 里的换行已经变成 <br>，这里用 normal；
+   代码块、原始 HTML 块自己再设回 pre / pre-wrap。
+   排版里的 em、px 是这套排版自己调出来的专用值，写死（气泡里、终端里按各自的行距再调一套：气泡的在 bubble.css，终端的由用的项目写）。 */
+@layer ll.controls {
+  .ll-md {
+    white-space: normal;
+    min-width: 0;
+  }
+  .ll-md > :first-child {
+    margin-top: 0;
+  }
+  .ll-md > :last-child {
+    margin-bottom: 0;
+  }
+  .ll-md-p {
+    margin: 0 0 0.55em;
+  }
+  .ll-md-raw {
+    white-space: pre-wrap;
+  }
+  .ll-md strong {
+    font-weight: 650;
+  }
+  .ll-md del {
+    opacity: 0.7;
+  }
+  /* 标题：加粗、稍大一号的一行，不要大标题 */
+  .ll-md-h {
+    margin: 0.75em 0 0.3em;
+    font-weight: 650;
+    line-height: 1.4;
+  }
+  .ll-md-h1,
+  .ll-md-h2 {
+    font-size: 1.1em;
+  }
+  .ll-md-h3 {
+    font-size: 1.05em;
+  }
+  /* 列表 */
+  .ll-md-l {
+    margin: 0.25em 0 0.55em;
+    padding-left: 1.45em;
+  }
+  .ll-md-l .ll-md-l {
+    margin: 0.15em 0;
+  }
+  .ll-md-l li {
+    margin: 0.15em 0;
+  }
+  .ll-md-l li::marker {
+    color: var(--ll-fg-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .ll-md-l li > .ll-md-p {
+    margin-bottom: 0.3em;
+  }
+  .ll-md-box {
+    margin-right: 0.4em;
+    color: var(--ll-fg-dim);
+  }
+  /* 任务列表：方框代替圆点，放在圆点的位置 */
+  .ll-md-l li.ll-md-task {
+    list-style: none;
+    margin-left: -1.15em;
+  }
+  /* 引用 */
+  .ll-md-q {
+    margin: 0.45em 0 0.55em;
+    padding: 0.05em 0 0.05em 0.85em;
+    border-left: 2px solid color-mix(in srgb, var(--ll-accent) 55%, transparent);
+    color: color-mix(in srgb, currentColor 82%, transparent);
+  }
+  .ll-md-q > :last-child {
+    margin-bottom: 0;
+  }
+  /* 行内代码 */
+  .ll-md-ic {
+    padding: 0.08em 0.4em;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--ll-black) 30%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 7%, transparent);
+    color: var(--ll-fg);
+    font: 0.9em/1.4 var(--ll-font-mono);
+    overflow-wrap: anywhere;
+  }
+  /* 代码块：上面一条小字（左语言名，右「复制」），下面代码，太宽时横向滚动 */
+  .ll-md-code {
+    margin: 0.45em 0 0.6em;
+    border-radius: var(--ll-radius-md);
+    background: color-mix(in srgb, var(--ll-black) 34%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ll-fg) 8%, transparent);
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .ll-md-code-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ll-space-8);
+    min-height: 24px;
+    padding: 2px 6px 0 11px;
+    font-size: var(--ll-text-xs);
+    line-height: 1;
+    color: var(--ll-fg-dim);
+    user-select: none;
+  }
+  .ll-md-lang {
+    letter-spacing: 0.02em;
+  }
+  .ll-md-copy {
+    all: unset;
+    box-sizing: border-box;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: var(--ll-radius-sm);
+    font-size: var(--ll-text-xs);
+    color: var(--ll-fg-dim);
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-md-copy:hover {
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg);
+  }
+  .ll-md-copy:focus-visible {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: -1px;
+  }
+  /* 右边的内边距比左边宽：逐字时光标的小星星画在 <code> 里最后一个字的右边（左偏 2px、宽 0.8em，一共伸出约 12px），
+     紧贴着内容区的右沿时会超出 pre，撑出横向滚动条（高度 ±10px 来回跳）；右边多留的这几像素把它装在里面，
+     有没有光标滚动条都一样 */
+  .ll-md-code pre {
+    margin: 0;
+    padding: 2px 16px 10px 12px;
+    overflow-x: auto;
+    white-space: pre;
+    tab-size: 2;
+    color: var(--ll-fg);
+    font: 12.5px/1.55 var(--ll-font-mono);
+    scrollbar-width: thin;
+    scrollbar-color: var(--ll-scrollbar) transparent;
+  }
+  .ll-md-code code {
+    font: inherit;
+  }
+  /* 表格：线很淡；太宽时横向滚动（不拆单词，不撑破气泡） */
+  /* 右边留 4px：逐字时光标的小星星画在最后一格里最后一个字的右边（伸出约 12px，比单元格的右内边距多 1px 左右），
+     气泡是按内容收缩的，表格就是最宽的那样东西，星星刚好超出表格右沿时撑出横向滚动条（高度 ±10px 来回跳）。
+     多出的这 4px 把它装在里面，有没有光标都一样；表格真的比气泡宽时照旧横向滚动 */
+  .ll-md-tw {
+    box-sizing: border-box;
+    margin: 0.45em 0 0.6em;
+    padding-right: 4px;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ll-scrollbar) transparent;
+  }
+  .ll-md-t {
+    border-collapse: collapse;
+    font-size: 0.95em;
+  }
+  .ll-md-t th,
+  .ll-md-t td {
+    padding: 4px 11px;
+    border: 1px solid color-mix(in srgb, var(--ll-fg) 11%, transparent);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+  .ll-md-t th {
+    font-weight: 650;
+    background: color-mix(in srgb, var(--ll-black) 18%, transparent);
+  }
+  .ll-md-hr {
+    height: 1px;
+    margin: 0.75em 0;
+    border: 0;
+    background: color-mix(in srgb, var(--ll-fg) 14%, transparent);
+  }
+}
