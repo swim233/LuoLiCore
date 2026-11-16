@@ -1,4 +1,4 @@
-import { defaultUserAgents, FetchError, type Requester } from './request.js';
+import { defaultUserAgents, FetchError, type Requester } from '../../src/plugin-api.js';
 
 /** 怎么找 r.jina.ai：地址（后面直接接完整网址）与单次时限 */
 export type JinaOptions = { reader: string; timeoutMs: number };

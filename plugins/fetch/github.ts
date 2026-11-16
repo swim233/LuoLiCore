@@ -1,7 +1,6 @@
 import { z } from 'zod';
-import { decodeText } from './body.js';
+import { decodeText, defaultUserAgents, type FetchResponse } from '../../src/plugin-api.js';
 import { truncatedNote, type Page } from './page.js';
-import { defaultUserAgents, type FetchResponse } from './request.js';
 import type { SiteContext, SiteHandler } from './sites.js';
 
 // GitHub：文件取原文；仓库首页、issue、PR 走公开接口（不带 token，每 IP 每小时 60 次）

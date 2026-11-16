@@ -1,15 +1,18 @@
 import { z } from 'zod';
 import {
+  createRequester,
   definePlugin,
   defineTool,
+  FetchError,
   ToolError,
+  type FetchErrorKind,
   type Logger,
+  type Requester,
   type ToolDefinition,
 } from '../../src/plugin-api.js';
 import { defaultJina } from './jina.js';
 import { fetchSummary, renderPage, truncatedNote } from './page.js';
 import { readGeneric, type ReadOptions, type ReadResult } from './read.js';
-import { createRequester, FetchError, type FetchErrorKind, type Requester } from './request.js';
 import { siteHandlers, type SiteHandler } from './sites.js';
 
 // fetch：读一个网址，转成 Markdown 交给模型（ADR-0007）

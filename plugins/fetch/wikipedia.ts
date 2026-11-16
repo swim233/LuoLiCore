@@ -1,8 +1,8 @@
 import { parseHTML } from 'linkedom';
 import { z } from 'zod';
+import { defaultUserAgents } from '../../src/plugin-api.js';
 import { bodyToMarkdown, type HtmlDocument } from './convert.js';
 import { truncatedNote, type Page } from './page.js';
-import { defaultUserAgents } from './request.js';
 import type { SiteContext, SiteHandler } from './sites.js';
 
 // 维基百科：REST 接口取摘要（page/summary）与正文（page/mobile-html），正文按节转成 Markdown

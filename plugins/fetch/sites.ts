@@ -1,8 +1,7 @@
-import type { Logger } from '../../src/plugin-api.js';
+import type { Logger, Requester } from '../../src/plugin-api.js';
 import type { FetchMode } from './convert.js';
 import { createGitHubHandler } from './github.js';
 import type { Page } from './page.js';
-import type { Requester } from './request.js';
 import { createWikipediaHandler } from './wikipedia.js';
 
 // 站点处理器：按网址认出网站，改走它的公开接口（ADR-0007「站点处理器」）。

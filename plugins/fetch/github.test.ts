@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { TextAndImages } from '../../src/plugin-api.js';
+import {
+  createRequester,
+  defaultUserAgents,
+  TextAndImages,
+  type Requester,
+} from '../../src/plugin-api.js';
 import { createGitHubHandler } from './github.js';
 import { createFetchTool } from './index.js';
-import { createRequester, defaultUserAgents, type Requester } from './request.js';
 import {
   caller,
   closeAll,

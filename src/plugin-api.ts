@@ -1,6 +1,7 @@
 // 插件的入口文件（ADR-0014）：plugins/ 下的插件要用的东西只从这里引，不引 src/ 下别的文件，
 // 也不引别的插件（lint 规则保证）。以后插件要单独打包时，把这个文件换成一个包就行。
-// 这里只转出核心里插件用得到的东西，用到新的再加；这个文件只引核心，不引前端、服务的代码
+// 这里只转出核心、安全请求（src/net/）里插件用得到的东西，用到新的再加；这个文件只引这两处，
+// 不引前端、服务的代码。插件的测试另有 src/plugin-test-api.ts
 import type { ToolDefinition } from './core/index.js';
 
 export {
@@ -14,6 +15,15 @@ export {
   type NewFile,
   type ToolDefinition,
 } from './core/index.js';
+export {
+  createRequester,
+  decodeText,
+  defaultUserAgents,
+  FetchError,
+  type FetchErrorKind,
+  type FetchResponse,
+  type Requester,
+} from './net/index.js';
 
 /** definePlugin 的结果，插件清单（plugins/index.ts）里列的就是它 */
 export type Plugin = {

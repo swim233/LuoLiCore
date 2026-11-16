@@ -6,8 +6,8 @@ import { Agent, buildConnector, type Dispatcher } from 'undici';
 import { isBlockedAddress } from './address.js';
 import { decodeText, decompressed, mimeTypeOf, readCapped } from './body.js';
 
-// 安全请求：fetch 的所有请求（网页、站点接口、r.jina.ai）都经过这一层（ADR-0007「安全」）。
-// 不写日志，出错信息里不带 URL
+// 安全请求：发往外网的请求都经过这一层（ADR-0007「安全」），如 fetch 插件的全部请求（网页、站点接口、
+// r.jina.ai）；插件经 src/plugin-api.ts 用它。不写日志，出错信息里不带 URL
 
 /** 默认依次用的 User-Agent：先用 curl 与自报身份的 bot，被拒再换成桌面 Chrome */
 export const defaultUserAgents = [

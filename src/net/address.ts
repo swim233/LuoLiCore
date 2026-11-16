@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 type Range = { base: bigint; bits: number };
 
 // 不许连的地址段（ADR-0007「安全」）。198.18.0.0/15 不拦：fake-ip 模式的代理会把所有域名
-// 解析到这一段，拦了 fetch 就全部失效
+// 解析到这一段，拦了发往外网的请求就全部失效
 const blockedIPv4 = [
   '0.0.0.0/8',
   '10.0.0.0/8',

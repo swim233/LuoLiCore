@@ -24,14 +24,21 @@ const pluginsDir = '(^|[/#])plugins(/|$)';
 // 插件的入口文件（src/plugin-api.ts）：最后一段是 plugin-api 的写法（带不带扩展名、写几个 ../ 都算）。
 // 它转出了核心的代码，src/ 下只有洛璃服务能引它，不然网页面板、CLI 能经它绕过「只引核心的类型」
 const pluginApiFile = '(^|[/#])plugin-api(\\.[cm]?[jt]s)?$';
+// 插件的测试用的入口文件（src/plugin-test-api.ts）：同上的写法。只有插件的测试文件能引它
+const pluginTestApiFile = '(^|[/#])plugin-test-api(\\.[cm]?[jt]s)?$';
+// 安全请求（src/net/）：任何含 net 路径段的写法（node:net 不算：那一段是 node:net）
+const netDir = '(^|[/#])net(/|$)';
 
 // core 不得引用的模块
 const forbiddenInCore = [
   ...frontends,
   ...serverAndWeb,
-  // 插件与插件的入口文件（src/plugin-api.ts）：core 只认 defineTool 的形状，不认识插件
+  // 插件与插件的两个入口文件：core 只认 defineTool 的形状，不认识插件
   pluginsDir,
   pluginApiFile,
+  pluginTestApiFile,
+  // 安全请求（src/net/）：core 不发外网请求，图片等都由前端、服务交给它
+  netDir,
   // core 只依赖 Logger 接口，不引用 pino
   '^pino(/|$)',
   '^(node:)?readline(/|$)',
@@ -43,10 +50,11 @@ const forbiddenInCore = [
 // 正则里要当普通字符的模块名（如 @mozilla/readability）先转义
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// node 内置模块不带前缀的名字（fs、path……）
+const nodeModuleNames = builtinModules.filter((name) => !name.startsWith('_'));
+
 // 网页面板里没有 Node：node: 模块与不带前缀的内置模块（fs、path……）都不能引用
-const nodeBuiltins = `^(node:|(${builtinModules
-  .filter((name) => !name.startsWith('_'))
-  .join('|')})(/|$))`;
+const nodeBuiltins = `^(node:|(${nodeModuleNames.join('|')})(/|$))`;
 
 // 网页面板不得引用的目录：服务端、core、各前端与它们共用的代码（src/ 下的同名目录）
 const outsideDirs = 'core|server|cli|telegram|shared|requests';
@@ -65,14 +73,21 @@ const webPatterns = (d) => [
 ];
 const webPatternsDeep = [`(^|[/#])(${outsideDirs})(/|$)`, nodeBuiltins];
 // 插件（根目录的 plugins/）：走出 src/web 到仓库根要 d+2 个 ../（中间夹着 ./ 也算）；
-// 绝对路径里含 plugins 路径段、子路径导入 #plugins 也拦。插件的入口文件 src/plugin-api.ts 也拦。
-// import type 也不行
-const webPluginPatterns = (d) => [
+// 绝对路径里含 plugins 路径段、子路径导入 #plugins 也拦。插件的两个入口文件也拦。
+// 安全请求（src/net/）：走出 src/web 到 src/ 要 d+1 个 ../，含 src/net 路径段、#net 也拦。
+// 这几样 import type 也不行
+const webStrictPatterns = (d) => [
   `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 2}}plugins(/|$)`,
   '^/(.*/)?plugins(/|$)',
   '^#plugins(/|$)',
   pluginApiFile,
+  pluginTestApiFile,
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 1}}net(/|$)`,
+  '(^|/)src/net(/|$)',
+  '^#net(/|$)',
 ];
+// d 超过 WEB_DEPTHS 的文件：任何路径段含这些目录名、文件名的都拦
+const webStrictPatternsDeep = [pluginsDir, pluginApiFile, pluginTestApiFile, netDir];
 
 /**
  * 一组引用规则：patterns 里任一个匹配就报 message。
@@ -142,6 +157,11 @@ const onlyPluginList = rule(
   ['(^|[/#])plugins(/(?!index\\.js$)|$)'],
   '洛璃服务只引插件清单 plugins/index.js，不引插件里的文件',
 );
+// 插件的测试用的入口文件只给插件的测试文件用：src/ 下的代码（含洛璃服务、测试）都不能引
+const noPluginTestApi = rule(
+  [pluginTestApiFile],
+  '插件测试的入口文件（src/plugin-test-api.ts）只给插件的测试文件（*.test.*、test-*.*）用',
+);
 
 // CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
 // tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、网页。
@@ -156,48 +176,78 @@ const cliForbidden = [
 ];
 
 const WEB_MESSAGE = '网页面板不得引用服务端、core、前端的代码或 node 模块（import type 可以）';
-const WEB_PLUGIN_MESSAGE =
-  '网页面板不得引用插件（plugins/）和插件的入口文件（src/plugin-api.ts），import type 也不行';
+const WEB_STRICT_MESSAGE =
+  '网页面板不得引用插件（plugins/）、插件的两个入口文件（src/plugin-api.ts、src/plugin-test-api.ts）和安全请求（src/net/），import type 也不行';
 
-// 插件的入口文件（src/plugin-api.ts）：只引核心（./core/…），别的一律拦：
-// 不以 ./core/ 开头的（别的相对路径、npm 包、node 模块、绝对路径、#子路径）、任何含 .. 路径段的写法
-const pluginApiPatterns = ['^(?!\\./core/)', '(^|/)\\.\\.(/|$)'];
+// 插件的入口文件（src/plugin-api.ts）：只引核心（./core/…）和安全请求（./net/…），别的一律拦：
+// 不以这两个开头的（别的相对路径、npm 包、node 模块、绝对路径、#子路径）、任何含 .. 路径段的写法、
+// 测试用的文件（test-*.*、*.test.*，如 ./net/test-server.js：插件的测试另走 src/plugin-test-api.ts）
+const pluginApiPatterns = [
+  '^(?!\\./(core|net)/)',
+  '(^|/)\\.\\.(/|$)',
+  '(^|/)test-[^/]*$',
+  '\\.test(\\.[cm]?[jt]s)?$',
+];
 const PLUGIN_API_MESSAGE =
-  '插件的入口文件只引核心（./core/…），不引 npm 包、node 模块和前端、服务、网页的代码与插件';
+  '插件的入口文件只引核心（./core/…）和安全请求（./net/…，测试用的文件除外），不引 npm 包、node 模块和前端、服务、网页的代码与插件';
+// 插件的测试用的入口文件（src/plugin-test-api.ts）：只引测试用的本地 HTTP 服务 ./net/test-server.js
+const pluginTestApiPatterns = ['^(?!\\./net/test-server\\.js$)'];
+const PLUGIN_TEST_API_MESSAGE = '插件测试的入口文件只引 ./net/test-server.js';
+
+// 安全请求（src/net/）：插件（经入口文件）和洛璃服务都用，所以自成一块，只许引用自己目录里的文件、
+// node 内置模块和 undici；测试文件（*.test.*、test-*.*）另外可以引 vitest。import type 也一样。
+// 按文件所在的深度（d = src/net 到文件之间隔了几层目录）分别写：走出 src/net 要 d+1 个 ../
+// （中间夹着 ./ 也算）；先进目录再往上退的写法一律拦；不以 . 开头的只放过 node 模块与 undici。
+// d 达到 NET_DEPTHS 的文件用最宽的写法
+const NET_DEPTHS = 3;
+const NET_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
+const netDeps = ['undici'];
+const netPatterns = (d, deps) => [
+  `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 1}}`,
+  '(^|/)[^/.][^/]*/\\.\\.(/|$)',
+  `^(?!\\.|node:|(${[...nodeModuleNames, ...deps].map(escapeRe).join('|')})(/|$))`,
+];
+const NET_MESSAGE =
+  '安全请求（src/net/）只许引用自己目录里的文件、node 模块和 undici，不得引用 src/ 下别的代码、插件和别的包';
 
 // 插件（plugins/<名字>/）：只许引用自己这个插件目录里的文件、src/plugin-api.js（插件要用的东西都从这里引）、
 // node 内置模块和根 package.json 里声明的依赖；不得引用 src/ 下别的代码、别的插件、工作区的包（@luoli/…），
-// import type 也不行。测试文件（*.test.*、test-*.*）另外可以引 vitest。
+// import type 也不行。测试文件（*.test.*、test-*.*）另外可以引 vitest 和 src/plugin-test-api.js。
 // 按文件所在的深度（d = 插件目录到文件之间隔了几层目录）分别写：走出插件目录要 d+1 个 ../
-// （中间夹着 ./ 也算），只放过正好 d+2 个 ../ 走到的 src/plugin-api.js；先进目录再往上退的写法（a/../../x）
+// （中间夹着 ./ 也算），只放过正好 d+2 个 ../ 走到的入口文件；先进目录再往上退的写法（a/../../x）
 // 一律拦；不以 . 开头的（裸模块名、绝对路径、#子路径）只放过 node 模块与声明了的依赖。
 // d 达到 PLUGIN_DEPTHS 的文件用最宽的写法：开头有 PLUGIN_DEPTHS+1 个以上 ../ 的都拦，
-// 任意个 ../ 接 src/plugin-api.js 都放过
+// 任意个 ../ 接入口文件都放过
 const pluginDeps = Object.keys({
   ...rootManifest.dependencies,
   ...rootManifest.peerDependencies,
   ...rootManifest.optionalDependencies,
 }).filter((name) => !name.startsWith('@luoli/'));
-const nodeModuleNames = builtinModules.filter((name) => !name.startsWith('_'));
 const PLUGIN_DEPTHS = 5;
 const PLUGIN_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
-const pluginPatterns = (d, deps) => [
-  `^(?!(\\.\\./)${d < PLUGIN_DEPTHS ? `{${d + 2}}` : '+'}src/plugin-api\\.js$)(\\./)*(\\.\\.(/|$)(\\./)*){${Math.min(d, PLUGIN_DEPTHS) + 1}}`,
+// entries：能走到的入口文件（src/ 下的文件名，正则），非测试文件是 plugin-api，测试文件多一个 plugin-test-api
+const pluginPatterns = (deps, entries) => (d) => [
+  `^(?!(\\.\\./)${d < PLUGIN_DEPTHS ? `{${d + 2}}` : '+'}src/(${entries})\\.js$)(\\./)*(\\.\\.(/|$)(\\./)*){${Math.min(d, PLUGIN_DEPTHS) + 1}}`,
   '(^|/)[^/.][^/]*/\\.\\.(/|$)',
   `^(?!\\.|node:|(${[...nodeModuleNames, ...deps].map(escapeRe).join('|')})(/|$))`,
 ];
 const PLUGIN_MESSAGE =
   '插件只许引用自己这个插件目录里的文件、src/plugin-api.js、node 模块和根 package.json 里声明的依赖，不得引用 src/ 下别的代码、别的插件和工作区的包（@luoli/…）';
-const pluginRules = (names, deps, message) => [
-  ...Array.from({ length: PLUGIN_DEPTHS }, (_, d) =>
+
+/**
+ * 自成一块的目录（插件、安全请求）的引用规则：按文件在 base 下的深度 d 分别写，
+ * d 达到 depths 的文件用 patterns(depths) 那一份最宽的写法。names 是文件名的通配（如 *.test.ts）
+ */
+const dirRules = (base, names, depths, patterns, message) => [
+  ...Array.from({ length: depths }, (_, d) =>
     restrictImports(
-      names.map((name) => `plugins/*/${'*/'.repeat(d)}${name}`),
-      rule(pluginPatterns(d, deps), message),
+      names.map((name) => `${base}${'*/'.repeat(d)}${name}`),
+      rule(patterns(d), message),
     ),
   ),
   restrictImports(
-    names.map((name) => `plugins/*/${'*/'.repeat(PLUGIN_DEPTHS)}**/${name}`),
-    rule(pluginPatterns(PLUGIN_DEPTHS, deps), message),
+    names.map((name) => `${base}${'*/'.repeat(depths)}**/${name}`),
+    rule(patterns(depths), message),
   ),
 ];
 // 插件清单（plugins/index.ts 等 plugins/ 下直接放的文件）：只许引各插件的入口（./<名字>/index.js）
@@ -314,32 +364,56 @@ export default defineConfig(
   globalIgnores(['node_modules', 'dist', '.grill', '.handoff', 'coverage']),
   js.configs.recommended,
   tseslint.configs.recommended,
-  // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/；不得引用插件。
-  // 写在最前面：后面 core、服务、插件的入口文件、CLI 各自的规则对它们的文件整份覆盖这一份，
-  // 所以那几处也带上组件库、packages/ 这两组，插件各自另写
-  { ...restrictImports(['src/**'], noUi, viaPackageName, noPlugins), ignores: ['src/web/**'] },
+  // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/；不得引用插件、
+  // 插件的两个入口文件。写在最前面：后面 core、服务、插件的两个入口文件、安全请求、CLI 各自的规则
+  // 对它们的文件整份覆盖这一份，所以那几处也带上自己要守的几组
+  {
+    ...restrictImports(['src/**'], noUi, viaPackageName, noPlugins, noPluginTestApi),
+    ignores: ['src/web/**'],
+  },
   restrictImports(
     ['src/core/**'],
-    rule(forbiddenInCore, 'core 不得引用前端、服务、网页、平台代码或插件'),
+    rule(forbiddenInCore, 'core 不得引用前端、服务、网页、平台代码、插件或安全请求（src/net/）'),
     noUi,
     viaPackageName,
   ),
-  // 洛璃服务：只引插件清单，不引插件里的文件
-  restrictImports(['src/server/**'], onlyPluginList, noUi, viaPackageName),
-  // 插件的入口文件：只引核心
-  restrictImports(
-    ['src/plugin-api.ts'],
-    rule(pluginApiPatterns, PLUGIN_API_MESSAGE),
-    noUi,
-    viaPackageName,
+  // 洛璃服务：只引插件清单，不引插件里的文件；不引插件测试的入口文件
+  restrictImports(['src/server/**'], onlyPluginList, noPluginTestApi, noUi, viaPackageName),
+  // 插件的入口文件：只引核心和安全请求
+  restrictImports(['src/plugin-api.ts'], rule(pluginApiPatterns, PLUGIN_API_MESSAGE)),
+  // 插件测试的入口文件：只引测试用的本地 HTTP 服务
+  restrictImports(['src/plugin-test-api.ts'], rule(pluginTestApiPatterns, PLUGIN_TEST_API_MESSAGE)),
+  // 安全请求：只引自己目录里的文件、node 模块和 undici
+  ...dirRules(
+    'src/net/',
+    [`*.${NET_EXT}`],
+    NET_DEPTHS,
+    (d) => netPatterns(d, netDeps),
+    NET_MESSAGE,
+  ),
+  // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
+  ...dirRules(
+    'src/net/',
+    [`*.test.${NET_EXT}`, `test-*.${NET_EXT}`],
+    NET_DEPTHS,
+    (d) => netPatterns(d, [...netDeps, 'vitest']),
+    NET_MESSAGE + '；测试文件（*.test.*、test-*.*）另外可以引 vitest',
   ),
   // 插件：只引自己目录里的文件、src/plugin-api.js、node 模块和声明了的依赖
-  ...pluginRules([`*.${PLUGIN_EXT}`], pluginDeps, PLUGIN_MESSAGE),
-  // 测试文件另外可以引 vitest（写在后面，对测试文件覆盖上面那一组）
-  ...pluginRules(
+  ...dirRules(
+    'plugins/*/',
+    [`*.${PLUGIN_EXT}`],
+    PLUGIN_DEPTHS,
+    pluginPatterns(pluginDeps, 'plugin-api'),
+    PLUGIN_MESSAGE,
+  ),
+  // 测试文件另外可以引 vitest 和 src/plugin-test-api.js（写在后面，对测试文件覆盖上面那一组）
+  ...dirRules(
+    'plugins/*/',
     [`*.test.${PLUGIN_EXT}`, `test-*.${PLUGIN_EXT}`],
-    [...pluginDeps, 'vitest'],
-    PLUGIN_MESSAGE + '；测试文件（*.test.*、test-*.*）另外可以引 vitest',
+    PLUGIN_DEPTHS,
+    pluginPatterns([...pluginDeps, 'vitest'], 'plugin-api|plugin-test-api'),
+    PLUGIN_MESSAGE + '；测试文件（*.test.*、test-*.*）另外可以引 vitest 和 src/plugin-test-api.js',
   ),
   // 插件清单：只引各插件的入口和 ../src/plugin-api.js
   restrictImports([`plugins/*.${PLUGIN_EXT}`], rule(pluginListPatterns, PLUGIN_LIST_MESSAGE)),
@@ -376,20 +450,20 @@ export default defineConfig(
     files: ['packages/markdown/**/*.ts'],
     rules: { '@typescript-eslint/no-import-type-side-effects': 'error' },
   },
-  // 网页面板：不得引用服务端、core、前端的代码或 node 模块（import type 可以）；不得引用插件
-  // （import type 也不行）；组件库只能按包名引
+  // 网页面板：不得引用服务端、core、前端的代码或 node 模块（import type 可以）；不得引用插件、
+  // 插件的两个入口文件、安全请求（import type 也不行）；组件库只能按包名引
   ...Array.from({ length: WEB_DEPTHS }, (_, d) =>
     restrictImports(
       [`src/web/${'*/'.repeat(d)}*.{ts,tsx}`],
       rule(webPatterns(d), WEB_MESSAGE, { allowTypeImports: true }),
-      rule(webPluginPatterns(d), WEB_PLUGIN_MESSAGE),
+      rule(webStrictPatterns(d), WEB_STRICT_MESSAGE),
       viaPackageName,
     ),
   ),
   restrictImports(
     [`src/web/${'*/'.repeat(WEB_DEPTHS)}**/*.{ts,tsx}`],
     rule(webPatternsDeep, WEB_MESSAGE, { allowTypeImports: true }),
-    rule([pluginsDir, pluginApiFile], WEB_PLUGIN_MESSAGE),
+    rule(webStrictPatternsDeep, WEB_STRICT_MESSAGE),
     viaPackageName,
   ),
   {
@@ -409,8 +483,9 @@ export default defineConfig(
       noUi,
       viaPackageName,
       noPlugins,
+      noPluginTestApi,
     ),
-    // 测试走最前面那一份（不得引用组件库、插件）
+    // 测试走最前面那一份（不得引用组件库、插件、插件的两个入口文件）
     ignores: ['src/cli/**/*.test.ts'],
   },
   {

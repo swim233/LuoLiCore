@@ -1,9 +1,15 @@
-import { describeImage, imageSize, isSupportedImage, ToolError } from '../../src/plugin-api.js';
-import { decodeText } from './body.js';
+import {
+  decodeText,
+  describeImage,
+  imageSize,
+  isSupportedImage,
+  ToolError,
+  type FetchResponse,
+  type Requester,
+} from '../../src/plugin-api.js';
 import { convertHtml, isPoorConversion, type Converted, type FetchMode } from './convert.js';
 import { readViaJina, type JinaOptions } from './jina.js';
 import { truncatedNote, type Page } from './page.js';
-import type { FetchResponse, Requester } from './request.js';
 
 export type ReadOptions = {
   requester: Requester;

@@ -1,8 +1,12 @@
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TextAndImages, ToolError } from '../../src/plugin-api.js';
+import {
+  createRequester,
+  defaultUserAgents,
+  TextAndImages,
+  ToolError,
+} from '../../src/plugin-api.js';
 import { createFetchTool, fetchPlugin, fetchTool } from './index.js';
-import { createRequester, defaultUserAgents } from './request.js';
 import type { SiteHandler } from './sites.js';
 import {
   caller,
