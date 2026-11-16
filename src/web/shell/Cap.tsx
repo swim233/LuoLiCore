@@ -45,7 +45,7 @@ export const Cap = memo(function Cap({ id, island = false }: { id: string; islan
         dragStart(ev, id, 'cap');
       }}
     >
-      <i className="w-edge" />
+      <i className="ll-edge" />
       <span className="cap-icon">{id === 'now' ? <Badge size={26} /> : def.icon}</span>
       <span className="cap-name">{def.name}</span>
       <span className="cap-text" ref={textRef}>

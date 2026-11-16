@@ -194,7 +194,7 @@ export function cloneFace(face: Face): CloneEl {
   c.removeAttribute('data-placeholder');
   c.classList.add('is-frozen', 'is-morphing');
   if (src.closest('.island-slot')) c.classList.add('in-island');
-  c.querySelectorAll('.w-edge.run').forEach((n) => n.classList.remove('run'));
+  c.querySelectorAll('.ll-edge[data-run]').forEach((n) => n.removeAttribute('data-run'));
   c.setAttribute('aria-hidden', 'true');
   c.inert = true;
   c.dataset.clone = '1';

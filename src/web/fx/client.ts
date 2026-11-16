@@ -1,24 +1,12 @@
-import { env, particleScale } from '@luoli/ui/env';
-import { motionOn } from '@luoli/ui/motion';
-import { cssRGB } from '@luoli/ui/util';
+import { fx } from '@luoli/ui/fx';
 import type { BadgeReply, BadgeStats, Op } from './badge-msg';
 
-/* 星空和粒子的主线程这一头：把画布交给 Worker（OffscreenCanvas），之后只发消息（尺寸、动画开关、全屏停住、粒子的位置） */
-interface RectLike {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  right: number;
-  bottom: number;
-}
+/* 徽记的小画布的主线程这一头，加上和整屏星尘（库的 @luoli/ui/fx 的 fx）共用的那个 Worker。
+   整屏的星空、星尘在库里（fx.worker.ts 是这个 Worker 的入口：先问徽记，再问库的 particleMessage）；这里只留徽记的部分 */
 const dprOf = () => Math.min(2, window.devicePixelRatio || 1);
-let skyW: Worker | null = null,
-  fxW: Worker | null = null,
-  fxCanvas = false;
-const SKY_FPS = 30;
-/* 星尘 Worker：整屏的星尘和徽记的小画布共用一个。徽记可能比整屏画布先挂上，所以谁先用谁创建 */
-function fxWorker() {
+let fxW: Worker | null = null;
+/* 星尘 Worker：整屏的星尘和徽记的小画布共用一个，由这里建好、app.tsx 交给库的 fx.start。徽记可能比整屏画布先挂上，所以谁先用谁创建 */
+export function fxWorker() {
   if (!fxW) {
     fxW = new Worker(new URL('./fx.worker.ts', import.meta.url), { type: 'module' });
     fxW.onmessage = (e: MessageEvent<BadgeReply>) => {
@@ -28,128 +16,6 @@ function fxWorker() {
   return fxW;
 }
 const statsWait: ((s: BadgeStats[]) => void)[] = [];
-
-export const sky = {
-  start(canvas: HTMLCanvasElement) {
-    if (skyW) return;
-    const off = canvas.transferControlToOffscreen();
-    skyW = new Worker(new URL('./sky.worker.ts', import.meta.url), { type: 'module' });
-    const colors = {
-      goldStar: `rgb(${cssRGB('--ll-star-dust')})`,
-      fg2: `rgb(${cssRGB('--ll-fg-2')})`,
-      fg: `rgb(${cssRGB('--ll-fg')})`,
-      goldLine: `rgba(${cssRGB('--ll-star')},.06)`,
-      goldDot: `rgba(${cssRGB('--ll-star-dust')},.34)`,
-    };
-    skyW.postMessage(
-      {
-        type: 'init',
-        canvas: off,
-        w: window.innerWidth,
-        h: window.innerHeight,
-        dpr: dprOf(),
-        colors,
-        narrow: env.narrow,
-        lowPower: env.lowPower,
-        motion: motionOn(),
-        fps: SKY_FPS,
-      },
-      [off],
-    );
-  },
-  size() {
-    skyW?.postMessage({
-      type: 'size',
-      w: window.innerWidth,
-      h: window.innerHeight,
-      dpr: dprOf(),
-      narrow: env.narrow,
-    });
-  },
-  /* 全屏期间整个星空停住：被暗层盖着看不清，也省得后面的模糊层跟着星星每帧重算 */
-  hold(on: boolean) {
-    skyW?.postMessage({ type: 'hold', on });
-  },
-  sync() {
-    skyW?.postMessage({ type: 'motion', on: motionOn() });
-  },
-  /* 星座的点和线各自的透明度：第 6 版的接口位置 */
-  setConstellation(id: number, o: { dotAlpha?: number[]; lineAlpha?: number[] }) {
-    skyW?.postMessage({ type: 'con', id, ...o });
-  },
-};
-export const fx = {
-  start(canvas: HTMLCanvasElement) {
-    if (fxCanvas) return;
-    fxCanvas = true;
-    const off = canvas.transferControlToOffscreen();
-    fxWorker().postMessage(
-      { type: 'init', canvas: off, w: window.innerWidth, h: window.innerHeight, dpr: dprOf() },
-      [off],
-    );
-  },
-  size() {
-    if (fxCanvas)
-      fxW?.postMessage({ type: 'size', w: window.innerWidth, h: window.innerHeight, dpr: dprOf() });
-    badgeFx.size();
-  },
-  /* 粒子的颜色在发给 Worker 之前从 CSS 变量读取（配色变了跟着变） */
-  palette(kind: 'burst' | 'assemble' | 'scatter') {
-    const GOLD = cssRGB('--ll-star-pale'),
-      BLUE = cssRGB('--ll-fg-2'),
-      WHITE = cssRGB('--ll-white');
-    return kind === 'scatter' ? [GOLD, BLUE, WHITE] : [GOLD, GOLD, BLUE, WHITE];
-  },
-  /* 回复完成：星尘散开 */
-  burst(x: number, y: number, { n = 30, speed = 150 }: { n?: number; speed?: number } = {}) {
-    if (!motionOn() || !fxCanvas) return;
-    fxW!.postMessage({
-      type: 'burst',
-      x,
-      y,
-      n: Math.max(6, Math.round(n * particleScale())),
-      speed,
-      palette: this.palette('burst'),
-    });
-  },
-  /* 新增部件：星点从四周汇聚成形；时间到 80% 就 resolve，不等粒子全部落完 */
-  assemble(r: RectLike, ms = 950) {
-    if (!motionOn() || !fxCanvas) return Promise.resolve();
-    fxW!.postMessage({
-      type: 'assemble',
-      r: {
-        left: r.left,
-        top: r.top,
-        width: r.width,
-        height: r.height,
-        right: r.right,
-        bottom: r.bottom,
-      },
-      n: Math.max(24, Math.round(90 * particleScale())),
-      ms,
-      palette: this.palette('assemble'),
-    });
-    return new Promise<void>((res) => setTimeout(res, ms * 0.8));
-  },
-  /* 部件消散 */
-  scatter(r: RectLike) {
-    if (!motionOn() || !fxCanvas) return;
-    fxW!.postMessage({
-      type: 'scatter',
-      r: {
-        left: r.left,
-        top: r.top,
-        width: r.width,
-        height: r.height,
-        right: r.right,
-        bottom: r.bottom,
-      },
-      n: Math.max(14, Math.round(50 * particleScale())),
-      palette: this.palette('scatter'),
-    });
-  },
-};
-
 /* 徽记的小画布：每个徽记一张，交给同一个 Worker。消息的结构见 badge-msg.ts */
 const badgeIds = new Set<number>();
 let badgeSeq = 0;
@@ -192,6 +58,8 @@ export const badgeFx = {
     });
   },
 };
+/* 窗口大小、像素比变了：整屏的星尘重设大小时（fx.size），徽记的小画布也跟着重设 */
+fx.onResize(() => badgeFx.size());
 (window as Window & { __badgeStats?: () => Promise<BadgeStats[]> }).__badgeStats = () =>
   badgeFx.stats();
 /* DPR 变了（缩放 110%、125%，换屏）：不一定有 resize 事件，用分辨率的媒体查询盯着 */

@@ -1,5 +1,6 @@
 import { createStore, useStore } from '@luoli/ui/store';
 import { storage } from '@luoli/ui/storage';
+import type { HoverEffect } from '@luoli/ui/fx';
 import { getMotionMode, setMotionMode } from '@luoli/ui/motion';
 
 /* 用户偏好：存 localStorage（键同第 4.1 版）。
@@ -16,6 +17,9 @@ export interface Prefs {
   fps: boolean;
 }
 const HOVERS: Prefs['hover'][] = ['B', 'C', 'D'];
+/** 偏好值 B、C、D 在库（@luoli/ui/fx）里叫流光 sweep、边光 glow、倾斜 tilt */
+const HOVER_EFFECTS: Record<Prefs['hover'], HoverEffect> = { B: 'sweep', C: 'glow', D: 'tilt' };
+export const hoverEffectOf = (hover: Prefs['hover']): HoverEffect => HOVER_EFFECTS[hover];
 export const prefs = createStore<Prefs>({
   hover: HOVERS.find((h) => h === stored.hover) ?? 'C',
   collapse: stored.collapse === 5 ? 5 : 30,

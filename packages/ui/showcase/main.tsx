@@ -4,10 +4,13 @@ import '@fontsource-variable/noto-sans-sc';
 import { createRoot } from 'react-dom/client';
 import '../src/styles.css';
 import '../src/chat/chat.css';
+import '../src/fx/fx.css';
 import '../src/easing';
 import './showcase.css';
 import './showcase-chat.css';
+import './showcase-fx.css';
 import { installBubbleFrame } from '../src/chat';
+import { sky } from '../src/fx';
 import { motionOn, subscribeMotion } from '../src/motion';
 import { startSkyStars } from '../src/sky-stars';
 import { App } from './App';
@@ -28,6 +31,7 @@ const applyMotion = () => {
   const r = document.documentElement;
   r.classList.toggle('motion', motionOn());
   r.classList.toggle('still', !motionOn());
+  sky.sync(); // 背景星空：关了就停在一帧静态图，开了接着动（还没启动时什么也不做）
 };
 applyMotion();
 subscribeMotion(applyMotion);

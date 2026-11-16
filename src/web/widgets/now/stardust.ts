@@ -1,5 +1,5 @@
 import { motionOn } from '@luoli/ui/motion';
-import { fx } from '../../fx/client';
+import { fx } from '@luoli/ui/fx';
 import { desk } from '../../state/desk';
 import { faces } from '../../shell/faces';
 import type { CursorRef } from '@luoli/ui/chat';

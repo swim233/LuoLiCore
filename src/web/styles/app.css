@@ -87,7 +87,7 @@ body::before {
   color: var(--ll-fg);
 }
 
-/* ---------- 背景星空（<canvas id="sky">，由 fx/sky.worker 在 Worker 里画）、特效画布 ---------- */
+/* ---------- 背景星空（<canvas id="sky">，由库的 @luoli/ui/fx 在 Worker 里画）、特效画布 ---------- */
 .sky,
 .fx {
   position: fixed;
@@ -421,13 +421,6 @@ body::before {
   flex: 1 1 auto;
   min-height: 0;
 }
-.w-edge {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  z-index: 7;
-}
 
 /* ---------- 窗格（@luoli/ui/scroll 的 Pane）：留在面板里的 ----------
    窗格本身的样子（滚动区、上下浮层、4 层模糊和渐变的底）是库的，在 @luoli/ui 的 scroll/pane.css，对外的约定也写在那里。
@@ -573,89 +566,17 @@ body::before {
   animation: cap-call 1.6s ease-in-out infinite;
 }
 
-/* ---------- 悬停的三种效果（只在有鼠标的设备上） ----------
-   窗口没有边框：流光、边光画在窗口的圆角边缘上（1px 的一圈，遮罩挖空），在浮层、标题栏上面 */
-/* C 边光：鼠标附近的那段边被照亮（只露出 1px 的边）；卡片内部不放跟着鼠标走的光斑 */
-.w-card::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity var(--ll-dur-card);
-  padding: 1px;
-  background: radial-gradient(
-    280px circle at var(--mx, 50%) var(--my, 50%),
-    rgba(225, 232, 255, 0.85),
-    rgba(180, 194, 255, 0.45) 30%,
-    color-mix(in srgb, var(--ll-accent) 22%, transparent) 55%,
-    transparent 78%
-  );
-  -webkit-mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box,
-    linear-gradient(var(--ll-mask) 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
-    linear-gradient(var(--ll-mask) 0 0);
-  z-index: 7;
+/* ---------- 悬停的三种效果（库的 @luoli/ui/fx，样式在 fx.css；只在有鼠标的设备上） ----------
+   窗口没有边框：流光、边光画在窗口的圆角边缘上（1px 的一圈，遮罩挖空），在浮层、标题栏上面。窗口（.w-card）带库的 ll-hover 类，里面放库的 .ll-edge；
+   偏好的 B 流光、C 边光、D 倾斜在库里叫 sweep、glow、tilt，根元素的 data-ll-hover 说用哪一种。
+   库的样式在层里，盖不过层外的窗口自己的规则，下面是面板要自己再写的两处（选择器的权重和库的一样，都在窗口自己的阴影、变形规则之后）： */
+/* B 流光：窗口自己的阴影（激活、浮起）在层外，盖得过库的那圈淡光，这里照库的值再写一遍 */
+[data-ll-hover='sweep'] .w-card.ll-hot {
+  box-shadow: var(--ll-hover-halo);
 }
-.hover-C .w-card.is-hot::after,
-.hover-D .w-card.is-hot::after {
-  opacity: 1;
-}
-/* B 边缘流光：一道光绕窗口边缘一圈，之后保持淡淡的发光 */
-@property --sweep {
-  syntax: '<angle>';
-  inherits: false;
-  initial-value: 0deg;
-}
-@keyframes sweep {
-  from {
-    --sweep: 0deg;
-    opacity: 1;
-  }
-  85% {
-    opacity: 1;
-  }
-  to {
-    --sweep: 360deg;
-    opacity: 0;
-  }
-}
-.w-edge.run,
-.cap .w-edge.run {
-  padding: 1.5px;
-  background: conic-gradient(
-    from var(--sweep),
-    transparent 0deg,
-    transparent 290deg,
-    color-mix(in srgb, var(--ll-accent) 70%, transparent) 325deg,
-    rgba(235, 240, 255, 0.95) 352deg,
-    transparent 360deg
-  );
-  -webkit-mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box,
-    linear-gradient(var(--ll-mask) 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(var(--ll-mask) 0 0) content-box exclude,
-    linear-gradient(var(--ll-mask) 0 0);
-  animation: sweep 1.15s linear both;
-}
-.hover-B .w-card.is-hot {
-  box-shadow:
-    var(--ll-sky-shadow),
-    inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 30%, transparent),
-    0 0 24px color-mix(in srgb, var(--ll-accent) 22%, transparent);
-}
-/* D 卡牌倾斜（加 C 的边光） */
-.hover-D .w-card {
-  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
-}
-.hover-D .fs-stage .w-card,
-.hover-D .drag-clone .w-card {
+/* D 卡牌倾斜（库给 .ll-hover 写 transform）：全屏的舞台、整理时跟着指针的副本不倾斜 */
+[data-ll-hover='tilt'] .fs-stage .w-card,
+[data-ll-hover='tilt'] .drag-clone .w-card {
   transform: none;
 }
 
@@ -1038,7 +959,7 @@ body::before {
   animation: none !important;
   transition: none !important;
 }
-.is-morphing .w-edge {
+.is-morphing .ll-edge {
   animation: none !important;
   background: none !important;
 }
@@ -1098,7 +1019,7 @@ body::before {
   padding: 2px 4px;
 }
 /* 全屏的窗口里不放边缘流光（新消息、悬停效果 B 都不放） */
-.fs .w-edge.run {
+.fs .ll-edge[data-run] {
   animation: none !important;
   background: none !important;
 }
@@ -2842,10 +2763,6 @@ body::before {
 }
 .still .tray {
   --still-x: -50%;
-}
-.still .w-edge.run {
-  animation: none !important;
-  background: none;
 }
 .still .fx-err {
   animation: none !important;

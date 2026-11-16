@@ -1,9 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { fx, sky } from '../src/fx';
 import { Seg } from './components/Seg';
 import { Toaster, TooltipProvider } from '../src/overlay';
 import { useToastDuration, useToasterOn } from './lib/overlay-prefs';
 import { DEFAULT_SECTION, SECTIONS } from './sections';
 import { Pending } from './sections/Pending';
+import { startFx, startSky } from './lib/fx-boot';
 import { useHashRoute } from './lib/hash';
 import { ZOOMS, chooseMotion, chooseZoom, useMotionMode, useZoom } from './lib/prefs';
 import type { MotionMode } from '../src/motion';
@@ -12,8 +14,8 @@ import type { Zoom } from './lib/prefs';
 const IDS = SECTIONS.map((s) => s.id);
 
 /* 展示页的骨架：顶上一条工具栏（动画开关、缩放），左边一列分节的导航，右边是当前这一节。
-   内容放在 .sc-body 这一层容器里（缩放作用在它身上）；它后面有一层 .sc-sky，现在是空的：
-   星空的画布在面板里（第 10 步才搬进库），以后垫在这一层里，不用改版面 */
+   内容放在 .sc-body 这一层容器里（缩放作用在它身上）；它后面有一层 .sc-sky：背景星空的画布（库的 @luoli/ui/fx）；
+   最上面有一层 .sc-fx：整屏星尘的画布，「特效」一节的迸发、汇聚、消散画在上面 */
 export function App() {
   const route = useHashRoute(IDS, DEFAULT_SECTION);
   const zoom = useZoom();
@@ -25,12 +27,33 @@ export function App() {
     document.title = `${section.title} · @luoli/ui 展示页`;
     window.scrollTo(0, 0);
   }, [section]);
+  const skyRef = useRef<HTMLCanvasElement>(null);
+  const fxRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    startSky(skyRef.current!);
+    startFx(fxRef.current!);
+    /* 窗口大小变了：停 140 毫秒再通知（和面板一样） */
+    let t: ReturnType<typeof setTimeout>;
+    const on = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        sky.size();
+        fx.size();
+      }, 140);
+    };
+    window.addEventListener('resize', on);
+    return () => {
+      window.removeEventListener('resize', on);
+      clearTimeout(t);
+    };
+  }, []);
   const firstPending = SECTIONS.findIndex((s) => !s.Component);
   const Body = section.Component;
   return (
     <TooltipProvider>
       <div className="sc-app" style={{ '--sc-zoom': zoom }}>
-        <div className="sc-sky" id="sc-sky" aria-hidden="true" />
+        <canvas className="sc-sky" id="sc-sky" ref={skyRef} aria-hidden="true" />
+        <canvas className="sc-fx" id="sc-fx" ref={fxRef} aria-hidden="true" />
         <header className="sc-bar">
           <div className="sc-brand">
             <svg viewBox="-50 -50 100 100" aria-hidden="true">

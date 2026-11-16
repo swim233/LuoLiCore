@@ -160,7 +160,7 @@ export const WidgetWindow = memo(function WidgetWindow({
   );
   const body = (
     <div
-      className="w-card ll-sky"
+      className="w-card ll-sky ll-hover"
       ref={cardRef}
       style={ad != null ? { '--ad': ad + 'ms' } : undefined}
       {...hover}
@@ -169,7 +169,7 @@ export const WidgetWindow = memo(function WidgetWindow({
       }}
     >
       {def.sky && <MiniSky n={full ? 48 : 26} />}
-      <i className="w-edge" />
+      <i className="ll-edge" />
       {head}
       <div className="w-body">
         <def.View mode={full ? 'full' : 'normal'} params={params || {}} handle={def._h!} />

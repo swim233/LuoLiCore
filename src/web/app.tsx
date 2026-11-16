@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { MOON_GRAD } from './components/badge/geometry';
-import { fx, sky } from './fx/client';
+import { fx, setHoverEffect, sky } from '@luoli/ui/fx';
+import { env, particleScale } from '@luoli/ui/env';
+import { fxWorker } from './fx/client';
 import { MotionConfig } from 'motion/react';
 import { ChatMentions } from '@luoli/ui/chat';
 import { useMotionOn } from '@luoli/ui/motion';
-import { usePrefs } from './lib/prefs';
+import { hoverEffectOf, usePrefs } from './lib/prefs';
 import { DeskWrap } from './shell/Desk';
 import { TopBar } from './shell/TopBar';
 import { FullscreenLayer } from './shell/FullscreenLayer';
@@ -41,8 +43,9 @@ export function App() {
   const skyRef = useRef<HTMLCanvasElement>(null);
   const fxRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    sky.start(skyRef.current!);
-    fx.start(fxRef.current!);
+    /* 窄屏、性能低、粒子数的缩放是面板读的（env），库的 fx 不认识它；星尘的 Worker 和徽记的小画布共用，由 fxWorker() 建 */
+    sky.start(skyRef.current!, { narrow: () => env.narrow, lowPower: env.lowPower });
+    fx.start(fxRef.current!, { worker: fxWorker(), scale: particleScale });
     let t: ReturnType<typeof setTimeout>;
     const on = () => {
       clearTimeout(t);
@@ -64,9 +67,7 @@ export function App() {
     sky.sync();
   }, [motion]);
   useEffect(() => {
-    const r = document.documentElement;
-    r.classList.remove('hover-B', 'hover-C', 'hover-D');
-    r.classList.add('hover-' + hover);
+    setHoverEffect(hoverEffectOf(hover));
   }, [hover]);
   useEffect(() => {
     document.body.classList.toggle('arranging', arranging);

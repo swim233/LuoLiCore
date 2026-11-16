@@ -1,8 +1,9 @@
 import { fpsMeter } from './lib/fps';
+import { setHoverEffect } from '@luoli/ui/fx';
 import { startSkyStars } from '@luoli/ui/sky-stars';
 import { warmBubbleSky } from './lib/winSky';
 import { motionOn } from '@luoli/ui/motion';
-import { prefs } from './lib/prefs';
+import { hoverEffectOf, prefs } from './lib/prefs';
 import { getSource } from './model/source';
 import { status } from './model/status';
 import { NOW_DEF } from './widgets/now/Now';
@@ -27,8 +28,8 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
     const r = document.documentElement;
     r.classList.toggle('motion', motionOn());
     r.classList.toggle('still', !motionOn());
-    r.classList.add('hover-' + prefs.get().hover);
   }
+  setHoverEffect(hoverEffectOf(prefs.get().hover));
   fpsMeter.set(prefs.get().fps);
   startSkyStars();
   // 气泡的毛玻璃用实时模糊，但会话窗口里整层淡入淡出时要暂时用「预先糊好」的星空：启动后等页面空闲时先糊好（约 15～20 毫秒），不留到第一次开会话那一下

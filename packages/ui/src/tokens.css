@@ -82,6 +82,13 @@
       radial-gradient(520px 320px at 25% 0%, var(--ll-sky-glow-a), transparent 70%),
       radial-gradient(420px 320px at 100% 100%, var(--ll-sky-glow-b), transparent 70%),
       var(--ll-sky-base);
+    /* 窗口上悬停的效果（@luoli/ui/fx）：边光（鼠标附近那段边被照亮）的两层亮色，流光（一道光绕边缘一圈）的亮头，流光效果里窗口多出来的一圈淡光 */
+    --ll-hover-edge-hi: rgba(225, 232, 255, 0.85);
+    --ll-hover-edge-mid: rgba(180, 194, 255, 0.45);
+    --ll-sweep-hi: rgba(235, 240, 255, 0.95);
+    --ll-hover-halo:
+      var(--ll-sky-shadow), inset 0 0 0 1px color-mix(in srgb, var(--ll-accent) 30%, transparent),
+      0 0 24px color-mix(in srgb, var(--ll-accent) 22%, transparent);
     /* 全屏会话左边的列表暗一档 */
     --ll-side-bg: rgba(0, 0, 0, 0.22);
     /* 窗格的渐变的底 */

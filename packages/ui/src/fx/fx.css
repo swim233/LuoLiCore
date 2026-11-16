@@ -1,0 +1,116 @@
+/* 窗口上的特效（@luoli/ui/fx）：三种悬停的效果，加流光（edgeRun）。样式是单独的一份 @luoli/ui/fx.css（不在总样式 styles.css 里，用的项目在入口另引一次）。
+   和库里别的东西一样：纯 CSS、在 @layer 里、类名 ll- 开头、变体用 data-*、不写 important 标记。
+   怎么用：
+   - 窗口（要有定位：position 不是 static；圆角用 border-radius 写，边光、流光跟着圆角走）加类 ll-hover，并用 hoverHandlers() 的三个处理函数
+     （进入时加 ll-hot、移动时写 --ll-hover-x/-y 和 --ll-tilt-x/-y、离开时去掉）；
+   - data-ll-hover 说用哪一种：sweep 流光、glow 边光、tilt 倾斜（加边光）。写在页面根元素（html，setHoverEffect() 写）上，整页的窗口都是这一种；
+     也可以写在窗口自己身上，一个窗口一种（根上和窗口上都写的话，样式两种都有、JS 取离窗口最近的那一个，别两处都写）。没有这个属性就没有悬停的效果；
+   - 窗口里放一个空的 <i class="ll-edge">，edgeRun() 给它加 data-run 放一圈流光（悬停的 sweep 进入时放一圈，别的事件也可以放，比如新消息来了）。
+   流光、边光都画在窗口的圆角边缘上（1px 或 1.5px 的一圈，遮罩挖空），在窗口里最上面一层（z-index 7：窗口里内容、模糊、暗边、标题栏都在它下面）。
+   用的地方的约定：
+   - 窗口自己的 transform 过渡（倾斜回正要靠它：transition: transform .18s ease-out）、阴影的过渡由窗口自己写；
+   - 库的样式在层里，盖不过层外的窗口自己的规则：窗口自己的阴影（激活、浮起）会盖过 sweep 的那圈淡光（--ll-hover-halo），窗口自己写了 box-shadow 的话
+     就在层外再写一条 [data-ll-hover='sweep'] .窗口.ll-hot { box-shadow: var(--ll-hover-halo) }；
+   - 「什么时候不倾斜」（全屏、整理）：写 transform 的规则放在层外（盖得过库的），倾斜的 JS 那边由 hoverHandlers 的 canTilt 拦；
+   - 「什么时候不放流光」（全屏打开期间）：edgeRun 的 skip 选项拦，已经放着的在层外写 animation: none。
+   关掉动画（:root.still，或系统开了「减少动态效果」而页面根上没有 motion 类）：流光不出现；边光照常，只是过渡由项目统一缩成很短；倾斜的 JS 不写 --ll-tilt-x/-y，所以不倾斜。 */
+@layer ll.tokens, ll.base, ll.controls;
+@property --ll-sweep {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+@layer ll.controls {
+  /* 流光：一道光绕窗口边缘一圈，之后保持淡淡的发光（淡光是窗口的阴影，见 --ll-hover-halo） */
+  @keyframes ll-sweep {
+    from {
+      --ll-sweep: 0deg;
+      opacity: 1;
+    }
+    85% {
+      opacity: 1;
+    }
+    to {
+      --ll-sweep: 360deg;
+      opacity: 0;
+    }
+  }
+  .ll-edge {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: 7;
+  }
+  .ll-edge[data-run] {
+    padding: 1.5px;
+    background: conic-gradient(
+      from var(--ll-sweep),
+      transparent 0deg,
+      transparent 290deg,
+      color-mix(in srgb, var(--ll-accent) 70%, transparent) 325deg,
+      var(--ll-sweep-hi) 352deg,
+      transparent 360deg
+    );
+    -webkit-mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box,
+      linear-gradient(var(--ll-mask) 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+      linear-gradient(var(--ll-mask) 0 0);
+    animation: ll-sweep 1.15s linear both;
+  }
+  /* 边光（glow、tilt 都有）：鼠标附近的那段边被照亮（只露出 1px 的边）；窗口内部不放跟着鼠标走的光斑。
+     鼠标在窗口里的坐标是 --ll-hover-x、--ll-hover-y（hoverHandlers 写） */
+  .ll-hover::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--ll-dur-card);
+    padding: 1px;
+    background: radial-gradient(
+      280px circle at var(--ll-hover-x, 50%) var(--ll-hover-y, 50%),
+      var(--ll-hover-edge-hi),
+      var(--ll-hover-edge-mid) 30%,
+      color-mix(in srgb, var(--ll-accent) 22%, transparent) 55%,
+      transparent 78%
+    );
+    -webkit-mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box,
+      linear-gradient(var(--ll-mask) 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(var(--ll-mask) 0 0) content-box exclude,
+      linear-gradient(var(--ll-mask) 0 0);
+    z-index: 7;
+  }
+  :is([data-ll-hover='glow'], [data-ll-hover='tilt']) .ll-hover.ll-hot::after,
+  .ll-hover.ll-hot:is([data-ll-hover='glow'], [data-ll-hover='tilt'])::after {
+    opacity: 1;
+  }
+  /* sweep：悬停时窗口多一圈淡光（窗口的阴影加一道强调色细线和光） */
+  [data-ll-hover='sweep'] .ll-hover.ll-hot,
+  .ll-hover.ll-hot[data-ll-hover='sweep'] {
+    box-shadow: var(--ll-hover-halo);
+  }
+  /* tilt：卡牌倾斜（倾斜的角度是 --ll-tilt-x、--ll-tilt-y，hoverHandlers 写，最大 ±3 度），加边光 */
+  [data-ll-hover='tilt'] .ll-hover,
+  .ll-hover[data-ll-hover='tilt'] {
+    transform: perspective(900px) rotateX(var(--ll-tilt-x, 0deg)) rotateY(var(--ll-tilt-y, 0deg));
+  }
+  /* 关动画：流光不出现 */
+  :root.still .ll-edge[data-run] {
+    animation: none;
+    background: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root:not(.motion) .ll-edge[data-run] {
+      animation: none;
+      background: none;
+    }
+  }
+}

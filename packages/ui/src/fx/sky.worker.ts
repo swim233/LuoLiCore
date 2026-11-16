@@ -1,8 +1,11 @@
 /// <reference lib="webworker" />
+import { makeRandom } from './random';
+import type { SkyMsg } from './sky-msg';
 /* 背景星空：在 Worker 里用 OffscreenCanvas 画，不占主线程。
    恢复第 3 版的观感：每颗星各自漂移（方向、速度各自随机，每秒一两个像素）、所有星点都闪烁（亮度按正弦在 0.1a 和 a 之间来回，角速度 tw rad/s，相位随机）。
    星座的点和线是各自独立的对象，各有自己的透明度数组（dotAlpha、lineAlpha）：第 6 版要让星座「逐段画出来、一颗颗亮起来」时，
-   直接改这两个数组（见 setConstellation），不用动星点那一层。 */
+   直接改这两个数组（见 setConstellation，现在没有人用），不用动星点那一层。
+   随机数：init 里可以带一个 seed（固定种子，每次画出来的星点都一样，对照用）；不带就是 Math.random。 */
 interface Star {
   x: number;
   y: number;
@@ -26,24 +29,6 @@ interface Con {
   ox: number;
   oy: number;
 }
-type Msg =
-  | {
-      type: 'init';
-      canvas: OffscreenCanvas;
-      w: number;
-      h: number;
-      dpr: number;
-      colors: Record<string, string>;
-      narrow: boolean;
-      lowPower: boolean;
-      motion: boolean;
-      fps: number;
-    }
-  | { type: 'size'; w: number; h: number; dpr: number; narrow: boolean }
-  | { type: 'motion'; on: boolean }
-  | { type: 'hold'; on: boolean }
-  | { type: 'con'; id: number; dotAlpha?: number[]; lineAlpha?: number[] };
-
 let cv: OffscreenCanvas, ctx: OffscreenCanvasRenderingContext2D;
 let W = 0,
   H = 0,
@@ -59,7 +44,9 @@ let narrow = false,
 let raf = 0,
   last = 0,
   t = 0;
-const rand = (a: number, b: number) => a + Math.random() * (b - a);
+/* 所有的随机都走 rnd：init 里带了 seed 就换成固定种子的序列，没带就是 Math.random（调用的先后次序和以前一样） */
+let rnd = makeRandom();
+const rand = (a: number, b: number) => a + rnd() * (b - a);
 
 function build() {
   /* 星点更细、更少：不和卡片抢；只留极少数亮一点的（带十字光芒） */
@@ -67,9 +54,9 @@ function build() {
   n = Math.round(Math.min(n, 190) * (narrow ? 0.6 : 1) * (lowPower ? 0.55 : 1));
   stars = [];
   for (let i = 0; i < n; i++) {
-    const r = Math.random() < 0.04 ? rand(1.15, 1.45) : rand(0.3, 1.02);
+    const r = rnd() < 0.04 ? rand(1.15, 1.45) : rand(0.3, 1.02);
     const a0 = rand(0.12, 0.58);
-    const c = Math.random() < 0.22 ? 1 : Math.random() < 0.3 ? 2 : 0;
+    const c = rnd() < 0.22 ? 1 : rnd() < 0.3 ? 2 : 0;
     const sq = r < 0.8,
       raw = sq ? r * 1.6 : r * 2,
       size = Math.max(1, raw);
@@ -218,7 +205,7 @@ function resize() {
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
 }
-self.onmessage = (e: MessageEvent<Msg>) => {
+self.onmessage = (e: MessageEvent<SkyMsg>) => {
   const m = e.data;
   if (m.type === 'init') {
     cv = m.canvas;
@@ -231,6 +218,7 @@ self.onmessage = (e: MessageEvent<Msg>) => {
     lowPower = m.lowPower;
     motion = m.motion;
     frameMs = 1000 / m.fps;
+    rnd = makeRandom(m.seed);
     resize();
     build();
     draw();

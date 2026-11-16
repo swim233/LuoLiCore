@@ -14,6 +14,8 @@
     "./easing": "./src/easing.ts",
     "./env": "./src/env.ts",
     "./forms": "./src/forms/index.ts",
+    "./fx": "./src/fx/index.ts",
+    "./fx.css": "./src/fx/fx.css",
     "./icons": "./src/icons/index.ts",
     "./md": "./src/chat/md.ts",
     "./motion": "./src/motion.ts",

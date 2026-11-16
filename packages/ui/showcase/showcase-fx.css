@@ -1,0 +1,42 @@
+/* 展示页「特效」一节的版面。不在层里，所以能盖过库的样式（和面板的做法一样）。
+   窗口（.ll-sky.ll-hover）要有定位；倾斜回正靠窗口自己的 transform 过渡（面板里是 .w-card 的基础规则，这里写在 .sc-fx-win 上） */
+.sc-fx-ctl {
+  align-items: center;
+  margin: var(--ll-space-12) 0;
+}
+.sc-fx-stage,
+.sc-fx-row {
+  display: flex;
+  gap: var(--ll-space-16);
+  flex-wrap: wrap;
+  padding: var(--ll-space-24);
+  justify-content: center;
+}
+.sc-fx-win {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ll-space-8);
+  width: 260px;
+  min-height: 160px;
+  padding: var(--ll-space-16);
+  color: var(--ll-fg-2);
+  transition:
+    box-shadow var(--ll-dur-card),
+    transform 0.18s ease-out;
+}
+.sc-fx-win b {
+  color: var(--ll-fg);
+}
+.sc-fx-rect {
+  width: 360px;
+  justify-content: center;
+}
+@media (max-width: 719px) {
+  .sc-fx-win,
+  .sc-fx-rect {
+    width: 100%;
+  }
+}
