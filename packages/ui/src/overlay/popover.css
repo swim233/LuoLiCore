@@ -1,0 +1,103 @@
+/* 弹出框 .ll-popover（PopoverContent）。两种：
+   - 平常的（触发元素是 PopoverTrigger 加自己的元素、悬停打开的、不接鼠标的、触发按钮不在根里面）：Popup 自己是玻璃面（.ll-glass：底、边光、背后模糊），
+     淡入加一点缩放（下面「平常的」那一段）；
+   - 长开的（触发元素是库的下拉钮 PopoverButton）：Popup（.ll-grow，见 grow.css）是最终大小的透明盒子，里面一块会长大的玻璃面、钮那一行当头、内容 .ll-popover-body；
+     内容在面长到六七成后整块淡入、落下 6（翻到钮上面时升起），出来之前不接鼠标。
+   共同的：
+   - 外面那层 .ll-popover-pos（Base UI 的 Positioner，管位置）只带层级；
+   - 宽度不超过 min(320px, 可用宽度)，高度不超过可用高度（Base UI 的 --available-width / --available-height，是触发按钮到视口边缘的空间），
+     超出的在里面滚（细滚动条 .ll-scrollbar）。放在窗口里（container）时「可用」按窗口算；
+   - 内边距 12（变量 --ll-popover-pad，写在 PopoverContent 的 style 或类上改；里面是一列自带内边距的行时改小），字 --ll-text-md、--ll-fg-2；标题 .ll-popover-title 是 --ll-text-sm、--ll-fg-3；
+   - data-passive：不接鼠标（弹出框和它外面那层都不接）。
+   平常的进出场：透明度 0→1 加从触发按钮那一侧（--transform-origin）起的缩放 0.97→1，进 --ll-dur-pop-in、出 --ll-dur-pop-out。
+   过渡写在毛玻璃元素自己身上，不写在外层：外层一有透明度，里面的 backdrop-filter 就只看得到外层以内的东西。
+   关动画时的规则在 still.css。 */
+@layer ll.controls {
+  .ll-popover-pos {
+    z-index: var(--ll-z-popover);
+  }
+  .ll-popover-pos[data-passive],
+  .ll-popover[data-passive] {
+    pointer-events: none;
+  }
+  .ll-popover {
+    outline: 0;
+  }
+  /* ----- 平常的 ----- */
+  .ll-popover:not(.ll-grow) {
+    box-sizing: border-box;
+    max-width: min(320px, var(--available-width, 320px));
+    max-height: var(--available-height, none);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--ll-popover-pad, var(--ll-space-12));
+    color: var(--ll-fg-2);
+    font-size: var(--ll-text-md);
+    outline: 0;
+    transform-origin: var(--transform-origin);
+    transition:
+      opacity var(--ll-dur-pop-in) var(--ll-ease-out),
+      transform var(--ll-dur-pop-in) var(--ll-ease-out);
+  }
+  .ll-popover:not(.ll-grow)[data-starting-style],
+  .ll-popover:not(.ll-grow)[data-ending-style] {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  .ll-popover:not(.ll-grow)[data-ending-style] {
+    transition-duration: var(--ll-dur-pop-out);
+  }
+  .ll-popover-title {
+    margin: 0 0 var(--ll-space-6);
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-sm);
+    font-weight: 400;
+    letter-spacing: 0.06em;
+  }
+  .ll-popover-desc {
+    margin: 0;
+    color: var(--ll-fg-2);
+  }
+
+  /* ----- 长开的 -----
+     内容：钮那一行（头）下面，超出时自己滚；整块在 --ll-grow-c 过了 0.3 以后淡入（0.3 到 0.7），不一项项错开；
+     出来之前（和关的时候）不接鼠标；接鼠标的时刻是内容时长的 0.30（照内容的曲线算，不透明度约 0.25）。 */
+  .ll-popover-body {
+    --ll-grow-bi: clamp(0, calc((var(--ll-grow-c) - 0.3) / 0.4), 1);
+    position: relative;
+    z-index: 1;
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--ll-space-4) var(--ll-popover-pad, var(--ll-space-12))
+      var(--ll-popover-pad, var(--ll-space-12));
+    color: var(--ll-fg-2);
+    font-size: var(--ll-text-md);
+    border-radius: 0 0 var(--ll-radius-xl) var(--ll-radius-xl);
+    opacity: var(--ll-grow-bi);
+    translate: 0 calc((1 - var(--ll-grow-bi)) * var(--ll-grow-item-dy, -6px));
+    pointer-events: none;
+    transition: pointer-events 0s linear calc(0.303 * var(--ll-dur-grow-content-in)) allow-discrete;
+  }
+  .ll-grow[data-side='top'] .ll-popover-body {
+    padding: var(--ll-popover-pad, var(--ll-space-12)) var(--ll-popover-pad, var(--ll-space-12))
+      var(--ll-space-4);
+    border-radius: var(--ll-radius-xl) var(--ll-radius-xl) 0 0;
+  }
+  .ll-grow[data-ready]:not([data-ending-style]) .ll-popover-body {
+    pointer-events: auto;
+  }
+  .ll-grow[data-ending-style] .ll-popover-body {
+    transition-delay: 0s;
+  }
+  .ll-popover-body .ll-glide.ll-on {
+    opacity: clamp(0, calc((var(--ll-grow-c) - 0.85) * 6.7), 1);
+  }
+  .ll-grow[data-ending-style] .ll-glide {
+    transition:
+      height var(--ll-dur-glide) var(--ll-ease-out),
+      width var(--ll-dur-glide) var(--ll-ease-out);
+  }
+}

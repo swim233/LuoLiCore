@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
 import { Seg } from './components/Seg';
+import { Toaster, TooltipProvider } from '../src/overlay';
+import { useToastDuration, useToasterOn } from './lib/overlay-prefs';
 import { DEFAULT_SECTION, SECTIONS } from './sections';
 import { Pending } from './sections/Pending';
 import { useHashRoute } from './lib/hash';
@@ -17,6 +19,8 @@ export function App() {
   const zoom = useZoom();
   const mode = useMotionMode();
   const section = SECTIONS.find((s) => s.id === route) ?? SECTIONS[0];
+  const duration = useToastDuration();
+  const toasterOn = useToasterOn();
   useEffect(() => {
     document.title = `${section.title} · @luoli/ui 展示页`;
     window.scrollTo(0, 0);
@@ -24,62 +28,65 @@ export function App() {
   const firstPending = SECTIONS.findIndex((s) => !s.Component);
   const Body = section.Component;
   return (
-    <div className="sc-app" style={{ '--sc-zoom': zoom }}>
-      <div className="sc-sky" id="sc-sky" aria-hidden="true" />
-      <header className="sc-bar">
-        <div className="sc-brand">
-          <svg viewBox="-50 -50 100 100" aria-hidden="true">
-            <path d="M0-42C3-14 14-3 42 0C14 3 3 14 0 42C-3 14-14 3-42 0C-14-3-3-14 0-42Z" />
-          </svg>
-          <b>@luoli/ui</b>
-          <span className="sc-brand-sub">展示页</span>
-        </div>
-        <div className="sc-bar-ctl">
-          <div className="sc-bar-group">
-            <span className="sc-bar-label">动画</span>
-            <Seg<MotionMode>
-              label="动画开关"
-              value={mode}
-              items={[
-                ['system', '跟随系统'],
-                ['on', '开'],
-                ['off', '关'],
-              ]}
-              onPick={chooseMotion}
-            />
+    <TooltipProvider>
+      <div className="sc-app" style={{ '--sc-zoom': zoom }}>
+        <div className="sc-sky" id="sc-sky" aria-hidden="true" />
+        <header className="sc-bar">
+          <div className="sc-brand">
+            <svg viewBox="-50 -50 100 100" aria-hidden="true">
+              <path d="M0-42C3-14 14-3 42 0C14 3 3 14 0 42C-3 14-14 3-42 0C-14-3-3-14 0-42Z" />
+            </svg>
+            <b>@luoli/ui</b>
+            <span className="sc-brand-sub">展示页</span>
           </div>
-          <div className="sc-bar-group">
-            <span className="sc-bar-label">缩放</span>
-            <Seg<Zoom>
-              label="缩放"
-              value={zoom}
-              items={ZOOMS.map((z) => [z, `${Math.round(z * 100)}%`] as const)}
-              onPick={chooseZoom}
-            />
+          <div className="sc-bar-ctl">
+            <div className="sc-bar-group">
+              <span className="sc-bar-label">动画</span>
+              <Seg<MotionMode>
+                label="动画开关"
+                value={mode}
+                items={[
+                  ['system', '跟随系统'],
+                  ['on', '开'],
+                  ['off', '关'],
+                ]}
+                onPick={chooseMotion}
+              />
+            </div>
+            <div className="sc-bar-group">
+              <span className="sc-bar-label">缩放</span>
+              <Seg<Zoom>
+                label="缩放"
+                value={zoom}
+                items={ZOOMS.map((z) => [z, `${Math.round(z * 100)}%`] as const)}
+                onPick={chooseZoom}
+              />
+            </div>
           </div>
+        </header>
+        <div className="sc-body" id="sc-body">
+          <nav className="sc-nav" aria-label="分节">
+            {SECTIONS.map((s, i) => (
+              <span className="sc-nav-cell" key={s.id}>
+                {i === firstPending && <span className="sc-nav-sep">以后加进来</span>}
+                <a
+                  className={`sc-nav-item ${s.Component ? '' : 'is-pending'}`}
+                  href={`#${s.id}`}
+                  data-section={s.id}
+                  aria-current={s.id === section.id ? 'page' : undefined}
+                >
+                  {s.title}
+                  {!s.Component && <span className="sc-nav-tag">还没有</span>}
+                </a>
+              </span>
+            ))}
+          </nav>
+          <main className="sc-main" id={`sc-${section.id}`} data-section={section.id}>
+            {Body ? <Body /> : <Pending title={section.title} steps={section.steps ?? '?'} />}
+          </main>
         </div>
-      </header>
-      <div className="sc-body" id="sc-body">
-        <nav className="sc-nav" aria-label="分节">
-          {SECTIONS.map((s, i) => (
-            <span className="sc-nav-cell" key={s.id}>
-              {i === firstPending && <span className="sc-nav-sep">以后加进来</span>}
-              <a
-                className={`sc-nav-item ${s.Component ? '' : 'is-pending'}`}
-                href={`#${s.id}`}
-                data-section={s.id}
-                aria-current={s.id === section.id ? 'page' : undefined}
-              >
-                {s.title}
-                {!s.Component && <span className="sc-nav-tag">还没有</span>}
-              </a>
-            </span>
-          ))}
-        </nav>
-        <main className="sc-main" id={`sc-${section.id}`} data-section={section.id}>
-          {Body ? <Body /> : <Pending title={section.title} steps={section.steps ?? '?'} />}
-        </main>
+        {toasterOn && <Toaster duration={duration} />}
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

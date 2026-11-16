@@ -1,0 +1,168 @@
+/* 下拉钮 .ll-dd（MenuButton、PopoverButton）和长开时浮层里画的「头」.ll-dd-head：专门用来打开菜单、弹出框的钮，和普通按钮 .ll-btn 分得开。
+   两种样子（data-kind）：
+   - pill 胶囊：胶囊的底（--ll-ctl-bg）加右边的小箭头，打开着和悬停时底亮一档；操作菜单（「更多操作」）、任务数这种用；
+   - slot 槽：凹进去的一格，--ll-inset-bg 的底加 --ll-inset-line 的细线（画在阴影里，不占版面），圆角按尺寸取，字靠左、箭头在最右；
+     选值的（选会话那种，钮上写着「现在选的是哪个」）用。想让它像个格子，给它一个最小宽度：--ll-dd-min（写在钮上，默认不限）；
+   - data-icon：钮上只有一个图标（「⋯」）：图标加紧挨着的小箭头，窄一点的圆角块，不用圆钮。
+   四档尺寸（data-size：xs、sm、md 默认、lg），高、字号、左右内边距都和库的按钮 .ll-btn 对齐，摆在一排是齐的：
+     xs 高 18、字 --ll-text-sm、内边距 8；sm 高 22、字 --ll-text-xs、内边距 10；md 高 28、字 --ll-text-sm、内边距 12；lg 高 32、字 --ll-text-md、内边距 14
+     （钮的右边比左边少 2，因为箭头自己带着空）；
+     槽的圆角：xs 4、sm 6、md 和 lg 10（--ll-radius-xs、-sm、-md）；里面的图标 14（xs 是 12），只有图标时 xs 12、sm 14、md 和 lg 16；
+     尺寸写成了变量 --ll-dd-h、--ll-dd-fs、--ll-dd-px、--ll-dd-r、--ll-dd-gap、--ll-dd-icon，钮、头、长开的浮层（它要知道槽起点的圆角）共用这一张表。
+   箭头是库的小箭头（Chevron），打开着转向上。
+   状态：平时、悬停（写在 @media (hover: hover) 里）、键盘焦点（库的统一焦点环，在 base.css）、打开着（aria-expanded）、禁用（:disabled）。
+   钮上没有「按下」的样子：点下去的那一刻浮层就长开了，按下的样子只会让钮和浮层的头对不上（头从钮此刻的样子长出来）。
+   头（.ll-dd-head）和钮共用同一套排版，所以两个能叠得严丝合缝；头的宽高、位置、颜色见 grow.css。 */
+@layer ll.controls {
+  /* 尺寸表（钮、头、长开的浮层共用） */
+  :is(.ll-dd, .ll-dd-head, .ll-grow) {
+    --ll-dd-h: 28px;
+    --ll-dd-fs: var(--ll-text-sm);
+    --ll-dd-px: var(--ll-space-12);
+    --ll-dd-r: var(--ll-radius-md);
+    --ll-dd-gap: var(--ll-space-8);
+    --ll-dd-icon: 14px;
+    --ll-dd-icon-only: 16px;
+  }
+  :is(.ll-dd, .ll-dd-head, .ll-grow)[data-size='xs'] {
+    --ll-dd-h: 18px;
+    --ll-dd-fs: var(--ll-text-sm);
+    --ll-dd-px: var(--ll-space-8);
+    --ll-dd-r: var(--ll-radius-xs);
+    --ll-dd-gap: var(--ll-space-6);
+    --ll-dd-icon: 12px;
+    --ll-dd-icon-only: 12px;
+  }
+  :is(.ll-dd, .ll-dd-head, .ll-grow)[data-size='sm'] {
+    --ll-dd-h: 22px;
+    --ll-dd-fs: var(--ll-text-xs);
+    --ll-dd-px: var(--ll-space-10);
+    --ll-dd-r: var(--ll-radius-sm);
+    --ll-dd-gap: var(--ll-space-6);
+    --ll-dd-icon-only: 14px;
+  }
+  :is(.ll-dd, .ll-dd-head, .ll-grow)[data-size='lg'] {
+    --ll-dd-h: 32px;
+    --ll-dd-fs: var(--ll-text-md);
+    --ll-dd-px: var(--ll-space-14);
+  }
+  :is(.ll-dd, .ll-dd-head) {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-dd-gap);
+    height: var(--ll-dd-h);
+    margin: 0;
+    border: 0;
+    color: var(--ll-fg-2);
+    font: inherit;
+    font-size: var(--ll-dd-fs);
+    line-height: 1;
+    white-space: nowrap;
+    appearance: none;
+  }
+  :is(.ll-dd, .ll-dd-head) .ll-dd-main {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-6);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  :is(.ll-dd, .ll-dd-head) .ll-dd-main > svg {
+    flex: none;
+    width: var(--ll-dd-icon);
+    height: var(--ll-dd-icon);
+  }
+  :is(.ll-dd, .ll-dd-head)[data-icon] .ll-dd-main > svg {
+    width: var(--ll-dd-icon-only);
+    height: var(--ll-dd-icon-only);
+  }
+  :is(.ll-dd, .ll-dd-head) .ll-dd-chev {
+    margin-left: auto;
+    color: var(--ll-fg-3);
+  }
+  :is(.ll-dd, .ll-dd-head)[data-icon] {
+    gap: var(--ll-space-4);
+  }
+  :is(.ll-dd, .ll-dd-head)[data-icon] .ll-dd-chev {
+    margin-left: 0;
+  }
+  .ll-dd {
+    position: relative;
+    min-width: var(--ll-dd-min, 0px);
+    cursor: pointer;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover),
+      box-shadow var(--ll-dur-hover);
+  }
+  .ll-dd .ll-dd-chev {
+    transition: transform 0.2s var(--ll-ease-out);
+  }
+  .ll-dd[aria-expanded='true'] .ll-dd-chev {
+    transform: translateY(0.18em) rotate(225deg);
+  }
+  .ll-dd:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+
+  /* pill 胶囊 */
+  :is(.ll-dd, .ll-dd-head)[data-kind='pill'] {
+    padding: 0 calc(var(--ll-dd-px) - 2px) 0 var(--ll-dd-px);
+    border-radius: var(--ll-radius-full);
+  }
+  :is(.ll-dd, .ll-dd-head)[data-kind='pill'][data-icon] {
+    padding: 0 calc(var(--ll-dd-px) - 3px) 0 calc(var(--ll-dd-px) - 1px);
+  }
+  .ll-dd[data-kind='pill'] {
+    background: var(--ll-ctl-bg);
+  }
+  .ll-dd[data-kind='pill'][aria-expanded='true'] {
+    background: var(--ll-ctl-bg-hover);
+    color: var(--ll-fg);
+  }
+  /* slot 槽 */
+  :is(.ll-dd, .ll-dd-head)[data-kind='slot'] {
+    justify-content: space-between;
+    padding: 0 calc(var(--ll-dd-px) - 2px) 0 var(--ll-dd-px);
+    border-radius: var(--ll-dd-r);
+  }
+  :is(.ll-dd, .ll-dd-head)[data-kind='slot'][data-icon] {
+    justify-content: center;
+    padding: 0 calc(var(--ll-dd-px) - 3px);
+  }
+  .ll-dd[data-kind='slot'] {
+    background: var(--ll-inset-bg);
+    box-shadow: inset 0 0 0 1px var(--ll-inset-line);
+  }
+  .ll-dd[data-kind='slot'][aria-expanded='true'] {
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg);
+    box-shadow: inset 0 0 0 1px var(--ll-line-hi);
+  }
+
+  /* data-hot：鼠标在钮上（库在长开时写，和悬停同一个样子；见 grow.tsx） */
+  .ll-dd[data-kind='pill'][data-hot]:not(:disabled) {
+    background: var(--ll-ctl-bg-hover);
+    color: var(--ll-fg);
+  }
+  .ll-dd[data-kind='slot'][data-hot]:not(:disabled) {
+    background: var(--ll-ctl-bg);
+    color: var(--ll-fg);
+    box-shadow: inset 0 0 0 1px var(--ll-line-hi);
+  }
+
+  @media (hover: hover) {
+    .ll-dd[data-kind='pill']:not(:disabled):hover {
+      background: var(--ll-ctl-bg-hover);
+      color: var(--ll-fg);
+    }
+    .ll-dd[data-kind='slot']:not(:disabled):not([aria-expanded='true']):hover {
+      background: var(--ll-ctl-bg);
+      color: var(--ll-fg);
+      box-shadow: inset 0 0 0 1px var(--ll-line-hi);
+    }
+  }
+}

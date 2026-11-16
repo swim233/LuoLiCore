@@ -109,6 +109,16 @@ describe('找滚动区', () => {
     html.cs.overflowY = 'hidden';
     expect(pick(lonely)).toBeNull();
   });
+  it('页面被锁在 body 上（模态的对话框）：html 是 visible 时视口的 overflow 取 body 的，也不算', () => {
+    const lonely = node('div', body);
+    body.cs.overflowY = 'hidden';
+    expect(pick(lonely)).toBeNull();
+    body.cs.overflowY = 'clip';
+    expect(pick(lonely)).toBeNull();
+    // html 自己设了 auto（它是滚动容器）：body 的 hidden 管不到视口，照常滚
+    html.cs.overflowY = 'auto';
+    same(pick(lonely), html);
+  });
   it('overflow: hidden 又设了 contain 的：浏览器什么也不滚，交给浏览器', () => {
     const lid = node('div', body, { overflowY: 'hidden', overscroll: 'contain' });
     expect(pick(node('p', lid))).toBeNull();

@@ -24,11 +24,13 @@ const show = (e: Expected) => (typeof e === 'number' ? `${e}ms` : `cubic-bezier(
 
 /** 静态的一份和 easing.ts 的常量按数值比，返回对不上的说明（空数组是对得上）。
  *  staticVals 是静态那份读到的字面值（没有这个变量的不在里面）；names 是 tokens.css 里全部变量的名字，
- *  用来发现「tokens.css 里有动画变量、easing.ts 没登记」 */
+ *  用来发现「tokens.css 里有动画变量、easing.ts 没登记」；
+ *  cssOnly 是只在 tokens.css 里定义一次、TS 里不用的动画变量（浮层的进出场时长：Base UI 用 CSS 过渡，没有 TS 的另一份），不要求 easing.ts 登记 */
 export function compareAnim(
   staticVals: Record<string, string>,
   expected: Record<string, Expected>,
   names: readonly string[],
+  cssOnly: readonly string[] = [],
 ): string[] {
   const problems: string[] = [];
   for (const [name, exp] of Object.entries(expected)) {
@@ -47,7 +49,7 @@ export function compareAnim(
     if (!same) problems.push(`${name}：tokens.css 里是 ${got}，easing.ts 是 ${show(exp)}`);
   }
   for (const name of names) {
-    if (/^--ll-(dur|ease)-/.test(name) && !(name in expected))
+    if (/^--ll-(dur|ease)-/.test(name) && !(name in expected) && !cssOnly.includes(name))
       problems.push(`${name}：tokens.css 里有，easing.ts 没有登记`);
   }
   return problems;

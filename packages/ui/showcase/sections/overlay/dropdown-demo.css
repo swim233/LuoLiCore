@@ -1,0 +1,95 @@
+/* 「下拉钮」「下拉菜单」「弹出框」「在窗口里」几块的展示页样式：展示页自己的，类名以 sc-dd- 开头，不进库。 */
+.sc-dd-states {
+  display: grid;
+  grid-template-columns: auto repeat(5, max-content);
+  justify-items: start;
+  align-items: center;
+  gap: 12px 18px;
+  justify-content: start;
+  /* 窄屏放不下五列时横向滚动，不被舞台裁掉 */
+  max-width: 100%;
+  overflow-x: auto;
+}
+.sc-dd-states > span {
+  color: var(--ll-fg-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* 静态摆出来的状态：强制悬停、强制焦点环（真的悬停、焦点由库的样式给，这里只是同样的样子写成类名，好并排看） */
+.ll-dd[data-kind='pill'].sc-dd-hover {
+  background: var(--ll-ctl-bg-hover);
+  color: var(--ll-fg);
+}
+.ll-dd[data-kind='slot'].sc-dd-hover {
+  background: var(--ll-ctl-bg);
+  color: var(--ll-fg);
+  box-shadow: inset 0 0 0 1px var(--ll-line-hi);
+}
+.ll-dd.sc-dd-focus {
+  outline: 2px solid var(--ll-accent);
+  outline-offset: var(--ll-space-2);
+}
+.sc-dd-cells {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 22px 34px;
+}
+.sc-dd-cap {
+  max-width: 260px;
+  color: var(--ll-fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sc-dd-bound {
+  position: relative;
+  box-sizing: border-box;
+  width: min(100%, 520px);
+  height: 300px;
+  border: 1px dashed var(--ll-line-hi);
+  border-radius: var(--ll-radius-lg);
+}
+.sc-dd-bound > .sc-dd-corner {
+  position: absolute;
+}
+.sc-dd-bound > .sc-dd-corner[data-at='bl'] {
+  left: 12px;
+  bottom: 12px;
+}
+.sc-dd-bound > .sc-dd-corner[data-at='tr'] {
+  right: 12px;
+  top: 12px;
+}
+.sc-dd-bound > .sc-dd-corner[data-at='br'] {
+  right: 12px;
+  bottom: 12px;
+}
+.sc-dd-bound > .sc-dd-corner[data-at='tl'] {
+  left: 12px;
+  top: 12px;
+}
+.sc-dd-bound > .sc-dd-bound-tag {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  color: var(--ll-fg-dim);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+.sc-dd-sizes {
+  display: grid;
+  gap: 12px;
+}
+.sc-dd-sizes-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.sc-dd-sizes-row > span {
+  width: 96px;
+  color: var(--ll-fg-dim);
+  font-size: 12px;
+}

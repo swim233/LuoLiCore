@@ -3,7 +3,7 @@
      所以用它的项目任何自己的样式（不在层里）都能盖过；
    - 键盘焦点环统一：键盘走到控件上（:focus-visible）时，在控件外面画一圈强调色的线。被父元素裁掉的地方（overflow: hidden 的容器里），
      由用它的项目自己改成画在里面；
-   - 以后各批控件的可聚焦元素也加进这里的选择器（已加：链接、折叠的头、标签页的标签、列表行）。 */
+   - 以后各批控件的可聚焦元素也加进这里的选择器（已加：链接、折叠的头、标签页的标签、列表行、对话框里能滚的内容区、toast 和通知区、下拉钮）。 */
 @layer ll.base {
   button {
     font: inherit;
@@ -17,7 +17,11 @@
     .ll-link,
     .ll-fold-head,
     .ll-tab,
-    .ll-row
+    .ll-row,
+    .ll-dialog-body,
+    .ll-toast,
+    .ll-toaster,
+    .ll-dd
   ):focus-visible {
     outline: 2px solid var(--ll-accent);
     outline-offset: var(--ll-space-2);

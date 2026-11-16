@@ -1,0 +1,217 @@
+/* 「长开」.ll-grow：用库的下拉钮（MenuButton、PopoverButton）打开的菜单、弹出框，钮自己的底长成浮层的底，然后内容才出来。
+   原理（菜单和弹出框一样，各自的内容怎么出来见 menu.css、popover.css）：
+   - 整个进出场由弹出框上两个会被浏览器过渡的数驱动（@property 登记的 <number>）：--ll-grow-s（面长大了多少，0 到 1）、
+     --ll-grow-c（内容出来了多少，0 到 1）；别的一切（面的宽高、圆角、底色、模糊、边光、箭头转了多少、每一项的透明度）都由这两个数算出来。
+     所以中途反向时只是这两个数在半路掉头，所有东西跟着连续地走，没有哪一样先跑完再回头；代价是宽高每一帧都在变，只适合菜单这么小的东西；
+   - 弹出框（Popup）本身一直是浮层最终的大小：位置、翻面、限高、--available-height 都照最终大小算，Base UI 的碰撞检测照常。里面一块绝对定位的玻璃
+     面 .ll-grow-surf 从钮的大小（--anchor-width、--anchor-height，量到的实际大小见下）长到弹出框那么大；
+   - 面的两头：s=0 是钮此刻的样子（底、细线、圆角；钮有「鼠标在上面」和「鼠标不在」两种样子，弹出框上的 data-hot 说是哪种，样子的颜色写在
+     --ll-grow-bg0、--ll-grow-edge0、--ll-grow-fg0 里，换的时候用过渡，所以也登记成了会过渡的颜色），s=1 是库的玻璃（--ll-glass-bg、--ll-glass-blur、
+     --ll-glass-edge）。中间的底色用 color-mix 混，模糊的半径、饱和度跟着 s 算，玻璃的边光画在面的 ::after 上（box-shadow: var(--ll-glass-edge)，
+     透明度跟着 s、圆角 inherit），所以边光跟着真的宽高和圆角走（不用 clip-path）。胶囊的圆角起点取钮高的一半，不用 999（不然 999 过渡到 16，前一大半看不出变化）；
+     模糊半径从 0.2 起步而不是 0：backdrop-filter 一直在、从头到尾没有哪一帧是 none，层不会在 s 到 0 附近建了又拆；
+   - 钮那一行在浮层里再画一份当「头」（.ll-dd-head，和钮共用排版）：文字和箭头不动，箭头随 s 转过去；钮自己在头加面画出来的同一帧藏起来
+     （data-away，MenuButton、PopoverButton 由库在弹出框挂上、量好之后的同一个 requestAnimationFrame 里写，关到最后弹出框卸载时在同一次提交里撤掉），
+     所以交接的那一帧钮和头不会「都没有」或「都在」。弹出框在头加面画出来之前（data-ready 之前）是 opacity: 0，位置、量到的小数像素差都量好了才亮；
+   - 小数像素：Base UI 把弹出框的位置、--anchor-width 取整到设备像素，钮自己的位置、宽度可能带小数（110% 缩放下差零点几像素，字会跳）。弹出框亮之前量一下
+     头和钮差多少，写成 --ll-grow-dx、--ll-grow-dy（位置）和 --ll-grow-w、--ll-grow-h（钮实际的宽高），面在 s=0 时按这个错开、随长大一路收回（s=1 时是整数位置的弹出框），
+     头（字和箭头）一直待在钮的那个小数位置上，不收回（收回的话字中途会跳一个设备像素）。错开用版面上的 top、left，不用 translate（translate 让字按另一种方式画，和钮的字差很大，实测几乎所有位置交接那一帧字的像素都差 60 级上下）；差值怎么取整到版面的格子里（头的字和钮的字落在同一格上），见 grow.tsx 里补位置差那一段；弹出框自己不写 will-change（没有这个必要，写了反而让放在别的元素里的浮层交接那一帧字抖，见那一段）；
+   - 朝向：Base UI 写在弹出框上的 data-side、data-align。面的一个角贴着弹出框的一个角（上边、左边；翻到钮上面时下边；靠右时右边；居中时居中），
+     钮那一行翻到上面时在最下面；
+   - 浮层不接鼠标（pointer-events: none），头和出来了的项才接；没出来的项点不到（见 menu.css）。打开途中点浮层最终范围里还没盖住的地方，点击被 Positioner 接住，什么也不发生（菜单不关，后面的页面也没被点到）；关的 0.34 秒里 Positioner 已经不接，点的才是后面的页面（会关浮层）；
+   - 关动画（:root.still）：面直接是最终的样子，整块只淡入淡出 0.12 秒，钮和头同时互补地淡（still.css）。
+   时长是 tokens.css 的 --ll-dur-grow-*（面长开 0.48 秒、内容出来 0.44、关时面缩回 0.34、内容淡掉 0.18），曲线写在这里。 */
+@property --ll-grow-s {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+@property --ll-grow-c {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+@property --ll-grow-bg0 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --ll-grow-edge0 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --ll-grow-fg0 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+
+@layer ll.controls {
+  .ll-grow {
+    /* 起点（钮此刻的样子）：i 是鼠标不在钮上，h 是在钮上（悬停）；各种钮的写在下面 */
+    --ll-grow-bg-i: var(--ll-ctl-bg);
+    --ll-grow-bg-h: var(--ll-ctl-bg-hover);
+    --ll-grow-edge-i: transparent;
+    --ll-grow-edge-h: transparent;
+    --ll-grow-bg0: var(--ll-grow-bg-i);
+    --ll-grow-edge0: var(--ll-grow-edge-i);
+    --ll-grow-fg0: var(--ll-fg-2);
+    --ll-grow-r0: calc(var(--anchor-height, var(--ll-dd-h)) / 2);
+    --ll-grow-s: 0;
+    --ll-grow-c: 0;
+    /* 里面会滚的内容区（菜单的列表、弹出框的内容）的滚动条有多浓（0 到 1）：滚动条画在内容区最右边，也就是弹出框最终大小的右边缘，面长到那里要等到最后，
+       所以内容出来到 0.95 以前不画，0.95 到 1 淡进来；关的时候内容先淡掉，滚动条跟着一起没（比面早消失）；关动画时见 still.css（跟着整块一起淡）。
+       它没有登记成 @property 的数（读到的是 clamp(…) 这串字，不是数）：要读它调试的话，读 --ll-grow-c 自己算 */
+    --ll-grow-sb: clamp(0, calc((var(--ll-grow-c) - 0.95) * 20), 1);
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    /* 至少和钮一样宽（钮上的字很长、内容很窄时，浮层也有钮那么宽）；最宽 320，钮比 320 还宽时跟钮 */
+    min-width: max(var(--anchor-width, 0px), 180px);
+    max-width: max(var(--anchor-width, 0px), min(320px, var(--available-width, 320px)));
+    max-height: var(--available-height, none);
+    outline: 0;
+    pointer-events: none;
+    transition:
+      --ll-grow-s var(--ll-dur-grow-in) cubic-bezier(0.2, 0.8, 0.2, 1),
+      --ll-grow-c var(--ll-dur-grow-content-in) cubic-bezier(0.4, 0, 0.2, 1),
+      --ll-grow-bg0 var(--ll-dur-grow-tint) linear,
+      --ll-grow-edge0 var(--ll-dur-grow-tint) linear,
+      --ll-grow-fg0 var(--ll-dur-grow-tint) linear;
+  }
+  .ll-grow :is(.ll-menu-list, .ll-popover-body) {
+    scrollbar-color: color-mix(
+        in srgb,
+        var(--ll-scrollbar) calc(var(--ll-grow-sb) * 100%),
+        transparent
+      )
+      transparent;
+  }
+  /* 起点的颜色刚写成钮此刻的样子（data-seed，库写，一帧）：这一帧里起点的颜色不过渡，直接取这个值；撤掉以后再按上面的过渡走向悬停（或平常）的样子 */
+  .ll-grow[data-seed] {
+    transition-property: --ll-grow-s, --ll-grow-c;
+  }
+  .ll-grow[data-kind='slot'] {
+    --ll-grow-bg-i: var(--ll-inset-bg);
+    --ll-grow-bg-h: var(--ll-ctl-bg);
+    --ll-grow-edge-i: var(--ll-inset-line);
+    --ll-grow-edge-h: var(--ll-line-hi);
+    --ll-grow-r0: var(--ll-dd-r);
+  }
+  .ll-grow[data-hot] {
+    --ll-grow-bg0: var(--ll-grow-bg-h);
+    --ll-grow-edge0: var(--ll-grow-edge-h);
+    --ll-grow-fg0: var(--ll-fg);
+  }
+  /* 位置、小数像素差都量好了（data-ready，由库写）才亮、才开始长；之前整块是 opacity: 0（还能聚焦，Base UI 打开时要把焦点放进去） */
+  .ll-grow:not([data-ready]) {
+    opacity: 0;
+  }
+  .ll-grow[data-ready]:not([data-starting-style]):not([data-ending-style]) {
+    --ll-grow-s: 1;
+    --ll-grow-c: 1;
+  }
+  /* 内容落下来的方向和距离：从上面落下 6，翻到钮上面时从下面升起 */
+  .ll-grow {
+    --ll-grow-item-dy: -6px;
+  }
+  .ll-grow[data-side='top'] {
+    --ll-grow-item-dy: 6px;
+  }
+  /* 关：内容先快速淡掉，面慢起步再缩回钮，软着陆 */
+  .ll-grow[data-ending-style] {
+    transition-duration:
+      var(--ll-dur-grow-out), var(--ll-dur-grow-content-out), var(--ll-dur-grow-tint),
+      var(--ll-dur-grow-tint), var(--ll-dur-grow-tint);
+    transition-timing-function:
+      cubic-bezier(0.5, 0, 0.25, 1), cubic-bezier(0.2, 0.8, 0.2, 1), linear, linear, linear;
+  }
+
+  .ll-grow-surf {
+    position: absolute;
+    z-index: 0;
+    box-sizing: border-box;
+    pointer-events: none;
+    border-radius: calc(
+      var(--ll-grow-r0) + (var(--ll-radius-xl) - var(--ll-grow-r0)) * var(--ll-grow-s)
+    );
+    background: color-mix(
+      in srgb,
+      var(--ll-glass-bg) calc(var(--ll-grow-s) * 100%),
+      var(--ll-grow-bg0)
+    );
+    -webkit-backdrop-filter: blur(calc(0.2px + var(--ll-grow-s) * 15.8px))
+      saturate(calc(1 + var(--ll-grow-s) * 0.2));
+    backdrop-filter: blur(calc(0.2px + var(--ll-grow-s) * 15.8px))
+      saturate(calc(1 + var(--ll-grow-s) * 0.2));
+    box-shadow: inset 0 0 0 1px
+      color-mix(in srgb, var(--ll-grow-edge0) calc((1 - var(--ll-grow-s)) * 100%), transparent);
+    /* 起点的宽高、位置：钮实际的（--ll-grow-w、--ll-grow-h，由库量），没量到时用 Base UI 的；终点是弹出框那么大 */
+    --ll-grow-bw: var(--ll-grow-w, var(--anchor-width, 0px));
+    --ll-grow-bh: var(--ll-grow-h, var(--anchor-height, 0px));
+    top: calc((1 - var(--ll-grow-s)) * var(--ll-grow-dy, 0px));
+    left: calc((1 - var(--ll-grow-s)) * var(--ll-grow-dx, 0px));
+    width: calc(var(--ll-grow-bw) + (100% - var(--ll-grow-bw)) * var(--ll-grow-s));
+    height: calc(var(--ll-grow-bh) + (100% - var(--ll-grow-bh)) * var(--ll-grow-s));
+  }
+  /* 玻璃的边光和阴影：就是库的 --ll-glass-edge 原样，画在面的 ::after 上，圆角跟着面走，透明度跟着 s */
+  .ll-grow-surf::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--ll-glass-edge);
+    opacity: var(--ll-grow-s);
+  }
+  .ll-grow[data-side='top'] .ll-grow-surf {
+    top: auto;
+    bottom: calc((1 - var(--ll-grow-s)) * var(--ll-grow-dy, 0px) * -1);
+  }
+  .ll-grow[data-align='end'] .ll-grow-surf {
+    left: auto;
+    right: calc((1 - var(--ll-grow-s)) * var(--ll-grow-dx, 0px) * -1);
+  }
+  .ll-grow[data-align='center'] .ll-grow-surf {
+    left: calc(
+      (100% - var(--ll-grow-bw)) * (1 - var(--ll-grow-s)) / 2 + (1 - var(--ll-grow-s)) *
+        var(--ll-grow-dx, 0px)
+    );
+  }
+
+  /* 头：钮那一行，在浮层最上面（翻到钮上面时在最下面），字和箭头不动，箭头随面长大转过去 */
+  .ll-dd-head {
+    position: relative;
+    /* 头（字和箭头）一直待在钮的那个小数位置上，不随 s 收回：字按设备像素取整画，收回的话中途有一次一个设备像素的跳（实测 100%、110%、125% 都有）；
+       面的边是看得见的，所以面照样随 s 从钮的矩形收到整数位置的弹出框。头在 s=1 时和弹出框的格子差不到半个设备像素，看不出 */
+    top: var(--ll-grow-dy, 0px);
+    left: var(--ll-grow-dx, 0px);
+    z-index: 1;
+    flex: none;
+    width: var(--ll-grow-w, var(--anchor-width, auto));
+    /* 字色从钮此刻的字色过渡到浮层里头的字色 */
+    color: color-mix(in srgb, var(--ll-fg) calc(var(--ll-grow-s) * 100%), var(--ll-grow-fg0));
+    cursor: pointer;
+    pointer-events: auto;
+  }
+  .ll-grow[data-align='end'] .ll-dd-head {
+    margin-left: auto;
+  }
+  .ll-grow[data-align='center'] .ll-dd-head {
+    margin-inline: auto;
+  }
+  .ll-grow[data-side='top'] .ll-dd-head {
+    order: 2;
+  }
+  .ll-dd-head .ll-dd-chev {
+    transition: none;
+    transform: translateY(calc(-0.18em + 0.36em * var(--ll-grow-s)))
+      rotate(calc(45deg + 180deg * var(--ll-grow-s)));
+  }
+
+  /* 钮：浮层画出来的同一帧藏起来（data-away，库写），关到最后浮层卸载的同一次提交里撤掉 */
+  .ll-dd[data-away] {
+    opacity: 0;
+  }
+}

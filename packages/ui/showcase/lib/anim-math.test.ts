@@ -73,4 +73,12 @@ describe('compareAnim', () => {
     expect(p).toHaveLength(1);
     expect(p[0]).toContain('--ll-dur-new');
   });
+  it('只在 tokens.css 里定义的动画变量（cssOnly）：不要求 easing.ts 登记', () => {
+    const all = [...names, '--ll-dur-new', '--ll-bg'];
+    expect(compareAnim(same, expected, all, ['--ll-dur-new'])).toEqual([]);
+    // 没列进 cssOnly 的照样报
+    expect(compareAnim(same, expected, [...all, '--ll-dur-other'], ['--ll-dur-new'])).toHaveLength(
+      1,
+    );
+  });
 });

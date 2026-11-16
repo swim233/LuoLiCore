@@ -1,0 +1,34 @@
+/* 提示气泡 .ll-tip（Tooltip）：小的深色块，没有小箭头，鼠标移不进去。
+   - 底是 --ll-tip-bg（比玻璃深一点）加玻璃的模糊和边光；圆角 --ll-radius-sm、内边距 4 和 8、字 --ll-text-sm、--ll-fg、最宽 240（超出换行）；
+   - 外面那层 .ll-tip-pos（Positioner）只带层级（比对话框、toast 都高）和「不接鼠标」；
+   - 进出场只有透明度，--ll-dur-tip；Base UI 说「马上出来」（data-instant：连着扫过几个按钮、焦点触发、点击后关）时不过渡。
+   过渡写在毛玻璃元素自己身上。关动画时的规则在 still.css。 */
+@layer ll.controls {
+  .ll-tip-pos {
+    z-index: var(--ll-z-tooltip);
+    pointer-events: none;
+  }
+  .ll-tip {
+    box-sizing: border-box;
+    max-width: min(240px, var(--available-width, 240px));
+    /* 内边距：上下 4、左右 8 */
+    padding: var(--ll-space-4) var(--ll-space-8);
+    border-radius: var(--ll-radius-sm);
+    background: var(--ll-tip-bg);
+    -webkit-backdrop-filter: var(--ll-glass-blur);
+    backdrop-filter: var(--ll-glass-blur);
+    box-shadow: var(--ll-glass-edge);
+    color: var(--ll-fg);
+    font-size: var(--ll-text-sm);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    transition: opacity var(--ll-dur-tip) var(--ll-ease-out);
+  }
+  .ll-tip[data-starting-style],
+  .ll-tip[data-ending-style] {
+    opacity: 0;
+  }
+  .ll-tip[data-instant] {
+    transition-duration: 0s;
+  }
+}

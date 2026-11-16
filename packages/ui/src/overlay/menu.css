@@ -1,0 +1,295 @@
+/* 下拉菜单 .ll-menu（MenuContent）。两种：
+   - 平常的（触发元素是 MenuTrigger 加自己的元素、触发按钮不在根里面）：Popup 自己是玻璃面（.ll-glass）加项、分隔线、分组标题，淡入加一点缩放（下面「平常的」那一段）；
+   - 长开的（触发元素是库的下拉钮 MenuButton）：Popup（.ll-grow，见 grow.css）是最终大小的透明盒子，里面一块会长大的玻璃面、钮那一行当头、列表 .ll-menu-list；
+     项在面长到六七成后按顺序一项项落下来（下面「长开的」那一段）。
+   共同的：
+   - 外面那层 .ll-menu-pos（Positioner）只带层级。项 .ll-menu-item：高 32、左右内边距 10、圆角 --ll-radius-md（外圆角 16 减内边距 6，正好同心）、字 --ll-text-md、--ll-fg-2；
+     左边图标 .ll-menu-lead、中间标题 .ll-menu-label（超出省略）、右边小字 .ll-menu-hint（--ll-text-sm、--ll-fg-dim）、勾选项右边的勾 .ll-menu-tick；
+     aria-current='true'（现在就在这一项）：底 --ll-item-bg-on、字亮一档；data-tone='danger'：字是危险色；data-disabled：变淡。
+   - 悬停高亮：库的 .ll-glide（菜单里第一个子元素，MenuPopup 带着）；项是 .ll-glide-item（关动画时每项自己淡入淡出），样子在 scroll/glide.css。
+   - 键盘高亮：Base UI 给走到的那一项 data-highlighted，画一圈强调色的框（画在项里面，菜单会裁）加淡底。菜单上的 data-nav 说最近一次输入是谁：
+     keyboard 时才画这个框，滑动的那块和关动画时那一项的淡入立刻藏起来（没有淡出，框一出来鼠标那层就已经没了，两层不叠）；
+     pointer 时 data-highlighted 什么也不画（Base UI 跟着鼠标走的高亮只是为了键盘接得上），滑动的那块照常淡入。
+   关动画时的规则在 still.css。 */
+@layer ll.controls {
+  .ll-menu-pos {
+    z-index: var(--ll-z-popover);
+  }
+  /* ----- 平常的 ----- */
+  .ll-menu:not(.ll-grow) {
+    --ll-glide-radius: var(--ll-radius-md);
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    /* 项之间留 1px（不在间距刻度里） */
+    gap: 1px;
+    /* 最窄 160（控件自己的尺寸） */
+    min-width: 160px;
+    max-width: min(320px, var(--available-width, 320px));
+    max-height: var(--available-height, none);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--ll-space-6);
+    outline: 0;
+    transform-origin: var(--transform-origin);
+    transition:
+      opacity var(--ll-dur-pop-in) var(--ll-ease-out),
+      transform var(--ll-dur-pop-in) var(--ll-ease-out);
+  }
+  .ll-menu:not(.ll-grow)[data-starting-style],
+  .ll-menu:not(.ll-grow)[data-ending-style] {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  .ll-menu:not(.ll-grow)[data-ending-style] {
+    transition-duration: var(--ll-dur-pop-out);
+  }
+
+  /* ----- 项、分隔线、分组标题（两种共用）----- */
+  .ll-menu-item {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: var(--ll-space-8);
+    /* 项自己的高度：32（不在刻度里） */
+    height: 32px;
+    padding: 0 var(--ll-space-10);
+    border-radius: var(--ll-radius-md);
+    color: var(--ll-fg-2);
+    font-size: var(--ll-text-md);
+    cursor: pointer;
+    outline: 0;
+    user-select: none;
+  }
+  .ll-menu-item[aria-current='true'] {
+    background: var(--ll-item-bg-on);
+    color: var(--ll-fg);
+  }
+  .ll-menu-item[data-tone='danger'] {
+    color: var(--ll-danger);
+  }
+  /* 禁用的项变淡：淡的比例写成 --ll-item-dim。长开的菜单里项的透明度是「落下来」的动画占着的（下面 .ll-grow 那条，still.css 里关动画的那条也是），
+     直接写 opacity 盖不过它，所以它们都乘上 --ll-item-dim */
+  .ll-menu-item[data-disabled] {
+    --ll-item-dim: var(--ll-disabled-opacity);
+    opacity: var(--ll-item-dim);
+    cursor: default;
+  }
+  .ll-menu-lead {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    color: var(--ll-fg-3);
+  }
+  .ll-menu-lead > svg {
+    width: 14px;
+    height: 14px;
+  }
+  .ll-menu-item[data-tone='danger'] .ll-menu-lead {
+    color: inherit;
+  }
+  .ll-menu-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ll-menu-hint {
+    flex: none;
+    color: var(--ll-fg-dim);
+    font-size: var(--ll-text-sm);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .ll-menu-tick {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    color: var(--ll-accent);
+    transition: opacity var(--ll-dur-hover);
+  }
+  .ll-menu-tick[data-unchecked] {
+    opacity: 0;
+  }
+  .ll-menu-tick > svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  /* 键盘高亮：只在最近一次输入是键盘时画；这时鼠标那一套（滑动的块、关动画时一项的淡入）藏起来，两层不叠 */
+  .ll-menu[data-nav='keyboard'] .ll-glide {
+    opacity: 0;
+    transition: none;
+  }
+  .ll-menu[data-nav='keyboard'] .ll-menu-item.ll-hl::before,
+  .ll-menu[data-nav='keyboard'] .ll-menu-item.ll-hl::after {
+    opacity: 0;
+    transition: none;
+  }
+  .ll-menu[data-nav='keyboard'] .ll-menu-item[data-highlighted] {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: -2px;
+    color: var(--ll-fg);
+  }
+  .ll-menu[data-nav='keyboard'] .ll-menu-item[data-highlighted]:not([aria-current='true']) {
+    background: var(--ll-ctl-bg);
+  }
+  .ll-menu[data-nav='keyboard'] .ll-menu-item[data-highlighted][data-tone='danger'] {
+    color: var(--ll-danger-pale);
+    background: var(--ll-danger-soft);
+  }
+  .ll-menu-item:active:not([data-disabled]) {
+    background: var(--ll-ctl-bg);
+  }
+
+  .ll-menu-sep {
+    flex: none;
+    height: 1px;
+    margin: var(--ll-space-4) var(--ll-space-6);
+    background: var(--ll-line);
+  }
+  .ll-menu-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .ll-menu-group-label {
+    flex: none;
+    padding: var(--ll-space-6) var(--ll-space-10) var(--ll-space-4);
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-xs);
+    letter-spacing: 0.06em;
+  }
+
+  /* ----- 长开的 -----
+     列表：项在这里，超出时自己滚；最终大小一开始就在，所以列表和还没出来的项都不接鼠标（pointer-events: none），
+     项等自己开始出现（不透明度到约 0.25）才接，列表和第 1 项同一刻接（滚轮、滚动条，约内容时长的 0.30）；关的时候马上都不接。
+     项的出场：按在列表里的位置（--i，最多算到第 8 项，三十项的菜单不会等）错开，从上面落下 6（翻到钮上面时从下面升起）；
+     接鼠标的时刻占内容时长的比例是第几项的二次式（照内容的曲线算的：第 1 项约 0.30，第 9 项以后约 0.50）。 */
+  .ll-menu-list {
+    --ll-glide-radius: var(--ll-radius-md);
+    position: relative;
+    z-index: 1;
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--ll-space-2) var(--ll-space-6) var(--ll-space-6);
+    border-radius: 0 0 var(--ll-radius-xl) var(--ll-radius-xl);
+    pointer-events: none;
+    transition: pointer-events 0s linear calc(0.303 * var(--ll-dur-grow-content-in)) allow-discrete;
+  }
+  .ll-grow[data-side='top'] .ll-menu-list {
+    padding: var(--ll-space-6) var(--ll-space-6) var(--ll-space-2);
+    border-radius: var(--ll-radius-xl) var(--ll-radius-xl) 0 0;
+  }
+  .ll-grow[data-ready]:not([data-ending-style]) .ll-menu-list {
+    pointer-events: auto;
+  }
+  .ll-grow[data-ending-style] .ll-menu-list {
+    transition-delay: 0s;
+  }
+  .ll-grow :is(.ll-menu-item, .ll-menu-sep, .ll-menu-group-label) {
+    --ll-grow-ci: clamp(0, calc((var(--ll-grow-c) - 0.3 - min(var(--i, 8), 8) * 0.05) / 0.3), 1);
+    opacity: calc(var(--ll-grow-ci) * var(--ll-item-dim, 1));
+    translate: 0 calc((1 - var(--ll-grow-ci)) * var(--ll-grow-item-dy));
+  }
+  .ll-grow .ll-menu-item {
+    pointer-events: none;
+    transition:
+      pointer-events 0s linear
+        calc(
+          (
+              0.303 + 0.01487 * min(var(--i, 8), 8) + 0.00122 * min(var(--i, 8), 8) *
+                min(var(--i, 8), 8)
+            ) *
+            var(--ll-dur-grow-content-in)
+        )
+        allow-discrete,
+      background-color var(--ll-dur-hover);
+  }
+  .ll-grow[data-ready]:not([data-ending-style]) .ll-menu-item {
+    pointer-events: auto;
+  }
+  .ll-grow[data-ending-style] .ll-menu-item {
+    transition-delay: 0s, 0s;
+  }
+  /* 第几项（--i，最多算到第 8 项）：列表里第 1 个孩子是滑动高亮，项从第 2 个起；分组里的接着分组自己的序号往下数（--ll-gi 是分组的序号） */
+  .ll-menu-list > :nth-child(2) {
+    --i: 0;
+    --ll-gi: 0;
+  }
+  .ll-menu-list > :nth-child(3) {
+    --i: 1;
+    --ll-gi: 1;
+  }
+  .ll-menu-list > :nth-child(4) {
+    --i: 2;
+    --ll-gi: 2;
+  }
+  .ll-menu-list > :nth-child(5) {
+    --i: 3;
+    --ll-gi: 3;
+  }
+  .ll-menu-list > :nth-child(6) {
+    --i: 4;
+    --ll-gi: 4;
+  }
+  .ll-menu-list > :nth-child(7) {
+    --i: 5;
+    --ll-gi: 5;
+  }
+  .ll-menu-list > :nth-child(8) {
+    --i: 6;
+    --ll-gi: 6;
+  }
+  .ll-menu-list > :nth-child(9) {
+    --i: 7;
+    --ll-gi: 7;
+  }
+  .ll-menu-group > :nth-child(1) {
+    --i: calc(var(--ll-gi, 0) + 0);
+  }
+  .ll-menu-group > :nth-child(2) {
+    --i: calc(var(--ll-gi, 0) + 1);
+  }
+  .ll-menu-group > :nth-child(3) {
+    --i: calc(var(--ll-gi, 0) + 2);
+  }
+  .ll-menu-group > :nth-child(4) {
+    --i: calc(var(--ll-gi, 0) + 3);
+  }
+  .ll-menu-group > :nth-child(5) {
+    --i: calc(var(--ll-gi, 0) + 4);
+  }
+  .ll-menu-group > :nth-child(6) {
+    --i: calc(var(--ll-gi, 0) + 5);
+  }
+  .ll-menu-group > :nth-child(7) {
+    --i: calc(var(--ll-gi, 0) + 6);
+  }
+  .ll-menu-group > :nth-child(8) {
+    --i: calc(var(--ll-gi, 0) + 7);
+  }
+  /* 悬停的滑动高亮等内容出得差不多了才出现（内容还在淡入时鼠标已经在某一项上，不会先闪一块没有字的高亮） */
+  .ll-grow .ll-glide.ll-on {
+    opacity: clamp(0, calc((var(--ll-grow-c) - 0.85) * 6.7), 1);
+  }
+  /* 关的时候高亮的透明度直接跟着内容走、不再过渡（库的 .ll-glide 的透明度有 0.1 多秒的过渡，会落在内容后面，项都淡没了还剩一个空框） */
+  .ll-grow[data-ending-style] .ll-glide {
+    transition:
+      height var(--ll-dur-glide) var(--ll-ease-out),
+      width var(--ll-dur-glide) var(--ll-ease-out);
+  }
+}

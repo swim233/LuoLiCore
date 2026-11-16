@@ -9,7 +9,8 @@ import { WHEEL_EVENT, wheelPixels, WheelMotion, wheelRegistry, WheelStream } fro
    busy() 为真时，都不接管，交给浏览器，而且此刻还没走完的滚轮缓动立刻清掉（不要两边抢）；键盘、按下鼠标、触屏也一样。
    大小步混在一起的一串事件（触控板甩动）接不接管只在这一串的第一个事件上定，整串一致（@luoli/ui/wheel 的 WheelStream）。
    找滚动区：从事件的目标往外一层一层找，第一个 overflow-y 是 auto、scroll（或 overlay）而且内容真的超出了的元素；
-   找到页面根（html）就用 document.scrollingElement（桌面本身的滚动；全屏锁滚动时 html 的 overflow-y 是 hidden，不算）。
+   找到页面根（html）就用 document.scrollingElement（桌面本身的滚动；页面被锁住时不算：全屏锁滚动时 html 的 overflow-y 是 hidden，
+   模态的浮层（对话框）锁的是 body 的 overflow-y：html 是 visible 时视口的 overflow 取 body 的，这两种都看）。
    - 输入框一类（textarea、input、select）自己能滚的，整个交给浏览器；
    - 带 data-native-wheel 的元素里面不接管（待发图片那一排自己把竖滚轮变成横着走）；
    - 横着滚的（代码块、表格、切换条）overflow-y 不是 auto，找不到它，滚的就是外面那个竖向的；
@@ -83,7 +84,11 @@ export function pickScroller(target: Element, dir: 1 | -1, now: number): HTMLEle
     }
     if (el === document.documentElement) {
       const root = document.scrollingElement as HTMLElement | null;
-      if (root && cs.overflowY !== 'hidden' && maxOf(root) > 1) {
+      /* 页面被锁住了不算：浏览器把 html 的 overflow 当作视口的，html 是 visible 时取 body 的。
+         面板自己锁滚动写在 html 上；Base UI 的模态浮层（对话框）锁的是 body（html 不是滚动容器时锁 body） */
+      const viewport =
+        cs.overflowY === 'visible' ? getComputedStyle(document.body).overflowY : cs.overflowY;
+      if (root && viewport !== 'hidden' && viewport !== 'clip' && maxOf(root) > 1) {
         if (capacityOf(root, dir) > EDGE || containsOverscroll(cs)) return root;
       }
       continue;

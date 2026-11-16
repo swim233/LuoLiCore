@@ -1,0 +1,164 @@
+/* toast .ll-toast（Toaster）：底部居中，一条是一块玻璃（.ll-glass）。
+   - 通知区 .ll-toaster（Base UI 的 Viewport）：固定在底部居中，宽度 min(420px, 视口减 32)，离底 --ll-toast-bottom（加安全区），层级 --ll-z-toast；
+     自己不接鼠标（pointer-events: none），每条 toast 接；每条 toast 自己是绝对定位、贴着通知区的底，位置见下；
+   - 一条的样子：只有一句话是胶囊，带标题或按钮（data-block）、或者字多到折了两行以上，是圆角 --ll-radius-xl 的块。
+     折没折行 CSS 看不出来：用 Base UI 量出来的 --toast-height 做一个「台阶」：高度不到 46 的圆角取最大（胶囊），超过 46 的取 xl。
+     （实测高度：一行 38，两行 57，三行 77，带按钮的一行 46；46 离一行的 38 和两行的 57 都有 8 以上的余量，带按钮的一行正好在门槛上，由 data-block 兜底。）内边距上下 9、左右 16（胶囊），块是上下 12；字 --ll-text-md、--ll-fg，
+     标题加粗，有标题时说明降到 --ll-fg-2；出错的（data-type='danger'）左边有一个库的危险色的点；
+   - 键盘焦点环：用 ll.base 的统一焦点环（.ll-toast 在那份清单里，Tab 到一条 toast 上才画，鼠标点上去不画），这里不能写 outline（层靠后，会盖掉它）；
+   - 关闭的小按钮（.ll-toast-close，库的图标按钮缩到 22）悬停或焦点在里面时才出现（触屏没有悬停，一直显示），位置一直留着，toast 不会因为悬停变宽；
+     带按钮的那种按钮 .ll-toast-action 是库的小号 ghost 按钮；
+   - 叠法：一条条排开，从下往上，间隔 --ll-toast-gap（8），每条都看得全，最新的在最下面；
+   - 进出场：从下面上来 12 加淡入，--ll-dur-toast（0.25 秒）、--ll-ease-out；消失时淡出加往下；往下划掉、往右划掉时顺着划的方向飞出去；
+     超出 limit 的（data-limited）淡出、不接鼠标。过渡写在每条 toast 自己身上（毛玻璃元素自己）。
+   关动画时的规则在 still.css。 */
+@layer ll.controls {
+  .ll-toaster {
+    --ll-toast-gap: 8px;
+    position: fixed;
+    z-index: var(--ll-z-toast);
+    inset-inline: 0;
+    bottom: calc(var(--ll-toast-bottom) + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+    width: min(420px, calc(100vw - 32px));
+    height: 0;
+    margin-inline: auto;
+    pointer-events: none;
+  }
+  .ll-toast {
+    /* 位置和缩放：--ll-rest-y 是停下来时的竖向位置（下面排开时算），--ll-scale 是缩放（现在恒为 1，留着给以后）；--ll-enter、--ll-enter-x 是进出场时多出来的位移 */
+    --ll-swipe-x: var(--toast-swipe-movement-x, 0px);
+    --ll-swipe-y: var(--toast-swipe-movement-y, 0px);
+    --ll-rest-y: 0px;
+    --ll-scale: 1;
+    --ll-enter: 0px;
+    --ll-enter-x: 0px;
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: calc(1000 - var(--toast-index, 0));
+    box-sizing: border-box;
+    width: fit-content;
+    max-width: 100%;
+    height: var(--toast-height, auto);
+    margin-inline: auto;
+    padding: 9px var(--ll-space-16);
+    border-radius: clamp(
+      var(--ll-radius-xl),
+      calc((46px - var(--toast-height, 0px)) * 100),
+      var(--ll-radius-full)
+    );
+    color: var(--ll-fg);
+    font-size: var(--ll-text-md);
+    line-height: 1.5;
+    pointer-events: auto;
+    user-select: none;
+    transform-origin: bottom center;
+    transform: translate(
+        calc(var(--ll-swipe-x) + var(--ll-enter-x)),
+        calc(var(--ll-swipe-y) + var(--ll-rest-y) + var(--ll-enter))
+      )
+      scale(var(--ll-scale));
+    transition:
+      transform var(--ll-dur-toast) var(--ll-ease-out),
+      opacity var(--ll-dur-toast) var(--ll-ease-out),
+      height 150ms var(--ll-ease-out);
+  }
+  .ll-toast[data-block] {
+    padding-block: var(--ll-space-12);
+    border-radius: var(--ll-radius-xl);
+  }
+  /* 手伸进两条之间（展开时）不要掉出通知区：每条往下多伸一小截看不见的地方 */
+  .ll-toast::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 0;
+    width: 100%;
+    height: calc(var(--ll-toast-gap) + 1px);
+  }
+  .ll-toast[data-starting-style],
+  .ll-toast[data-ending-style] {
+    --ll-enter: 12px;
+    opacity: 0;
+  }
+  .ll-toast[data-ending-style][data-swipe-direction='down'] {
+    --ll-enter: 150%;
+  }
+  .ll-toast[data-ending-style][data-swipe-direction='right'] {
+    --ll-enter: 0px;
+    --ll-enter-x: 150%;
+  }
+  .ll-toast[data-limited] {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* 一条条排开 */
+  .ll-toast {
+    --ll-rest-y: calc(
+      var(--toast-offset-y, 0px) * -1 - var(--toast-index, 0) * var(--ll-toast-gap)
+    );
+  }
+
+  .ll-toast-content {
+    display: flex;
+    align-items: center;
+    gap: var(--ll-space-8);
+    transition: opacity var(--ll-dur-toast) var(--ll-ease-out);
+  }
+  .ll-toast-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--ll-space-2);
+    overflow-wrap: anywhere;
+  }
+  .ll-toast-title {
+    margin: 0;
+    color: var(--ll-fg);
+    font-size: var(--ll-text-md);
+    font-weight: 600;
+  }
+  .ll-toast-msg {
+    margin: 0;
+    color: var(--ll-fg);
+  }
+  .ll-toast-title + .ll-toast-msg {
+    color: var(--ll-fg-2);
+  }
+  .ll-toast-action {
+    flex: none;
+  }
+  /* 关闭的小按钮：位置一直留着（伸进右边的内边距里一点），悬停或焦点在里面时才看得见 */
+  .ll-toast-close {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    /* 右边伸进内边距里 8，上下各缩进 2：加了这个按钮，一行字的 toast 不会变高 */
+    margin: calc(var(--ll-space-2) * -1) -8px calc(var(--ll-space-2) * -1) 0;
+    opacity: 0;
+    transition:
+      opacity var(--ll-dur-hover),
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-toast-close > svg {
+    width: 12px;
+    height: 12px;
+  }
+  .ll-toast:focus-within .ll-toast-close {
+    opacity: 1;
+  }
+  @media (hover: hover) {
+    .ll-toast:hover .ll-toast-close {
+      opacity: 1;
+    }
+  }
+  @media (hover: none) {
+    .ll-toast-close {
+      opacity: 1;
+    }
+  }
+}

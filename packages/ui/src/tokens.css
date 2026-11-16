@@ -165,6 +165,28 @@
     --ll-z-dialog: 1100;
     --ll-z-toast: 1200;
     --ll-z-tooltip: 1300;
+    /* ---------- 浮层 ----------
+       进出场的时长（曲线都是 --ll-ease-out）：弹出框和菜单、提示气泡、对话框的遮罩、对话框的窗体（进、出）、toast */
+    --ll-dur-pop-in: 140ms;
+    --ll-dur-pop-out: 100ms;
+    --ll-dur-tip: 100ms;
+    --ll-dur-dim: 200ms;
+    --ll-dur-dialog-in: 200ms;
+    --ll-dur-dialog-out: 140ms;
+    --ll-dur-toast: 250ms;
+    /* 「长开」（用下拉钮打开的菜单和弹出框，钮的底长成浮层的底）的时长，曲线写在 overlay/grow.css 里：
+       面长开、内容出来、关时面缩回、关时内容淡掉、起点样子的颜色过渡（鼠标进出钮时，面起点的底色、细线、字色换成钮此刻的样子） */
+    --ll-dur-grow-in: 480ms;
+    --ll-dur-grow-content-in: 440ms;
+    --ll-dur-grow-out: 340ms;
+    --ll-dur-grow-content-out: 180ms;
+    --ll-dur-grow-tint: 300ms;
+    /* 对话框后面的遮罩：只压暗（页面底 62%，照面板全屏层的底），不模糊 */
+    --ll-dim: color-mix(in srgb, var(--ll-bg) 62%, transparent);
+    /* 提示气泡的底：比玻璃深一点的小块 */
+    --ll-tip-bg: rgba(8, 12, 30, 0.9);
+    /* toast 离视口底边的距离（面板要避开底部的输入区时自己改） */
+    --ll-toast-bottom: 24px;
     /* 专门调过的值：气泡的字号、行高、圆角、收尖的角 */
     --ll-bubble-text: 13.5px;
     --ll-bubble-leading: 1.6;
