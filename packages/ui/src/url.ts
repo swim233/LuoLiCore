@@ -1,6 +1,6 @@
 /* 消息里的网址：哪些能点、点开是什么地址。
    只认 http、https；没写协议的域名（example.com、docs.foo.dev/a）补成 https；别的协议（javascript:、data:、ftp:、mailto:……）都不认，当普通文字。
-   正文里自动认出的网址（components/Hl.tsx）和 Markdown 里写的链接（components/Markdown.tsx）都经过这里。纯函数，不碰 DOM */
+   正文里自动认出的网址（chat/Hl.tsx）和 Markdown 里写的链接（chat/Markdown.tsx）都经过这里。纯函数，不碰 DOM */
 
 /* 没写协议时认哪些：域名加常见后缀，和 Hl 里高亮认的那些一致 */
 const BARE_RE = /^(?:[a-z0-9-]+\.)+(?:com|org|net|cn|io|dev|me|jp|edu|gov|info)(?:[/?#]|$)/i;

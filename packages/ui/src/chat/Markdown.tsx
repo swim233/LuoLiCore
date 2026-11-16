@@ -12,10 +12,10 @@ import { PENDING_HREF } from './stream-md';
 import { cpLen, makeCuts } from './typing';
 import type { Batch } from './typing';
 
-/* 洛璃的回复按 Markdown 画：marked 只管把文字拆成词元（lib/markdown.ts），这里把词元画成 React 元素。
+/* 洛璃的回复按 Markdown 画：marked 只管把文字拆成词元（markdown.ts），这里把词元画成 React 元素。
    不用 marked 的 HTML 输出，不用 dangerouslySetInnerHTML；原始 HTML 当普通文字显示；图片不加载（不访问外网），画成链接。
    支持：加粗、斜体、删除线、行内代码、代码块（语言名、复制）、列表（有序、无序、嵌套、任务）、引用、标题、表格、分隔线、链接。
-   没闭合的写法（半个 **、没写完的代码块）marked 本来就不当格式，原样显示（逐字输出时，lib/stream-md.ts 先把放出来的文字改成最终的样子再交给这里，见 Typed.tsx）。
+   没闭合的写法（半个 **、没写完的代码块）marked 本来就不当格式，原样显示（逐字输出时，stream-md.ts 先把放出来的文字改成最终的样子再交给这里，见 Typed.tsx）。
 
    结构（逐字输出，Typed.tsx，接在这上面）：
    - Markdown 把文字拆成顶层的块，每块一个 Block（memo，按块自己的原文比较）：已经写完的块，后面加字时不重画；
@@ -23,10 +23,10 @@ import type { Batch } from './typing';
    - tail：画在整段内容最后一个字后面的东西（光标）。每一层只把它交给自己的最后一个孩子，
      最后落在：段落、标题的末尾，列表最后一项的末尾，引用的最后一块的末尾，表格最后一个单元格里，代码块的 <code> 里，其余块的后面
      （分隔线后面不放：放了要多占一行，结束时去掉会跳）。所以不管最后一个字在列表项、表格还是代码块里，tail 都紧贴着它；
-   - fresh：刚出现的几个字（lib/typing.ts 的 Batch，一个字一批，开始时刻几乎相同的合成一批）。和 tail 一起走到最后一个文字片段（或代码块的 <code>）里，
+   - fresh：刚出现的几个字（typing.ts 的 Batch，一个字一批，开始时刻几乎相同的合成一批）。和 tail 一起走到最后一个文字片段（或代码块的 <code>）里，
      把末尾这几批字各包一个落下的 span；最后一个词元是加粗、斜体、删除线、链接、行内代码时，进到它里面的最后一个文字片段里落
      （逐字时没写完的加粗、行内代码、链接一出现就是最终的样子，里面的字也要一个个落下）；
-   - 逐字时没写完的链接（lib/stream-md.ts 把网址换成占位 PENDING_HREF）：画成不能点的链接色文字，只有方括号里的字；
+   - 逐字时没写完的链接（stream-md.ts 把网址换成占位 PENDING_HREF）：画成不能点的链接色文字，只有方括号里的字；
    - tokens：调用方自己分好的词元（逐字时用增量分析，不走缓存）；不给就按 text 分；
    - labels：代码块的「复制」「已复制」、任务列表方框的读屏名字，要换时给（见 labels.ts）。 */
 interface Tk {

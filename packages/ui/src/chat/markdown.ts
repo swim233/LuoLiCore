@@ -2,7 +2,7 @@ import { Lexer, Tokenizer } from 'marked';
 import type { Token } from 'marked';
 
 /* Markdown 的词法分析（marked 的 lexer）和一行预览。纯函数，不碰 DOM，也不输出 HTML：
-   面板自己把词元画成 React 元素（components/Markdown.tsx），原始 HTML 当普通文字显示。
+   词元由 Markdown.tsx 画成 React 元素，原始 HTML 当普通文字显示。
    - GFM 打开（表格、删除线、任务列表、网址自动成链接）；
    - breaks：一个回车就换行（模型写的样子），不把相邻的两行并成一段；
    - 没闭合的写法（半个 **、没写完的代码块）照原样：marked 本来就不把它们当格式
