@@ -110,6 +110,7 @@
     --ll-accent-soft: color-mix(in srgb, var(--ll-accent) 22%, transparent);
     --ll-danger-glow: color-mix(in srgb, var(--ll-danger) 55%, transparent);
     --ll-danger-soft: color-mix(in srgb, var(--ll-danger) 24%, transparent);
+    --ll-danger-tint: color-mix(in srgb, var(--ll-danger) 10%, transparent);
     /* 滚动条的颜色（配 scrollbar-color: var(--ll-scrollbar) transparent 用；窗格的滚动区已经带着，别的滚动区加 .ll-scrollbar） */
     --ll-scrollbar: color-mix(in srgb, var(--ll-accent) 35%, transparent);
 

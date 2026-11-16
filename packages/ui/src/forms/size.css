@@ -1,0 +1,46 @@
+/* 表单控件的三档尺寸（data-size：sm、md 默认、lg），和库的按钮、下拉钮同档：高 22、28、32，字号、左右内边距、圆角都对齐，一行里放一个输入框和一个按钮是齐的。
+   表单里默认用 lg（高 32、字 13，FormConfig 里设）。写成变量，输入框、下拉选择、复选框、滑块、列表编辑、表单项共用这一张表（--ll-dd-* 是下拉钮自己的那张，数值一样）：
+     --ll-fc-h 高、--ll-fc-fs 字号、--ll-fc-px 左右内边距、--ll-fc-r 圆角、--ll-fc-ic 里面的图标、
+     --ll-fc-box 复选框、单选的框。
+   控件自己的尺寸（22、28、32、16……）不在刻度里，写在这里。 */
+@layer ll.controls {
+  :is(.ll-input, .ll-num, .ll-check, .ll-slider, .ll-listedit, .ll-form-field, .ll-select) {
+    --ll-fc-h: 28px;
+    --ll-fc-fs: var(--ll-text-sm);
+    --ll-fc-px: var(--ll-space-12);
+    --ll-fc-r: var(--ll-radius-md);
+    --ll-fc-ic: 14px;
+    --ll-fc-box: 16px;
+  }
+  :is(
+    .ll-input,
+    .ll-num,
+    .ll-check,
+    .ll-slider,
+    .ll-listedit,
+    .ll-form-field,
+    .ll-select
+  )[data-size='sm'] {
+    --ll-fc-h: 22px;
+    --ll-fc-fs: var(--ll-text-xs);
+    --ll-fc-px: var(--ll-space-10);
+    --ll-fc-r: var(--ll-radius-sm);
+    --ll-fc-ic: 12px;
+    --ll-fc-box: 14px;
+  }
+  :is(
+    .ll-input,
+    .ll-num,
+    .ll-check,
+    .ll-slider,
+    .ll-listedit,
+    .ll-form-field,
+    .ll-select
+  )[data-size='lg'] {
+    --ll-fc-h: 32px;
+    --ll-fc-fs: var(--ll-text-md);
+    --ll-fc-px: var(--ll-space-14);
+    --ll-fc-ic: 14px;
+    --ll-fc-box: 18px;
+  }
+}

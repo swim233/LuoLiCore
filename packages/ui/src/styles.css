@@ -44,3 +44,11 @@
 @import './overlay/dialog.css';
 @import './overlay/toast.css';
 @import './overlay/still.css';
+@import './forms/size.css';
+@import './forms/input.css';
+@import './forms/select.css';
+@import './forms/choice.css';
+@import './forms/slider.css';
+@import './forms/form-field.css';
+@import './forms/list-edit.css';
+@import './forms/still.css';

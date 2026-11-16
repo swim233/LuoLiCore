@@ -1,0 +1,94 @@
+/* 表单项 .ll-form-field（FormField）和表单 .ll-form：标签 .ll-form-label、控件 .ll-form-ctl、说明 .ll-form-desc、错误 .ll-form-err。
+   样子沿用库的 .ll-field（controls/field.css）：标签 --ll-text-sm、--ll-fg-3，说明同字号同色；多了出错和横排的格子。
+   - 竖排（默认）：标签、控件、说明、错误，一列，间距 6；
+   - 横排（data-layout='row'）：两列的格子，左边标签（和控件第一行同高、垂直居中，--ll-fg-2）、下面说明（小一号、更淡），右边控件、下面错误；
+     窄了放不下（容器宽 < 360）折成竖排；
+   - 错误：Base UI 的 Field.Error，出错时才有：一行危险色的字，前面带一个警告图标（控件的细线变红、底带一点红在各控件自己的样式里）；
+   - 必填的星号 .ll-form-req 是危险色。表单 .ll-form 只是把各个表单项竖着排开（间距 16）。 */
+@layer ll.controls {
+  .ll-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ll-space-16);
+  }
+  /* 外面套一层只管量宽度（容器查询查的是祖先，表单项自己查不了自己） */
+  .ll-form-box {
+    container-type: inline-size;
+    min-width: 0;
+  }
+  .ll-form-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ll-space-6);
+    min-width: 0;
+  }
+  .ll-form-label {
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-sm);
+  }
+  .ll-form-req {
+    margin-left: var(--ll-space-2);
+    color: var(--ll-danger);
+  }
+  .ll-form-ctl {
+    min-width: 0;
+  }
+  .ll-form-desc {
+    margin: 0;
+    color: var(--ll-fg-3);
+    font-size: var(--ll-text-sm);
+    line-height: 1.5;
+  }
+  .ll-form-err {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ll-space-6);
+    margin: 0;
+    color: var(--ll-danger);
+    font-size: var(--ll-text-sm);
+    line-height: 1.5;
+    transition: opacity var(--ll-dur-hover);
+  }
+  .ll-form-err[data-starting-style],
+  .ll-form-err[data-ending-style] {
+    opacity: 0;
+  }
+  .ll-form-err-ic {
+    flex: none;
+    width: 12px;
+    height: 12px;
+    margin-top: 0.3em;
+  }
+
+  /* 横排：容器够宽（360 以上）才分两列，窄了还是竖排 */
+  @container (min-width: 360px) {
+    .ll-form-field[data-layout='row'] {
+      display: grid;
+      grid-template-columns: minmax(110px, 0.36fr) minmax(0, 1fr);
+      grid-template-areas:
+        'label ctl'
+        'desc err';
+      align-items: start;
+      gap: 0 var(--ll-space-16);
+    }
+    .ll-form-field[data-layout='row'] > .ll-form-label {
+      grid-area: label;
+      display: flex;
+      align-items: center;
+      min-height: var(--ll-fc-h);
+      color: var(--ll-fg-2);
+    }
+    .ll-form-field[data-layout='row'] > .ll-form-ctl {
+      grid-area: ctl;
+    }
+    .ll-form-field[data-layout='row'] > .ll-form-desc {
+      grid-area: desc;
+      color: var(--ll-fg-dim);
+      font-size: var(--ll-text-xs);
+    }
+    .ll-form-field[data-layout='row'] > .ll-form-err {
+      grid-area: err;
+      margin-top: var(--ll-space-6);
+    }
+  }
+}

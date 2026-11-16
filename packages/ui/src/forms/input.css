@@ -1,0 +1,248 @@
+/* 输入框 .ll-input（单行 Input、密码、数字 NumberInput 的外壳、多行 Textarea）：「槽」的样子，和下拉钮的槽（overlay/dropdown.css 的 slot）是一家：
+   --ll-inset-bg 的底加 --ll-inset-line 的细线（画在阴影里，不占版面），圆角 --ll-fc-r（尺寸表在 size.css）。
+   外壳是个 span（或数字输入的 Group），里面依次是：前缀 .ll-input-aff、真正的 <input>（.ll-input-el）、小按钮 .ll-input-btn（清除、眼睛）、后缀 .ll-input-aff。
+   状态：
+   - 平时、悬停（底亮一档、线亮一档，写在 @media (hover: hover) 里；用 :where 压低优先级，焦点、出错的规则一定盖得过它）、
+     焦点（里面的 <input> 在键盘焦点，或鼠标点进去：输入框都显示）、有值（没有特别的样子）、占位（--ll-fg-dim）、禁用（变淡）、只读（没有底、线更淡、悬停不变）、出错；
+   - 焦点：没有外圈，细线变成强调色、里面一圈淡光（框里的小按钮——清除、眼睛、加减——是按钮，焦点还是库统一的焦点环）；
+   - 出错（外壳上有 data-invalid，或里面的 <input> 有 data-invalid、aria-invalid；放在 FormField 里由 Base UI 的 Field 给）：
+     细线变危险色、底带一点红（--ll-danger-tint），焦点的线和光也变红；下面一行带图标的红字在 form-field.css。
+   状态的颜色写成外壳上的几个变量（--_bg、--_line、--_ring、--_glow），各状态只改变量，box-shadow 只写一处。 */
+@layer ll.controls {
+  .ll-input {
+    --_bg: var(--ll-inset-bg);
+    --_line: var(--ll-inset-line);
+    --_ring: var(--ll-accent);
+    --_glow: inset 0 0 0 0 transparent;
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: var(--ll-space-6);
+    width: 100%;
+    min-width: 0;
+    height: var(--ll-fc-h);
+    padding: 0 var(--ll-fc-px);
+    border-radius: var(--ll-fc-r);
+    background: var(--_bg);
+    box-shadow:
+      inset 0 0 0 1px var(--_line),
+      var(--_glow);
+    color: var(--ll-fg);
+    font-size: var(--ll-fc-fs);
+    cursor: text;
+    transition:
+      background-color var(--ll-dur-hover),
+      box-shadow var(--ll-dur-hover);
+  }
+  .ll-input-el {
+    flex: 1 1 auto;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-overflow: ellipsis;
+    caret-color: var(--ll-accent);
+    appearance: none;
+  }
+  .ll-input-el::placeholder {
+    color: var(--ll-fg-dim);
+    opacity: 1;
+  }
+  .ll-input-el:disabled {
+    cursor: default;
+  }
+  .ll-input-el[readonly] {
+    cursor: default;
+  }
+  /* 前后缀：图标、单位、小按钮 */
+  .ll-input-aff {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-4);
+    color: var(--ll-fg-3);
+    white-space: nowrap;
+    user-select: none;
+  }
+  .ll-input-aff > svg {
+    width: var(--ll-fc-ic);
+    height: var(--ll-fc-ic);
+  }
+  /* 框里的小按钮（清除、显示密码）：比框矮 8，圆角比框小；贴着右边，抵掉一半的内边距 */
+  .ll-input-btn {
+    flex: none;
+    box-sizing: border-box;
+    display: inline-grid;
+    place-items: center;
+    width: calc(var(--ll-fc-h) - 8px);
+    height: calc(var(--ll-fc-h) - 8px);
+    margin: 0 calc(var(--ll-fc-px) / -2) 0 0;
+    padding: 0;
+    border: 0;
+    border-radius: calc(var(--ll-fc-r) - 3px);
+    background: transparent;
+    color: var(--ll-fg-3);
+    cursor: pointer;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-input-aff > .ll-input-btn + .ll-input-btn {
+    margin-left: 0;
+  }
+  .ll-input-btn > svg {
+    width: var(--ll-fc-ic);
+    height: var(--ll-fc-ic);
+  }
+  .ll-input-btn:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  .ll-input-btn:focus-visible {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: -1px;
+  }
+  .ll-input-btn[aria-pressed='true'] {
+    color: var(--ll-fg);
+  }
+
+  /* 多行：高度由 JS 按内容定（autosize.ts），外壳不写高；字数在右下角 */
+  .ll-input[data-multiline] {
+    align-items: stretch;
+    height: auto;
+    padding: 0;
+  }
+  .ll-input[data-multiline] > .ll-input-el {
+    display: block;
+    height: auto;
+    padding: var(--ll-space-6) var(--ll-fc-px);
+    line-height: 1.5;
+    resize: none;
+    overflow-y: hidden;
+  }
+  .ll-input[data-multiline][data-count] > .ll-input-el {
+    padding-bottom: calc(var(--ll-space-6) + 14px);
+  }
+  .ll-input-count {
+    position: absolute;
+    right: var(--ll-space-8);
+    bottom: var(--ll-space-4);
+    color: var(--ll-fg-dim);
+    font-size: var(--ll-text-xs);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+    pointer-events: none;
+  }
+
+  /* 状态：悬停 */
+  @media (hover: hover) {
+    .ll-input:where(:not(:has(.ll-input-el:is(:disabled, [readonly]))):hover) {
+      --_bg: var(--ll-ctl-bg);
+      --_line: var(--ll-line-hi);
+    }
+  }
+  /* 焦点（里面的输入框在焦点）：底和线同悬停，细线变成强调色（出错时是红），里面一圈淡光，没有外圈 */
+  .ll-input:has(.ll-input-el:focus-visible) {
+    --_bg: var(--ll-ctl-bg);
+    --_line: var(--_ring);
+    --_glow: inset 0 0 0 3px color-mix(in srgb, var(--_ring) 28%, transparent);
+  }
+  /* 禁用、只读 */
+  .ll-input:has(.ll-input-el:disabled) {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  .ll-input:has(.ll-input-el[readonly]) {
+    --_bg: transparent;
+    --_line: var(--ll-line);
+    cursor: default;
+  }
+  /* 出错：线变危险色、底带一点红，焦点的线和光也变红；放在最后，盖过悬停、焦点 */
+  .ll-input:is([data-invalid], :has(.ll-input-el:is([data-invalid], [aria-invalid='true']))) {
+    --_bg: var(--ll-danger-tint);
+    --_line: var(--ll-danger);
+    --_ring: var(--ll-danger);
+  }
+
+  /* 数字输入：外壳是 Group（.ll-num 里的 .ll-input），两头各一个加减钮（框里贴着边，圆角比框小 2），数字居中 */
+  .ll-num {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .ll-num-btn {
+    flex: none;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ll-fg-3);
+    cursor: pointer;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-num-btn > svg {
+    width: var(--ll-fc-ic);
+    height: var(--ll-fc-ic);
+  }
+  .ll-num-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+  .ll-num-btn:focus-visible {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: -1px;
+  }
+  .ll-num > .ll-input {
+    padding: 0;
+    gap: 0;
+  }
+  .ll-num > .ll-input > .ll-num-btn {
+    width: calc(var(--ll-fc-h) - 4px);
+    height: calc(var(--ll-fc-h) - 4px);
+    margin: 2px;
+    border-radius: calc(var(--ll-fc-r) - 2px);
+  }
+  .ll-num > .ll-input > .ll-input-el {
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .ll-num > .ll-input > .ll-input-aff {
+    margin-right: var(--ll-space-4);
+  }
+  @media (hover: hover) {
+    .ll-num-btn:not(:disabled):hover,
+    .ll-input-btn:not(:disabled):hover {
+      background: var(--ll-ctl-bg);
+      color: var(--ll-fg);
+    }
+  }
+  /* 拖动改值（scrub）的区域：左右拖，鼠标指针换成两个箭头（Base UI 把真的指针藏起来、用 .ll-num-cursor 跟着走） */
+  .ll-num-scrub {
+    cursor: ew-resize;
+    touch-action: none;
+  }
+  .ll-num-cursor {
+    color: var(--ll-fg);
+    pointer-events: none;
+  }
+  .ll-num-cursor > svg {
+    width: 14px;
+    height: 14px;
+    transform: rotate(90deg);
+    filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--ll-black) 60%, transparent));
+  }
+}

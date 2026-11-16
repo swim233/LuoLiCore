@@ -1,0 +1,56 @@
+/* 下拉选择 .ll-select：打开它的钮是库的下拉钮的槽（.ll-dd，data-kind='slot'，样子在 overlay/dropdown.css），这里只补表单里要的几处；
+   浮层是长开的菜单（.ll-menu .ll-grow，样子在 overlay/menu.css、grow.css），项是 .ll-menu-item，这里补「当前项」的样子。
+   - 钮占满一行（表单里的控件都是撑满一行的）；没选时 Select.Value 的 data-placeholder 把字变淡；
+   - 当前项：底和字亮一档（同菜单里的 aria-current），右边一个勾（.ll-menu-tick）；禁用的项：整项变淡（菜单的 data-disabled，长开里也对）；
+   - 焦点：同输入框（input.css）：没有外圈，细线变强调色、里面一圈淡光；
+   - 出错（data-invalid，或 aria-invalid：Base UI 的 Select 钮在 Field 里出错时只给 aria-invalid）：细线变危险色、底带一点红，焦点的线和光也变红。
+     选择器要压过 dropdown.css 里槽的悬停、展开的规则，所以带 .ll-dd.ll-select。 */
+@layer ll.controls {
+  .ll-dd.ll-select {
+    display: flex;
+    width: 100%;
+    --ll-dd-min: 0px;
+  }
+  .ll-select .ll-dd-main > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ll-select [data-placeholder] {
+    color: var(--ll-fg-dim);
+  }
+  .ll-select-item[data-selected] {
+    background: var(--ll-item-bg-on);
+    color: var(--ll-fg);
+  }
+  .ll-select-item .ll-menu-tick {
+    margin-left: var(--ll-space-4);
+  }
+
+  /* 焦点 */
+  .ll-dd.ll-select:focus-visible {
+    outline: none;
+    background: var(--ll-ctl-bg);
+    box-shadow:
+      inset 0 0 0 1px var(--ll-accent),
+      inset 0 0 0 3px color-mix(in srgb, var(--ll-accent) 28%, transparent);
+  }
+  /* 出错 */
+  .ll-dd.ll-select:is([data-invalid], [aria-invalid='true']) {
+    background: var(--ll-danger-tint);
+    box-shadow: inset 0 0 0 1px var(--ll-danger);
+  }
+  .ll-dd.ll-select:is([data-invalid], [aria-invalid='true']):focus-visible {
+    box-shadow:
+      inset 0 0 0 1px var(--ll-danger),
+      inset 0 0 0 3px color-mix(in srgb, var(--ll-danger) 28%, transparent);
+  }
+  @media (hover: hover) {
+    .ll-dd.ll-select:is([data-invalid], [aria-invalid='true']):not(:disabled):not(
+        [aria-expanded='true']
+      ):hover {
+      background: var(--ll-danger-tint);
+      box-shadow: inset 0 0 0 1px var(--ll-danger);
+    }
+  }
+}

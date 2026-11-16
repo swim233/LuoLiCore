@@ -1,0 +1,47 @@
+/* 动画关掉时（页面根上有 still 类，或系统开了「减少动态效果」而页面根上没有 motion 类）：表单控件的过渡缩短到 0.12 秒，状态照常切换（不是去掉）。
+   照 controls/still.css 的约定；长开的下拉选择的规则在 overlay/still.css，不用在这里写。
+   复选框的勾淡入时的放大去掉（只留透明度）；列表编辑的行不长不收（animation: none，行直接出现、直接消失）。 */
+@layer ll.controls {
+  :root.still
+    :is(
+      .ll-input,
+      .ll-input-btn,
+      .ll-num-btn,
+      .ll-check-box,
+      .ll-check-mark,
+      .ll-slider-thumb,
+      .ll-listedit-del,
+      .ll-form-err
+    ) {
+    transition-duration: 0.12s;
+    transition-delay: 0s;
+  }
+  :root.still .ll-check-mark:not(:is([data-checked], [data-indeterminate])) {
+    transform: none;
+  }
+  :root.still .ll-listedit-item:is([data-phase='entering'], [data-phase='leaving']) {
+    animation: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root:not(.motion)
+      :is(
+        .ll-input,
+        .ll-input-btn,
+        .ll-num-btn,
+        .ll-check-box,
+        .ll-check-mark,
+        .ll-slider-thumb,
+        .ll-listedit-del,
+        .ll-form-err
+      ) {
+      transition-duration: 0.12s;
+      transition-delay: 0s;
+    }
+    :root:not(.motion) .ll-check-mark:not(:is([data-checked], [data-indeterminate])) {
+      transform: none;
+    }
+    :root:not(.motion) .ll-listedit-item:is([data-phase='entering'], [data-phase='leaving']) {
+      animation: none;
+    }
+  }
+}

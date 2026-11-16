@@ -97,6 +97,7 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       c('danger-pale', '出错的浅色字'),
       c('danger-glow', '出错的光晕（55%）'),
       c('danger-soft', '出错的淡底（24%）：危险按钮'),
+      c('danger-tint', '出错的底（10%）：表单控件出错时叠在输入框的底上'),
       c('warning', '重试中'),
     ],
   },

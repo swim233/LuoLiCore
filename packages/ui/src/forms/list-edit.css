@@ -1,0 +1,110 @@
+/* 列表编辑 .ll-listedit（ListEdit）：一行一个输入框（.ll-input）加删除钮（.ll-listedit-del，和输入框同高的方块，悬停变危险色），末尾一个「添加」按钮（库的 Button，ghost）。
+   行的增、删有动画（纯 CSS 关键帧，不引 JS 动画库）：每一行外面包两层：
+   - .ll-listedit-item：grid，只有一行，行高是 1fr；动画把这一行的高在 0fr 和 1fr 之间走（Chrome 能走 grid-template-rows 的 fr），同时淡入淡出；
+   - .ll-listedit-item-in：min-height: 0（让行能缩到 0），动画期间 overflow: hidden（不然收到 0 高时内容还露在外面）；平时是 visible，
+     不然输入框、删除钮的焦点环、框边会被切掉；行下面的 6 像素间距也写在这一层里（跟着一起收）。
+   data-phase：entering（刚加的，放长出来的动画）、leaving（正在离开，放收起来的动画，放完由 JS 拿掉；这时不接鼠标，JS 还给它写了 inert）、idle（平常的，没有动画）。
+   时长曲线同折叠 Fold：--ll-dur-hover（200ms）、--ll-ease-out；初次渲染已有的行是 idle，不播。
+   关动画时（根上有 still 类，或系统减弱动画而根上没有 motion 类）：animation 写成 none，行直接出现、直接消失（JS 看到没有动画就马上收尾）。 */
+@layer ll.controls {
+  @keyframes ll-listedit-in {
+    from {
+      grid-template-rows: 0fr;
+      opacity: 0;
+    }
+    to {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+  }
+  @keyframes ll-listedit-out {
+    from {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+    to {
+      grid-template-rows: 0fr;
+      opacity: 0;
+    }
+  }
+  .ll-listedit {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+  }
+  .ll-listedit-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .ll-listedit-item {
+    display: grid;
+    grid-template-rows: 1fr;
+  }
+  .ll-listedit-item-in {
+    min-height: 0;
+  }
+  .ll-listedit-item[data-phase='entering'] {
+    animation: ll-listedit-in var(--ll-dur-hover) var(--ll-ease-out);
+  }
+  .ll-listedit-item[data-phase='leaving'] {
+    animation: ll-listedit-out var(--ll-dur-hover) var(--ll-ease-out) forwards;
+    pointer-events: none;
+  }
+  .ll-listedit-item:is([data-phase='entering'], [data-phase='leaving']) > .ll-listedit-item-in {
+    overflow: hidden;
+  }
+  .ll-listedit-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ll-space-6);
+    padding-bottom: var(--ll-space-6);
+  }
+  .ll-listedit-row > .ll-input {
+    flex: 1 1 auto;
+  }
+  .ll-listedit-del {
+    flex: none;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    width: var(--ll-fc-h);
+    height: var(--ll-fc-h);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ll-fc-r);
+    background: transparent;
+    color: var(--ll-fg-3);
+    cursor: pointer;
+    transition:
+      background-color var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-listedit-del > svg {
+    width: var(--ll-fc-ic);
+    height: var(--ll-fc-ic);
+  }
+  .ll-listedit-del:disabled {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  .ll-listedit-del:focus-visible {
+    outline: 2px solid var(--ll-accent);
+    outline-offset: var(--ll-space-2);
+  }
+  @media (hover: hover) {
+    .ll-listedit-del:not(:disabled):hover {
+      background: var(--ll-danger-soft);
+      color: var(--ll-danger-pale);
+    }
+  }
+  .ll-listedit-add {
+    align-self: flex-start;
+  }
+  .ll-listedit-add > svg {
+    width: var(--ll-fc-ic);
+    height: var(--ll-fc-ic);
+  }
+}

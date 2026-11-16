@@ -1,0 +1,140 @@
+/* 复选框、单选 .ll-check（一个选项是一个 <label>：框 .ll-check-box 加文字 .ll-check-label；单选多一个 .ll-radio，框是圆的）和一组的容器 .ll-choice-group。
+   框 16×16（sm 14、lg 18，--ll-fc-box），复选框圆角 --ll-radius-xs，单选是圆；平时是槽的样子（--ll-inset-bg 的底加细线），悬停亮一档。
+   选中（Base UI 给框 data-checked，半选 data-indeterminate）：强调色实心，里面的勾（点）是深色（--ll-on-accent）；
+   勾（或半选的一横）、单选的点是 .ll-check-mark 里的东西：没选时透明、缩小，选中时淡入放大（--ll-dur-hover）。
+   焦点（键盘）：没有外圈，细线变强调色、里面一圈淡光（同输入框）。出错（框上有 data-invalid 或 aria-invalid）：细线变危险色。禁用：整个变淡。
+   和输入框一样，各状态只改外壳上的变量（--_bg、--_line、--_mark、--_ring、--_glow）。 */
+@layer ll.controls {
+  .ll-check {
+    --_bg: var(--ll-inset-bg);
+    --_line: var(--ll-inset-line);
+    --_mark: var(--ll-on-accent);
+    --_ring: var(--ll-accent);
+    --_glow: inset 0 0 0 0 transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ll-space-8);
+    min-height: calc(var(--ll-fc-box) + var(--ll-space-6));
+    color: var(--ll-fg-2);
+    font-size: var(--ll-fc-fs);
+    line-height: 1.4;
+    cursor: pointer;
+    user-select: none;
+  }
+  .ll-check-box {
+    flex: none;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    width: var(--ll-fc-box);
+    height: var(--ll-fc-box);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ll-radius-xs);
+    background: var(--_bg);
+    box-shadow:
+      inset 0 0 0 1px var(--_line),
+      var(--_glow);
+    color: var(--_mark);
+    cursor: inherit;
+    outline: 0;
+    appearance: none;
+    transition:
+      background-color var(--ll-dur-hover),
+      box-shadow var(--ll-dur-hover),
+      color var(--ll-dur-hover);
+  }
+  .ll-radio .ll-check-box {
+    border-radius: var(--ll-radius-full);
+  }
+  .ll-check-mark {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    transform: scale(0.6);
+    transition:
+      opacity var(--ll-dur-hover),
+      transform var(--ll-dur-hover) var(--ll-ease-out);
+  }
+  .ll-check-mark:is([data-checked], [data-indeterminate]) {
+    opacity: 1;
+    transform: none;
+  }
+  .ll-check-tick,
+  .ll-check-dash {
+    width: 78%;
+    height: 78%;
+    stroke-width: 3;
+  }
+  .ll-check-mark[data-indeterminate] > .ll-check-tick,
+  .ll-check-mark:not([data-indeterminate]) > .ll-check-dash {
+    display: none;
+  }
+  .ll-radio-dot {
+    width: 42%;
+    height: 42%;
+    border-radius: var(--ll-radius-full);
+    background: currentColor;
+  }
+  .ll-check-label {
+    min-width: 0;
+  }
+
+  /* 选中：强调色实心 */
+  .ll-check-box:is([data-checked], [data-indeterminate]) {
+    --_bg: var(--ll-accent);
+    --_line: var(--ll-accent);
+  }
+  /* 悬停（用 :where 压低优先级：出错、焦点的规则盖得过它） */
+  @media (hover: hover) {
+    .ll-check:where(:not(:has(.ll-check-box:is([data-disabled], [data-readonly]))):hover)
+      .ll-check-box {
+      --_bg: var(--ll-ctl-bg);
+      --_line: var(--ll-line-hi);
+    }
+    .ll-check:where(:not(:has(.ll-check-box:is([data-disabled], [data-readonly]))):hover)
+      .ll-check-box:is([data-checked], [data-indeterminate]) {
+      --_bg: color-mix(in srgb, var(--ll-accent) 86%, var(--ll-white));
+      --_line: color-mix(in srgb, var(--ll-accent) 86%, var(--ll-white));
+    }
+  }
+  /* 焦点（键盘）：没有外圈，细线变强调色（出错时是红）、里面一圈淡光 */
+  .ll-check-box:focus-visible {
+    --_line: var(--_ring);
+    --_glow: inset 0 0 0 2px color-mix(in srgb, var(--_ring) 25%, transparent);
+  }
+  /* 选中的框本身就是强调色实心，淡光要换成里面一圈浅色才看得见 */
+  .ll-check-box:is([data-checked], [data-indeterminate]):focus-visible {
+    --_glow: inset 0 0 0 2px color-mix(in srgb, var(--ll-white) 55%, transparent);
+  }
+  /* 出错、禁用、只读 */
+  .ll-check-box:is([data-invalid], [aria-invalid='true']) {
+    --_line: var(--ll-danger);
+    --_ring: var(--ll-danger);
+  }
+  .ll-check:has(.ll-check-box[data-disabled]) {
+    opacity: var(--ll-disabled-opacity);
+    cursor: default;
+  }
+  .ll-check:has(.ll-check-box[data-readonly]) {
+    cursor: default;
+  }
+
+  /* 一组：column（默认）一个一行，row 排成一行放不下折行 */
+  .ll-choice-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--ll-space-8);
+    min-width: 0;
+  }
+  .ll-choice-group[data-orientation='row'] {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ll-space-8) var(--ll-space-16);
+  }
+}

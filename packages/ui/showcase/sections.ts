@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
 import { Controls } from './sections/Controls';
+import { Forms } from './sections/Forms';
 import { Overlay } from './sections/Overlay';
 import { Scale } from './sections/Scale';
 import { Scroll } from './sections/Scroll';
@@ -23,7 +24,7 @@ export const SECTIONS: SectionDef[] = [
   { id: 'controls', title: '基础控件', Component: Controls, steps: '4、5' },
   { id: 'scroll', title: '滚动', Component: Scroll, steps: '6' },
   { id: 'overlay', title: '浮层', Component: Overlay, steps: '7' },
-  { id: 'forms', title: '表单', steps: '8' },
+  { id: 'forms', title: '表单', Component: Forms, steps: '8' },
   { id: 'chat', title: '聊天内容', steps: '9' },
   { id: 'fx', title: '特效', steps: '10' },
 ];

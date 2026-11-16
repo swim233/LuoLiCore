@@ -1,0 +1,81 @@
+/* 滑块 .ll-slider：一条轨道（.ll-slider-track）、填充（.ll-slider-fill，从左到当前值）、把手（.ll-slider-thumb），右边是当前值（.ll-slider-val）。
+   轨道、填充、把手的位置是 Base UI 写的（行内的 left、width），这里只管样子。整个控件高 --ll-fc-h（和输入框同高，一行里放在一起是齐的），轨道在中间。
+   粗一点的轨（8），填充是强调色到点睛色的渐变（和能量槽 Meter 一家）；把手是一道竖条（4 宽，比轨高 12），圆角 2，悬停放大一点、按住缩回一点。
+   焦点（把手里的 range 输入在键盘焦点）：没有外圈，把手里一圈强调色（同输入框的「线变强调色、里面一圈淡光」）。禁用：整个变淡。 */
+@layer ll.controls {
+  .ll-slider {
+    --_th: 8px;
+    display: flex;
+    align-items: center;
+    gap: var(--ll-space-12);
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--ll-fc-h);
+    touch-action: none;
+  }
+  .ll-slider-ctl {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    height: var(--ll-fc-h);
+    cursor: pointer;
+  }
+  .ll-slider-track {
+    position: relative;
+    box-sizing: border-box;
+    width: 100%;
+    height: var(--_th);
+    border-radius: var(--ll-radius-full);
+    background: var(--ll-ctl-bg);
+  }
+  .ll-slider-fill {
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--ll-accent), var(--ll-star));
+  }
+  .ll-slider-thumb {
+    box-sizing: border-box;
+    width: 4px;
+    height: calc(var(--_th) + 12px);
+    border-radius: 2px;
+    background: var(--ll-fg);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--ll-black) 35%, transparent),
+      0 2px 6px color-mix(in srgb, var(--ll-black) 45%, transparent);
+    outline: 0;
+    transition:
+      scale var(--ll-dur-hover) var(--ll-ease-out),
+      box-shadow var(--ll-dur-hover);
+  }
+  .ll-slider-thumb[data-dragging] {
+    scale: 0.94;
+  }
+  @media (hover: hover) {
+    .ll-slider:not([data-disabled]) .ll-slider-thumb:hover:not([data-dragging]) {
+      scale: 1.12;
+    }
+  }
+  .ll-slider-thumb:has(input:focus-visible) {
+    box-shadow:
+      inset 0 0 0 1px var(--ll-accent),
+      0 0 0 1px color-mix(in srgb, var(--ll-black) 35%, transparent),
+      0 0 0 3px color-mix(in srgb, var(--ll-accent) 28%, transparent);
+  }
+  .ll-slider-val {
+    flex: none;
+    min-width: 3.6em;
+    color: var(--ll-fg-2);
+    font-size: var(--ll-fc-fs);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .ll-slider[data-disabled] {
+    opacity: var(--ll-disabled-opacity);
+  }
+  .ll-slider[data-disabled] .ll-slider-ctl {
+    cursor: default;
+  }
+}
