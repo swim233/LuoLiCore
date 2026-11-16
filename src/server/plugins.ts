@@ -2,10 +2,14 @@ import type { InstalledTool, Logger, ToolDefinition } from '../core/index.js';
 import type { Plugin } from '../plugin-api.js';
 import type { Env } from '../shared/config.js';
 import { setupTools } from '../shared/tools.js';
+import { installServices, type InstalledService } from './services/install.js';
+import type { ServiceLayer } from './services/layer.js';
+import { createServiceTools } from './services/tools.js';
 import { createTaskTools } from './tasks/tools.js';
 
-// 插件（ADR-0014）：服务启动时装配插件清单（plugins/index.ts），取出插件里的工具，
-// 后面接上服务自己的任务工具（ADR-0010），一起交给工具的装配
+// 插件（ADR-0014）：服务启动时分两步装配插件清单（plugins/index.ts）。先装插件：检查插件名，
+// 取出插件里的工具，装上插件声明的服务；再装工具：插件的工具、读文档与调服务两个工具（装上了服务时）、
+// 服务自己的任务工具（ADR-0010），按这个顺序发给模型
 
 /** 插件清单有误（名字不合规、重名）。信息里列出每个插件与它的问题 */
 export class PluginDefinitionError extends Error {
@@ -49,30 +53,69 @@ function pluginTools(plugins: readonly Plugin[]): ToolDefinition[] {
 }
 
 /**
- * 服务启动时装配工具：插件的工具在前，后面接上任务的三个工具，按这个顺序发给模型。
- * 插件清单或工具清单有误时返回错误信息（服务打到 stderr 后退出）；缺环境变量的工具不装，
- * 各提示一行（见 setupTools）。任务服务要等包过一层的存储建好才有，给的是取服务的函数，
- * 任务工具执行时才取它
+ * 第一步，装插件：检查插件名（规则同工具名）与重名，取出插件里的工具（之后装配工具时再检查），
+ * 装上插件声明的服务（见 installServices：缺环境变量的不装，各提示一行）。插件或服务有误时返回错误信息
+ * （服务打到 stderr 后退出）
  */
-export function setupServiceTools({
+export function installPlugins({
   plugins,
-  tasks,
   env,
   logger,
   report,
 }: {
   plugins: readonly Plugin[];
+  env: Env;
+  logger: Logger;
+  report: (line: string) => void;
+}):
+  | { ok: true; tools: ToolDefinition[]; services: InstalledService[] }
+  | { ok: false; error: string } {
+  let tools: ToolDefinition[];
+  try {
+    tools = pluginTools(plugins);
+  } catch (error) {
+    if (error instanceof PluginDefinitionError) return { ok: false, error: error.message };
+    throw error;
+  }
+  const installed = installServices(
+    plugins.flatMap((plugin) => plugin.services),
+    env,
+    { logger, report },
+  );
+  if (!installed.ok) return installed;
+  return { ok: true, tools, services: installed.services };
+}
+
+/**
+ * 第二步，装工具：插件的工具在前；装上了服务时（给了服务层）接上读文档、调服务两个工具；
+ * 最后是任务的三个工具。按这个顺序发给模型。工具清单有误时返回错误信息（服务打到 stderr 后退出）；
+ * 缺环境变量的工具不装，各提示一行（见 setupTools）。任务服务要等包过一层的存储建好才有，
+ * 给的是取服务的函数，任务工具执行时才取它
+ */
+export function setupServiceTools({
+  tools,
+  services,
+  tasks,
+  env,
+  logger,
+  report,
+}: {
+  /** 插件里的工具（installPlugins 的结果） */
+  tools: readonly ToolDefinition[];
+  /** 服务层；一个服务都没装上时不给，这时没有读文档、调服务两个工具 */
+  services?: ServiceLayer;
   tasks: Parameters<typeof createTaskTools>[0];
   env: Env;
   logger: Logger;
   report: (line: string) => void;
 }): { ok: true; tools: InstalledTool[] } | { ok: false; error: string } {
-  let fromPlugins: ToolDefinition[];
-  try {
-    fromPlugins = pluginTools(plugins);
-  } catch (error) {
-    if (error instanceof PluginDefinitionError) return { ok: false, error: error.message };
-    throw error;
-  }
-  return setupTools([...fromPlugins, ...createTaskTools(tasks)], env, { logger, report });
+  return setupTools(
+    [
+      ...tools,
+      ...(services && services.services.length > 0 ? createServiceTools(services) : []),
+      ...createTaskTools(tasks),
+    ],
+    env,
+    { logger, report },
+  );
 }

@@ -33,8 +33,19 @@ describe('洛璃服务的配置', () => {
         name: '洛璃',
         telegram: undefined,
         web: { port: 7310, dbPath: 'data/web.db', author: 'alice' },
+        feedsDbPath: 'data/feeds.db',
       },
     });
+  });
+
+  it('LUOLI_FEEDS_DB：服务自己的 feeds.db 的路径，默认在数据库所在目录下；空的按没设', () => {
+    const pathOf = (env: Record<string, string>) => {
+      const result = parse(env);
+      return result.ok ? result.config.feedsDbPath : undefined;
+    };
+    expect(pathOf({ LUOLI_DB: '/srv/luoli/luoli.db' })).toBe('/srv/luoli/feeds.db');
+    expect(pathOf({ LUOLI_FEEDS_DB: '/tmp/feeds.db' })).toBe('/tmp/feeds.db');
+    expect(pathOf({ LUOLI_FEEDS_DB: '' })).toBe('data/feeds.db');
   });
 
   it('LUOLI_WEB_NAME：网页会话里发言人的名字，去掉首尾空白；没设或只有空白时取系统用户名', () => {

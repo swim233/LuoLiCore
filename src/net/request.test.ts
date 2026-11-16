@@ -124,6 +124,34 @@ describe('跳转', () => {
     expect(error.message).toBe('跳转次数过多');
   });
 
+  it('不跟随跳转时 3xx 原样作为结果返回，跳转的目标一个请求都没收到', async () => {
+    const target = await serve(ok('别处'));
+    const start = await serve((_request, response) => {
+      response.writeHead(302, { location: `${target.origin}/elsewhere` });
+      response.end('去别处');
+    });
+    const response = await requester().get(`${start.origin}/a`, { followRedirects: false });
+    expect(response.status).toBe(302);
+    expect(response.url).toBe(`${start.origin}/a`);
+    expect(response.redirects).toBe(0);
+    expect(response.headers.get('location')).toBe(`${target.origin}/elsewhere`);
+    expect((await response.text()).text).toBe('去别处');
+    expect(start.requests).toHaveLength(1);
+    expect(target.requests).toHaveLength(0);
+    expect(target.sockets).toHaveLength(0);
+  });
+
+  it('不写 followRedirects 时照旧跟随；写 true 也一样', async () => {
+    const server = await serve(chain);
+    const fetcher = requester();
+    for (const options of [{}, { followRedirects: true }]) {
+      const response = await fetcher.get(`${server.origin}/hops/1`, options);
+      expect(response.status).toBe(200);
+      expect(response.redirects).toBe(1);
+      await response.discard();
+    }
+  });
+
   it('跳到 http、https 以外的协议时报错', async () => {
     const server = await serve((_request, response) => {
       response.writeHead(301, { location: 'ftp://example.com/file' });

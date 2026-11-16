@@ -28,6 +28,10 @@ const pluginApiFile = '(^|[/#])plugin-api(\\.[cm]?[jt]s)?$';
 const pluginTestApiFile = '(^|[/#])plugin-test-api(\\.[cm]?[jt]s)?$';
 // 安全请求（src/net/）：任何含 net 路径段的写法（node:net 不算：那一段是 node:net）
 const netDir = '(^|[/#])net(/|$)';
+// 测试用的本地 HTTP 服务（src/net/test-server.ts）：从 src/net 外面引它的写法
+const netTestServerFile = '(^|[/#])net/test-server(\\.[cm]?[jt]s)?$';
+// 测试用的文件（test-*.*、*.test.*）：非测试文件不得引用
+const testFiles = ['(^|/)test-[^/]*$', '\\.test(\\.[cm]?[jt]s)?$'];
 
 // core 不得引用的模块
 const forbiddenInCore = [
@@ -162,6 +166,12 @@ const noPluginTestApi = rule(
   [pluginTestApiFile],
   '插件测试的入口文件（src/plugin-test-api.ts）只给插件的测试文件（*.test.*、test-*.*）用',
 );
+// 测试用的本地 HTTP 服务只给测试用：src/net/ 自己的测试、洛璃服务的测试文件、插件测试的入口文件能引，
+// src/ 下别的代码（含洛璃服务的非测试文件、别处的测试）都不能
+const noNetTestServer = rule(
+  [netTestServerFile],
+  '测试用的本地 HTTP 服务（src/net/test-server.ts）只给测试用：src/net/ 与洛璃服务的测试文件、插件测试的入口文件',
+);
 
 // CLI 是洛璃服务的客户端（不带核心）：服务端的代码只许 import type；core 只许纯函数的
 // tool-content（图片说明、工具结果的文字）与类型；不引用其他前端、共用代码、导出脚本、网页。
@@ -198,14 +208,15 @@ const PLUGIN_TEST_API_MESSAGE = '插件测试的入口文件只引 ./net/test-se
 // node 内置模块和 undici；测试文件（*.test.*、test-*.*）另外可以引 vitest。import type 也一样。
 // 按文件所在的深度（d = src/net 到文件之间隔了几层目录）分别写：走出 src/net 要 d+1 个 ../
 // （中间夹着 ./ 也算）；先进目录再往上退的写法一律拦；不以 . 开头的只放过 node 模块与 undici。
-// d 达到 NET_DEPTHS 的文件用最宽的写法
+// 非测试文件不得引用测试用的文件（./test-server.js 等）。d 达到 NET_DEPTHS 的文件用最宽的写法
 const NET_DEPTHS = 3;
 const NET_EXT = '{ts,tsx,js,mjs,mts,cts,cjs,jsx}';
 const netDeps = ['undici'];
-const netPatterns = (d, deps) => [
+const netPatterns = (d, deps, { tests = false } = {}) => [
   `^(\\./)*(\\.\\.(/|$)(\\./)*){${d + 1}}`,
   '(^|/)[^/.][^/]*/\\.\\.(/|$)',
   `^(?!\\.|node:|(${[...nodeModuleNames, ...deps].map(escapeRe).join('|')})(/|$))`,
+  ...(tests ? [] : testFiles),
 ];
 const NET_MESSAGE =
   '安全请求（src/net/）只许引用自己目录里的文件、node 模块和 undici，不得引用 src/ 下别的代码、插件和别的包';
@@ -365,10 +376,18 @@ export default defineConfig(
   js.configs.recommended,
   tseslint.configs.recommended,
   // src/ 下除了网页面板的全部代码（含测试）：不得引用组件库，也不得绕路径进 packages/；不得引用插件、
-  // 插件的两个入口文件。写在最前面：后面 core、服务、插件的两个入口文件、安全请求、CLI 各自的规则
-  // 对它们的文件整份覆盖这一份，所以那几处也带上自己要守的几组
+  // 插件的两个入口文件、测试用的本地服务（src/net/test-server.ts）。写在最前面：后面 core、服务、
+  // 插件的两个入口文件、安全请求、CLI 各自的规则对它们的文件整份覆盖这一份，所以那几处也带上
+  // 自己要守的几组
   {
-    ...restrictImports(['src/**'], noUi, viaPackageName, noPlugins, noPluginTestApi),
+    ...restrictImports(
+      ['src/**'],
+      noUi,
+      viaPackageName,
+      noPlugins,
+      noPluginTestApi,
+      noNetTestServer,
+    ),
     ignores: ['src/web/**'],
   },
   restrictImports(
@@ -377,8 +396,23 @@ export default defineConfig(
     noUi,
     viaPackageName,
   ),
-  // 洛璃服务：只引插件清单，不引插件里的文件；不引插件测试的入口文件
-  restrictImports(['src/server/**'], onlyPluginList, noPluginTestApi, noUi, viaPackageName),
+  // 洛璃服务：只引插件清单，不引插件里的文件；不引插件测试的入口文件；非测试文件不引测试用的本地服务
+  restrictImports(
+    ['src/server/**'],
+    onlyPluginList,
+    noPluginTestApi,
+    noNetTestServer,
+    noUi,
+    viaPackageName,
+  ),
+  // 洛璃服务的测试文件另外可以引测试用的本地服务（写在后面，对测试文件覆盖上面那一份）
+  restrictImports(
+    ['src/server/**/*.test.*', 'src/server/**/test-*.*'],
+    onlyPluginList,
+    noPluginTestApi,
+    noUi,
+    viaPackageName,
+  ),
   // 插件的入口文件：只引核心和安全请求
   restrictImports(['src/plugin-api.ts'], rule(pluginApiPatterns, PLUGIN_API_MESSAGE)),
   // 插件测试的入口文件：只引测试用的本地 HTTP 服务
@@ -396,7 +430,7 @@ export default defineConfig(
     'src/net/',
     [`*.test.${NET_EXT}`, `test-*.${NET_EXT}`],
     NET_DEPTHS,
-    (d) => netPatterns(d, [...netDeps, 'vitest']),
+    (d) => netPatterns(d, [...netDeps, 'vitest'], { tests: true }),
     NET_MESSAGE + '；测试文件（*.test.*、test-*.*）另外可以引 vitest',
   ),
   // 插件：只引自己目录里的文件、src/plugin-api.js、node 模块和声明了的依赖
@@ -484,8 +518,9 @@ export default defineConfig(
       viaPackageName,
       noPlugins,
       noPluginTestApi,
+      noNetTestServer,
     ),
-    // 测试走最前面那一份（不得引用组件库、插件、插件的两个入口文件）
+    // 测试走最前面那一份（不得引用组件库、插件、插件的两个入口文件、测试用的本地服务）
     ignores: ['src/cli/**/*.test.ts'],
   },
   {

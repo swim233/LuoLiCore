@@ -10,6 +10,7 @@ import {
   type RecentReply,
   type Storage,
 } from '../core/index.js';
+import { createRequester, type Requester } from '../net/index.js';
 import { createLogger } from '../shared/logger.js';
 import { openRequestLogging, type RequestLogging } from '../shared/request-log.js';
 import type { startTelegram } from '../telegram/app.js';
@@ -19,10 +20,12 @@ import { parseServerConfig } from './config.js';
 import { createEvents, type Events } from './events.js';
 import { hostname, listen, type Listener } from './listen.js';
 import { createLive } from './live.js';
+import { openFeedsDb, type FeedsDb } from './feeds-db.js';
 import { observeStorage } from './observed-storage.js';
 import { isBuilt, notBuiltText, webDist } from './pages.js';
-import { setupServiceTools } from './plugins.js';
+import { installPlugins, setupServiceTools } from './plugins.js';
 import { relayChanges } from './relay.js';
+import { createServiceLayer, type ServiceLayer } from './services/layer.js';
 import { createSessions } from './sessions.js';
 import { createStatus } from './status.js';
 import { createTaskService } from './tasks/service.js';
@@ -56,11 +59,44 @@ try {
   process.exit(1);
 }
 
-// 工具：插件清单（plugins/index.ts）里插件的工具，后面接上任务工具（ADR-0010、ADR-0014）。
-// 插件或工具有误时退出；缺环境变量的不装，各提示一行。所有会话共用装上的这一份。
+// 插件（ADR-0014）：插件清单（plugins/index.ts）里插件的工具与服务。插件或服务有误时退出；
+// 缺环境变量的服务不装，各提示一行
+const pluginSetup = installPlugins({
+  plugins,
+  env: process.env,
+  logger,
+  report: (line) => console.error(line),
+});
+if (!pluginSetup.ok) {
+  console.error(pluginSetup.error);
+  process.exit(1);
+}
+
+// 服务层：装上了服务时才有。每天的请求数记在 feeds.db 里，打不开时退出；请求经防内网的安全请求
+let services: { layer: ServiceLayer; feeds: FeedsDb; requester: Requester } | undefined;
+if (pluginSetup.services.length > 0) {
+  let feeds: FeedsDb;
+  try {
+    mkdirSync(dirname(config.feedsDbPath), { recursive: true });
+    feeds = openFeedsDb(config.feedsDbPath);
+  } catch (error) {
+    console.error(`打开 feeds.db 失败（${config.feedsDbPath}）：${(error as Error).message}`);
+    process.exit(1);
+  }
+  const requester = createRequester();
+  services = {
+    layer: createServiceLayer({ services: pluginSetup.services, feeds, requester, logger }),
+    feeds,
+    requester,
+  };
+}
+
+// 工具：插件的工具、读文档与调服务（装上了服务时）、任务工具（ADR-0010），按这个顺序。
+// 工具有误时退出；缺环境变量的不装，各提示一行。所有会话共用装上的这一份。
 // 任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
 const installed = setupServiceTools({
-  plugins,
+  tools: pluginSetup.tools,
+  services: services?.layer,
   tasks: () => taskService,
   env: process.env,
   logger,
@@ -210,9 +246,16 @@ async function fail(message: string, web?: { events: Events; listener: Listener 
   await web?.listener.close();
   await sessions.close(0);
   webState?.close();
+  await closeServices();
   await requestLogging.close();
   storage.close();
   process.exit(1);
+}
+
+/** 关掉服务层用的请求器和 feeds.db */
+async function closeServices(): Promise<void> {
+  await services?.requester.close();
+  services?.feeds.close();
 }
 
 // 先开网页服务：端口被占用时，在连 Telegram 之前就退出
@@ -292,6 +335,8 @@ const stop = async () => {
   await web?.events.close();
   await web?.listener.close();
   webState?.close();
+  // 服务层：会话都关了，不会再有调用
+  await closeServices();
   // 等已经开始的请求记录写完再关
   await requestLogging.close();
   storage.close();

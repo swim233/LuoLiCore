@@ -26,6 +26,11 @@ export type ServerConfig = CommonConfig & {
    * author：网页会话里发言人的名字，LUOLI_WEB_NAME（去掉首尾空白，空的按没设），默认系统用户名
    */
   web?: { port: number; dbPath: string; author: string };
+  /**
+   * 洛璃服务自己的 SQLite 文件（ADR-0014）：服务每天发了多少次请求，以后还有监视查到的动态。
+   * LUOLI_FEEDS_DB，默认为数据库所在目录下的 feeds.db。一个服务都没装上时不打开
+   */
+  feedsDbPath: string;
 };
 
 /**
@@ -55,7 +60,11 @@ export function parseServerConfig(
     return { ok: false, error: 'Telegram 和网页都没有开，服务没有事可做' };
   }
   const name = env.LUOLI_NAME?.trim() || defaultName;
-  return { ok: true, config: { ...common.config, name, telegram, web: web.config } };
+  const feedsDbPath = env.LUOLI_FEEDS_DB || join(dirname(common.config.dbPath), 'feeds.db');
+  return {
+    ok: true,
+    config: { ...common.config, name, telegram, web: web.config, feedsDbPath },
+  };
 }
 
 function parseWeb(

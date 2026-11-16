@@ -66,6 +66,11 @@ export type GetOptions = {
   signal?: AbortSignal;
   /** 这次请求的时限（毫秒），到读完正文为止，含轮换与等待；与 signal 任一触发都中止 */
   timeoutMs?: number;
+  /**
+   * 跟不跟随跳转，默认跟随（最多 5 次）。为 false 时 3xx 原样作为结果返回（redirects 为 0），
+   * 不去请求跳转的地址：带着凭据的请求（洛璃服务调外部服务）不会被带到别的地址
+   */
+  followRedirects?: boolean;
 };
 
 export type ReadOptions = {
@@ -110,8 +115,13 @@ export function createRequester({
 }: RequesterOptions = {}): Requester {
   const agent = new Agent({ connect: safeConnector(isBlocked) });
 
-  // 用一个 User-Agent 发请求并跟随跳转；每次跳转的连接同样经过 safeConnector
-  async function follow(url: URL, headers: Record<string, string>, signal?: AbortSignal) {
+  // 用一个 User-Agent 发请求并跟随跳转（调用方不要时不跟随）；每次跳转的连接同样经过 safeConnector
+  async function follow(
+    url: URL,
+    headers: Record<string, string>,
+    signal: AbortSignal | undefined,
+    followRedirects: boolean,
+  ) {
     let current = url;
     for (let redirects = 0; ; redirects++) {
       const response = await agent.request({
@@ -121,9 +131,10 @@ export function createRequester({
         headers,
         signal,
       });
-      const location = redirectStatuses.has(response.statusCode)
-        ? first(response.headers.location)
-        : undefined;
+      const location =
+        followRedirects && redirectStatuses.has(response.statusCode)
+          ? first(response.headers.location)
+          : undefined;
       if (location === undefined) return { url: current, redirects, response };
       await response.body.dump();
       if (redirects === maxRedirects) throw new FetchError('redirects', '跳转次数过多');
@@ -136,7 +147,12 @@ export function createRequester({
       const url = parseUrl(input);
       const { signal, fail } = abortControl(options);
       const send = (userAgent: string) =>
-        follow(url, requestHeaders(options.headers, userAgent), signal);
+        follow(
+          url,
+          requestHeaders(options.headers, userAgent),
+          signal,
+          options.followRedirects ?? true,
+        );
       const respond = (hop: Hop, userAgent: string, rejected: boolean) =>
         toFetchResponse(hop, userAgent, rejected, fail);
       try {
