@@ -10,6 +10,7 @@ import { closeAll, onClose } from '../net/test-server.js';
 import { definePlugin, ServiceConfigError, type Plugin } from '../plugin-api.js';
 import type { Env } from '../shared/config.js';
 import { openFeedsDb } from './feeds-db.js';
+import { createMonitorDoc, type MonitorDoc } from './monitors/docs.js';
 import { installPlugins, setupServiceTools } from './plugins.js';
 import { createServiceLayer } from './services/layer.js';
 import { fakeDocs, fakeService, recording, tempDir } from './services/test-services.js';
@@ -26,12 +27,14 @@ const tasks = () => {
 
 const taskToolNames = ['create_task', 'list_tasks', 'cancel_task', 'update_task'];
 const serviceToolNames = ['read_docs', 'call_service'];
+/** 装上了服务时最后一个：试跑监视 */
+const monitorToolNames = ['try_monitor'];
 
 /**
  * 照 main.ts 的做法装配：先装插件（工具与服务），装上了服务时建服务层（feeds.db 用内存里的），
  * 再装工具。返回装上的工具名、错误信息、提示行与日志
  */
-function assemble(pluginList: readonly Plugin[], env: Env = {}) {
+function assemble(pluginList: readonly Plugin[], env: Env = {}, monitorDoc?: MonitorDoc) {
   const { logger, entries, lines, report } = recording();
   const installed = installPlugins({ plugins: pluginList, env, logger, report });
   if (!installed.ok) return { error: installed.error, entries, lines };
@@ -52,6 +55,7 @@ function assemble(pluginList: readonly Plugin[], env: Env = {}) {
     env,
     logger,
     report,
+    ...(monitorDoc ? { monitorDoc } : {}),
   });
   if (!result.ok) return { error: result.error, entries, lines };
   return {
@@ -90,7 +94,7 @@ describe('服务启动时装配插件与工具', () => {
     ]);
   });
 
-  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的四个', () => {
+  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的四个、试跑监视', () => {
     const env = {
       QWEATHER_API_HOST: 'https://abc123.def.qweatherapi.com/',
       QWEATHER_DEVELOPER_ID: 'developer-id-1',
@@ -101,11 +105,12 @@ describe('服务启动时装配插件与工具', () => {
     const { names, services, entries, lines } = assemble(plugins, env);
 
     expect(services).toEqual(['qweather']);
-    expect(names).toEqual(['fetch', ...serviceToolNames, ...taskToolNames]);
+    const all = ['fetch', ...serviceToolNames, ...taskToolNames, ...monitorToolNames];
+    expect(names).toEqual(all);
     expect(lines).toEqual([]);
     expect(entries.map(({ msg, fields }) => [msg, fields])).toEqual([
       ['services.installed', { services: ['qweather'] }],
-      ['tools.installed', { tools: ['fetch', ...serviceToolNames, ...taskToolNames] }],
+      ['tools.installed', { tools: all }],
     ]);
   });
 
@@ -118,7 +123,7 @@ describe('服务启动时装配插件与工具', () => {
     expect(names).toEqual(['b2', 'b1', 'a1', ...taskToolNames]);
   });
 
-  it('装上了服务时：插件的工具、读文档与调服务、任务的四个；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
+  it('装上了服务时：插件的工具、读文档与调服务、任务的四个、试跑监视；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
     const { names, services } = assemble([
       definePlugin({ name: 'a', tools: [tool('a1')] }),
       definePlugin({ name: 'b', services: [fakeService({ name: 'one' })] }),
@@ -126,7 +131,7 @@ describe('服务启动时装配插件与工具', () => {
     ]);
 
     expect(services).toEqual(['one', 'two']);
-    expect(names).toEqual(['a1', 'c1', ...serviceToolNames, ...taskToolNames]);
+    expect(names).toEqual(['a1', 'c1', ...serviceToolNames, ...taskToolNames, ...monitorToolNames]);
   });
 
   it('插件名不合规、插件重名时返回错误信息（服务打到 stderr 后退出），不提示、不记 tools.installed', () => {
@@ -154,6 +159,21 @@ describe('服务启动时装配插件与工具', () => {
     ]);
 
     expect(error).toBe('工具定义有误：same（重名）；list_tasks（重名）');
+  });
+
+  it('有服务叫 monitor（和监视任务的文档重名）、监视任务的文档有误：返回错误信息（服务打到 stderr 后退出）', () => {
+    expect(
+      assemble([definePlugin({ name: 'a', services: [fakeService({ name: 'monitor' })] })]).error,
+    ).toBe('服务名 monitor 和监视任务的文档重名，服务改个名字');
+    const broken = createMonitorDoc({ file: join(tempDir(), 'none.md') });
+    expect(
+      assemble([definePlugin({ name: 'a', services: [fakeService()] })], {}, broken).error,
+    ).toBe('监视任务的文档（src/server/monitors/docs/monitor.md）读不了：ENOENT');
+    // 没装上服务时没有监视，不看元文档
+    expect(assemble([definePlugin({ name: 'a', tools: [tool('a1')] })], {}, broken).names).toEqual([
+      'a1',
+      ...taskToolNames,
+    ]);
   });
 
   it('插件的工具和读文档、调服务重名时也报工具重名', () => {
@@ -199,7 +219,7 @@ describe('装配服务', () => {
     );
 
     expect(services).toEqual(['free']);
-    expect(names).toEqual(['read_docs', 'call_service', ...taskToolNames]);
+    expect(names).toEqual(['read_docs', 'call_service', ...taskToolNames, ...monitorToolNames]);
     expect(lines).toEqual(['服务 needs 没有装上：缺少环境变量 LUOLI_TEST_B']);
     expect(entries.slice(0, 2)).toEqual([
       {

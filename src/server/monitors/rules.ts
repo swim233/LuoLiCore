@@ -21,6 +21,10 @@ export const monitorLimits = {
   maxItems: 500,
   /** 条目写成文字时，每个值最多几个字 */
   maxShownChars: 1000,
+  /** 到点的事件里最多写几条的内容，其余只列标题 */
+  maxEventItems: 5,
+  /** 整条事件最多几个字，写不下时从后面的条目起改成只列标题 */
+  maxEventChars: 6000,
 } as const;
 
 const limits = monitorLimits;
@@ -117,15 +121,15 @@ export function opsText(): string {
   return monitorOps.map(({ op, name, rule }) => `- ${op}（${name}）：${rule}`).join('\n');
 }
 
-/** 元文档里 {{limits}}：层数、个数这些上限 */
+/** 元文档里 {{limits}}：层数、个数这些上限（元文档里它单独一节，有自己的标题） */
 export function limitsText(): string {
   return [
-    '上限：',
     `- all、any 最多套 ${limits.maxDepth} 层（\`{ "all": [ { "any": [ … ] } ] }\` 算 2 层），里面至少要有一个条件。`,
     `- 一个 where 里的比较（写着 field、op、value 的那种）总共最多 ${limits.maxComparisons} 个。`,
     `- value 只能是字符串、数字或布尔值，字符串最多 ${limits.maxValueChars} 个字；in 的 value 是 1 到 ${limits.maxInValues} 个这样的值组成的数组。gt、gte、lt、lte 的 value 不能是布尔值，contains 的 value 不能是空的字符串。`,
     `- 路径最多 ${limits.maxPathChars} 个字，每一段都不能是空的，不支持数组下标（如 \`alerts[0]\`）。`,
     `- show 写 1 到 ${limits.maxShow} 个路径；interval_minutes 最长 ${limits.maxIntervalMinutes}（7 天）。`,
     `- 一次查到的条目最多处理 ${limits.maxItems} 条，多出来的不要；写进事件的每个值最多 ${limits.maxShownChars} 个字，超出的截短。`,
+    `- 一次新的条目多时，到点的事件里只写前 ${limits.maxEventItems} 条的内容，其余只列标题；整条事件最多 ${limits.maxEventChars} 个字，写不下时从后面的条目起改成只列标题。`,
   ].join('\n');
 }

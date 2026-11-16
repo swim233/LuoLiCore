@@ -14,7 +14,9 @@ import {
   type ToolDefinition,
   type Trigger,
 } from '../../core/index.js';
+import { closeAll } from '../../net/test-server.js';
 import { startFakeTelegram, type Delivered } from '../../telegram/fake-api.js';
+import { layerFor, serving } from '../monitors/test-monitors.js';
 import { startTelegramFrontend } from '../telegram.js';
 import { fakeClock, recordingLogger, testService } from '../test-kit.js';
 import type {
@@ -392,6 +394,46 @@ describe('任务工具', () => {
     expect(await run('list_tasks', {}, { conversationId: empty })).toBe('这个会话没有进行中的任务');
   });
 
+  it('一个服务都没装上时留着的监视任务：照常列出，状态是查不到（服务没有装上）；定时任务照常到点', async () => {
+    const storage = createMemoryStorage();
+    const id = await storage.createConversation({ platform: 'web' });
+    await storage.createTask({
+      conversationId: id,
+      action: '有新的预警就说一声',
+      schedule: {
+        kind: 'monitor',
+        monitor: {
+          service: 'qweather',
+          endpoint: 'weather_alert',
+          interval_minutes: 10,
+          items: 'alerts',
+          key: 'id',
+          title: 'headline',
+          show: ['headline'],
+          mode: 'reply',
+        },
+      },
+      source: trigger(alice, 'm-1'),
+    });
+    const model = scripted(answer('该交周报了'));
+    // 服务的做法：服务层和 feeds.db 总是有，里面一个服务都没有
+    const s = await setup(model, { storage, monitors: layerFor([]) });
+    const by = { conversationId: id, triggers: [trigger(alice, 'm-2')] };
+    await s.run('create_task', { action: '提醒交周报', kind: 'once', at: '2026-11-09 21:40' }, by);
+    s.tasks.start();
+    await s.tasks.settled();
+    await s.advance(10 * minute);
+    await waitUntil(() => model.doStreamCalls.length === 1 && !s.chats!.busy(id), '到点的回复');
+
+    expect(await kinds(s, id)).toEqual(['task', 'assistant']);
+    expect(await s.run('list_tasks', {}, by)).toBe(
+      [
+        '这个会话进行中的任务有 1 个：',
+        '- t1：有新的预警就说一声（监视 · 每 10 分钟查一次 · qweather · weather_alert · 全都要 · 触发回复 · 从 11-09 21:30 起查不到：服务 qweather 没有装上，Alice（uid u-alice）让建的）',
+      ].join('\n'),
+    );
+  });
+
   it('取消：t7 或 7 都收；状态改为已取消、记下结束时间', async () => {
     const { observed, run, storage, clock } = await setup();
     const id = await observed.createConversation({ platform: 'web' });
@@ -733,19 +775,23 @@ describe('改任务', () => {
 
   it('改完定时器重排：改早就等到新的时刻，改晚就照旧最多等 60 秒', async () => {
     const s = await setup();
-    const { by } = await withTask(s, { kind: 'once', at: '2026-11-09 21:40' });
+    // 21:30:20 建一个 21:31 的：等 40 秒（和 60 秒的封顶分得开）
+    s.clock.advance(20_000);
+    const { by } = await withTask(s, { kind: 'once', at: '2026-11-09 21:31' });
     s.tasks.start();
     await s.tasks.settled();
-    expect(s.clock.pending()).toEqual([minute]);
+    expect(s.clock.pending()).toEqual([40_000]);
 
-    await s.advance(30_000);
-    await s.run('update_task', { task: 't1', kind: 'once', at: '2026-11-09 21:31' }, by);
-    await s.tasks.settled();
-    expect(s.clock.pending()).toEqual([30_000]);
-
+    // 改晚：最多等 60 秒
     await s.run('update_task', { task: 't1', kind: 'daily', time: '23:00' }, by);
     await s.tasks.settled();
     expect(s.clock.pending()).toEqual([minute]);
+
+    // 改早：等到新的时刻
+    await s.advance(30_000);
+    await s.run('update_task', { task: 't1', kind: 'once', at: '2026-11-09 21:31' }, by);
+    await s.tasks.settled();
+    expect(s.clock.pending()).toEqual([10_000]);
   });
 
   it('到点次数不清零；改完照新的时间到点，事件里是新的做什么', async () => {
@@ -2020,6 +2066,39 @@ describe('到点进 Telegram', () => {
     expect(t.api.calls.map((call) => call.method)).not.toContain('sendChatAction');
   });
 
+  it('兜底：不是 Telegram 的会话、取不到 chat id 的直接交给 bot：不回复，只记一行日志（no_chat）', async () => {
+    const s = await setup();
+    const t = await withTelegram(s);
+    const web = await s.observed.createConversation({ platform: 'web' });
+    const noChat = await s.observed.createConversation({ platform: 'telegram' });
+
+    for (const conversationId of [web, noChat]) {
+      t.telegram.bot.due({
+        conversationId,
+        tasks: [{ id: 9, ref: 't9', action: '提醒一下' }],
+      });
+    }
+    const skipped = () => t.entries.filter((e) => e.msg === 'telegram.due_skipped');
+    await waitUntil(() => skipped().length === 2, '日志');
+    await sleep(100);
+
+    expect(skipped()).toEqual(
+      expect.arrayContaining([
+        {
+          level: 'warn',
+          msg: 'telegram.due_skipped',
+          fields: { conversationId: web, tasks: [9], reason: 'no_chat', platform: 'web' },
+        },
+        {
+          level: 'warn',
+          msg: 'telegram.due_skipped',
+          fields: { conversationId: noChat, tasks: [9], reason: 'no_chat', platform: 'telegram' },
+        },
+      ]),
+    );
+    expect(t.api.calls.map((call) => call.method).filter(isSend)).toEqual([]);
+  });
+
   it('取不到群（会话没有 chat id）：算不收，任务取消，不写事件、不回复', async () => {
     const model = scripted(answer('不该出现'));
     const s = await setup(model);
@@ -2127,6 +2206,55 @@ describe('到点进 Telegram', () => {
     // 正在退出不算不收：任务照常到点、完成，没有被取消
     expect(await s.storage.getTask(1)).toMatchObject({ status: 'done', dueCount: 1 });
     expect(s.lives().some((event) => event.type === 'again')).toBe(false);
+  });
+
+  it('监视任务到点：照任务到点的路，等待合并后回复，引用任务的来源消息；「此刻」标出是监视任务', async () => {
+    let list = [{ id: 'a', title: 'A' }];
+    const outside = await serving(() => JSON.stringify({ list }));
+    cleanups.push(() => closeAll());
+    const model = scripted(answer('有新的预警'));
+    const s = await setup(model, { monitors: { layer: outside.layer, feeds: outside.feeds } });
+    const t = await withTelegram(s);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '有新的就说一声' });
+    const id = await t.conversationOf(group);
+    const created = await s.tasks.create({
+      conversationId: id,
+      triggers: [await t.triggerOf(id, source!)],
+      action: '有新的就说一声',
+      kind: 'monitor',
+      monitor: {
+        service: 'demo',
+        endpoint: 'search',
+        interval_minutes: 1,
+        items: 'list',
+        key: 'id',
+        title: 'title',
+        show: ['id'],
+        mode: 'reply',
+      },
+    });
+    expect(created.ok).toBe(true);
+    s.tasks.start();
+    await s.tasks.settled();
+
+    list = [{ id: 'b', title: 'B' }, ...list];
+    await s.advance(minute);
+    await waitUntil(() => t.api.delivered.length === 1, '回复发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered.map(visible)).toEqual([
+      {
+        chatId: String(group.id),
+        messageId: expect.any(Number),
+        text: '有新的预警',
+        replyTo: source,
+      },
+    ]);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor', 'assistant']);
+    expect(s.lives().find((event) => event.type === 'start')).toMatchObject({
+      conversationId: id,
+      tasks: [{ id: 1, ref: 't1', action: '有新的就说一声', monitor: true }],
+    });
   });
 
   it('在群里让洛璃建任务：工具拿到的触发者是那条消息，任务的来源是它；到点时回复引用它', async () => {
@@ -2351,7 +2479,7 @@ describe('任务的接口', () => {
 // ─── 事件在面板的数据里 ─────────────────────────────────────────────────
 
 describe('事件在面板的数据里', () => {
-  it('未读不算事件：Telegram 群里已读位置之后的事件不算，人发的照算', async () => {
+  it('未读不算事件（任务的、监视的都是）：Telegram 群里已读位置之后的事件不算，人发的照算', async () => {
     const s = await setup();
     const id = await s.storage.createConversation({
       platform: 'telegram',
@@ -2365,6 +2493,8 @@ describe('事件在面板的数据里', () => {
     await add({ author: alice, createdAt: at }, '早');
     await add({ event: { type: 'task', taskId: 1 }, createdAt: at }, '任务到点');
     await add({ event: { type: 'task-missed', taskId: 2 }, createdAt: at }, '任务超时');
+    await add({ event: { type: 'monitor', taskId: 3 }, createdAt: at }, '监视到点');
+    await add({ event: { type: 'monitor-failed', taskId: 3 }, createdAt: at }, '监视查不到');
     await add({ author: bob, createdAt: at }, '在吗');
 
     const { conversations } = (await (

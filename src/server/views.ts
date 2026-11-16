@@ -27,6 +27,7 @@ import type {
   MessagePreview,
   MessagesResponse,
   TaskBrief,
+  TaskMonitor,
   TaskRow,
   TodaySummary,
   ToolResultInfo,
@@ -58,6 +59,7 @@ export function createViews({
   timeZone = serverTimeZone(),
   now = () => new Date(),
   summarize = noSummaries,
+  monitorView = () => undefined,
 }: {
   storage: Storage;
   fileStore: FileStore;
@@ -68,6 +70,8 @@ export function createViews({
   timeZone?: string;
   /** 测试里换掉 */
   now?: () => Date;
+  /** 监视任务在任务列表里的样子（描述、人话的一行、检查的状态）；不是监视任务时没有 */
+  monitorView?: (task: Task) => TaskMonitor | undefined;
 }) {
   // 图片按内容存，同一个地址的内容不会变：宽高读过一次就记下
   const imageInfos = new Map<string, ImageInfo>();
@@ -189,7 +193,8 @@ export function createViews({
       id: task.id,
       ref: taskRef(task.id),
       action: task.action,
-      scheduleText: describeSchedule(task.schedule, now()),
+      // 监视任务：带服务、接口名称的那一行
+      scheduleText: monitorView(task)?.line ?? describeSchedule(task.schedule, now()),
     };
   }
 
@@ -203,6 +208,7 @@ export function createViews({
     const title =
       (platform === 'web' ? webState.title(task.conversationId) : undefined) ?? overview?.title;
     const { author } = task.source;
+    const monitor = monitorView(task);
     const row: TaskRow = {
       ...brief(task),
       conversation: {
@@ -219,6 +225,7 @@ export function createViews({
       requestedBy: { ...(author.id === undefined ? {} : { id: author.id }), name: author.name },
       createdAt: task.createdAt,
       ...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
+      ...(monitor ? { monitor } : {}),
     };
     return row;
   }

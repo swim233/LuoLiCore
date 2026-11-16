@@ -6,7 +6,7 @@ import type { MonitorPurpose } from './describe.js';
 import { itemText, titleOf } from './format.js';
 import { fieldPaths } from './items.js';
 import { monitorFields, type MonitorField } from './rules.js';
-import { runTrial, type TrialResult } from './trial.js';
+import { fetchFailureText, runTrial, type TrialResult } from './trial.js';
 
 // 监视的工具（ADR-0014）：试跑 try_monitor。由洛璃服务提供，装上了服务时才有
 
@@ -34,19 +34,31 @@ const fieldTypes = {
 
 /**
  * 工具参数里的 monitor：字段的说明取自 rules.ts 的字段表。试跑时必填的是表里的「必填」，
- * 「建任务时必填」的可以不写
+ * 「建任务时必填」的可以不写；建任务时两样都必填；改任务（update）时都可以不写，只写要改的，
+ * 可以不写的字段（params、where）写 null 是去掉
  */
-export function monitorInput(purpose: MonitorPurpose) {
+export function monitorInput(purpose: MonitorPurpose | 'update') {
   const shape = Object.fromEntries(
     monitorFields.map(({ name, required, text }) => {
       const type = fieldTypes[name];
+      if (purpose === 'update') {
+        return required === 'no'
+          ? [name, type.nullable().optional().describe(`${text}。写 null 是去掉`)]
+          : [name, type.optional().describe(text)];
+      }
       const needed = required === 'yes' || (required === 'task' && purpose === 'task');
       const note =
         required === 'task' && purpose === 'try' ? '（建任务时必填，试跑时可以不写）' : '';
       return [name, (needed ? type : type.optional()).describe(`${text}${note}`)];
     }),
   );
-  return z.object(shape).describe('监视任务的描述，各字段的写法见 read_docs 的 monitor');
+  return z
+    .object(shape)
+    .describe(
+      purpose === 'update'
+        ? '监视任务的描述里要改的字段，只写要改的；各字段的写法见 read_docs 的 monitor'
+        : '监视任务的描述，各字段的写法见 read_docs 的 monitor',
+    );
 }
 
 const tryDescription = [
@@ -91,19 +103,15 @@ export function createTryMonitorTool({
 
 /** 试跑没通过：是哪一步、为什么 */
 function failureText(result: Extract<TrialResult, { ok: false }>): string {
-  switch (result.step) {
-    case 'describe':
-      return `试跑没通过：描述有问题，改了再试。\n${result.error
-        .split('\n')
-        .map((line) => `- ${line}`)
-        .join('\n')}`;
-    case 'call':
-      return `试跑没通过：调接口出错。${result.error}`;
-    case 'parse':
-      return `试跑没通过：${result.error}`;
-    case 'items':
-      return `试跑没通过：返回的样子和描述对不上。${result.error}`;
+  if (result.step === 'describe') {
+    return `试跑没通过：描述有问题，改了再试。\n${problemList(result.error.split('\n'))}`;
   }
+  return `试跑没通过：${fetchFailureText(result)}`;
+}
+
+/** 描述的问题逐条列出 */
+export function problemList(problems: readonly string[]): string {
+  return problems.map((line) => `- ${line}`).join('\n');
 }
 
 /** 试跑通过：取到几条、几条符合，字段，提醒，前几条的内容，最后告诉她可以建 */

@@ -699,7 +699,7 @@ describe('读文档', () => {
     expect([missing.kind, missing.message]).toEqual(['docs', '服务 demo 的文档读不了：search.md']);
   });
 
-  it('装上的服务列在 services 里：名字、名称、简介、接口（id、名称、路径参数、查询参数）、最短间隔', () => {
+  it('装上的服务列在 services 里：名字、名称、简介、接口（id、名称、路径参数、查询参数）、最短间隔、每天的上限', () => {
     const { layer } = layerFor([fakeService()]);
     expect(layer.services).toEqual([
       {
@@ -711,6 +711,7 @@ describe('读文档', () => {
           { id: 'search', title: '搜索', pathParams: [], query: ['q'] },
         ],
         minIntervalSeconds: 60,
+        maxRequestsPerDay: 100,
       },
     ]);
   });

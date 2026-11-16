@@ -78,6 +78,8 @@ const stampOf = (ms: number) =>
   `${mdOf(new Date(ms))} ${pad2(new Date(ms).getHours())}:${pad2(new Date(ms).getMinutes())}`;
 export function describeSchedule(s: TaskRow['schedule']): string {
   if (s.kind === 'once') return '一次性';
+  // 监视任务（第 5 步的面板才显示它）：开发模式里只给一句
+  if (s.kind === 'monitor') return '监视任务';
   const base =
     s.kind === 'daily'
       ? `每天 ${s.time}`
@@ -91,6 +93,7 @@ export function describeSchedule(s: TaskRow['schedule']): string {
 /** 在 after 之后第一次到点；一次性的 at 已经过了、周期的过了截止时没有 */
 export function nextDue(s: TaskRow['schedule'], after: number): number | undefined {
   if (s.kind === 'once') return Date.parse(s.at) > after ? Date.parse(s.at) : undefined;
+  if (s.kind === 'monitor') return undefined;
   const [hh, mm] = s.time.split(':').map(Number);
   const until = s.until ? Date.parse(s.until) : Infinity;
   const base = new Date(after);

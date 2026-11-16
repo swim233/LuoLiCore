@@ -33,21 +33,26 @@ items、key、title、show，还有 where 里的 field，写的都是「路径�
 
 {{ops}}
 
+contains 找的是一段字，不管是不是一个完整的词：找「AI」也会找到 email、maintain。在意的话在 action 里写明到点时再自己筛一遍。
+
 几个条件用 all（都要满足）或 any（满足一个就行）包起来，里面还可以再套：
 
 ```
 { "all": [ 条件, 条件, { "any": [ 条件, 条件 ] } ] }
 ```
 
-{{limits}}
-
 ## 到点是什么样
 
 - 刚建好时已经有的条目不算新的，不会到点。
-- 之后查到新的条目（key 没见过的）而且符合 where，程序把它们合成一条 `<event type="monitor">` 写进这个会话，里面有 action 和每条的 show 字段。一次最多写 5 条的内容，其余只列标题。
+- 之后查到新的条目（key 没见过的）而且符合 where，程序把它们合成一条 `<event type="monitor">` 写进这个会话，里面有 action 和每条的 show 字段。一次新的条数多时只写前几条的内容，其余只列标题（几条见下面的「上限」）。
 - mode 是 reply：这条事件会触发你回复一次，照 action 去做。
 - mode 是 record：只写进会话，不触发你。下次有人找你时你能看到它。
 - 条目的内容变了不算新的，条目没了也不管。
+- where 只在第一次查到这一条时算一次：当时不符合的，以后内容变了（比如得分、评论数涨上来了）也不会再到点。所以不要拿会随时间变的字段做条件；「涨到多少才说」这种事监视做不了，照实告诉对方。
+
+## 上限
+
+{{limits}}
 
 ## 例子
 
@@ -68,7 +73,7 @@ items、key、title、show，还有 where 里的 field，写的都是「路径�
 }
 ```
 
-action 可以写「上海（31.23, 121.47）有新的天气预警时在群里说一声」。地名写进 action，以后看这条任务的人才知道盯的是哪里。
+action 可以写「上海（31.23, 121.47）有新的天气预警时告诉小明：是什么预警、谁发布的、到什么时候」。对谁说照实际写：让你盯的人，或者群里的大家。地名写进 action，以后看这条任务的人才知道盯的是哪里。
 
 只要橙色和红色的，就把 where 换成：
 
@@ -83,7 +88,8 @@ action 可以写「上海（31.23, 121.47）有新的天气预警时在群里说
 
 ## 建好以后
 
-- 改用 update_task。改 interval_minutes、where、title、show、mode、action 马上生效。改 service、endpoint、params、items、key 时程序会重新查一次，查通了才生效；刚换时已经有的条目不算新的。
+- 改用 update_task，monitor 里只写要改的字段；params、where、show 写了就整个换成新的，要写全。改 interval_minutes、where、title、show、mode、action 马上生效。改 service、endpoint、params、items、key 时程序会重新查一次，查通了才生效；刚换时已经有的条目不算新的。
+- 改 mode 时看一眼 action 还对不对得上：原来写「说一声」、现在改成只记录，就把 action 一起改了。
 - 取消用 cancel_task。看有哪些任务、上次查得怎么样，用 list_tasks。
 - 查不到（网络不通、账号有问题、今天的额度用完）时程序会自己隔一阵再试，不用你管。连续 6 小时都查不到，你会收到一条 `<event type="monitor-failed">`，那时告诉这个会话里的人。
 - 每个会话最多 20 个进行中的任务，监视任务也算在里面。CLI 会话不能建。

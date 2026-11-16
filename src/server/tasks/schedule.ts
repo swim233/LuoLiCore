@@ -92,8 +92,11 @@ function isoWeekday(date: Date): number {
   return date.getDay() === 0 ? 7 : date.getDay();
 }
 
+/** 按时间到点的任务（一次性的、周期的）；监视任务没有约好的时刻 */
+export type TimedSchedule = Exclude<TaskSchedule, { kind: 'monitor' }>;
+
 /** 周期任务在这一天（本地日期）到不到点 */
-function onDay(schedule: Exclude<TaskSchedule, { kind: 'once' }>, day: Date): boolean {
+function onDay(schedule: Exclude<TimedSchedule, { kind: 'once' }>, day: Date): boolean {
   switch (schedule.kind) {
     case 'daily':
       return true;
@@ -114,13 +117,14 @@ function onDay(schedule: Exclude<TaskSchedule, { kind: 'once' }>, day: Date): bo
 /**
  * 在 after 之后（不含）第一次到点的时刻。一次性的：at 还没到时就是它，否则没有。
  * 周期的：从 after 那一天起往后找第一个到点的日子，取那天的 time；晚于截止（until）时没有，
- * 任务就该完成了。不认识的种类没有
+ * 任务就该完成了。不认识的种类、监视任务（没有约好的时刻）没有
  */
 export function nextDue(schedule: TaskSchedule, after: Date): Date | undefined {
   if (schedule.kind === 'once') {
     const at = new Date(schedule.at);
     return at.getTime() > after.getTime() ? at : undefined;
   }
+  if (schedule.kind === 'monitor') return undefined;
   const clock = parseClock(schedule.time);
   if (!clock) return undefined;
   const [hour, minute] = clock.split(':').map(Number) as [number, number];
@@ -137,12 +141,26 @@ export function nextDue(schedule: TaskSchedule, after: Date): Date | undefined {
   return undefined;
 }
 
+/** 多久查一次的说法：每 10 分钟、每 2 小时、每 1 天；不是正整数时不写 */
+export function everyText(minutes: unknown): string | undefined {
+  if (typeof minutes !== 'number' || !Number.isSafeInteger(minutes) || minutes <= 0)
+    return undefined;
+  if (minutes % 1440 === 0) return `每 ${minutes / 1440} 天`;
+  if (minutes % 60 === 0) return `每 ${minutes / 60} 小时`;
+  return `每 ${minutes} 分钟`;
+}
+
 /**
  * 一句人话的周期：「一次性」「每天 08:00」「每个工作日 08:00，到 12-31 为止」「每周二 20:00」
- * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日
+ * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日。监视任务是「每 10 分钟查一次」
+ * （带服务、接口名称的那一行由监视那边写）
  */
 export function describeSchedule(schedule: TaskSchedule, now: Date): string {
   if (schedule.kind === 'once') return '一次性';
+  if (schedule.kind === 'monitor') {
+    const every = everyText(schedule.monitor.interval_minutes);
+    return every ? `${every}查一次` : '监视任务';
+  }
   const base = (() => {
     switch (schedule.kind) {
       case 'daily':

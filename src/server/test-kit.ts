@@ -12,6 +12,9 @@ import { testPrompts } from '../core/test-prompts.js';
 import { createApp } from './app.js';
 import { createChats, type Chats } from './chat.js';
 import { createEvents } from './events.js';
+import type { FeedsDb } from './feeds-db.js';
+import { createTryMonitorTool } from './monitors/tools.js';
+import type { ServiceLayer } from './services/layer.js';
 import { createLive } from './live.js';
 import { observeStorage } from './observed-storage.js';
 import { relayChanges } from './relay.js';
@@ -73,7 +76,9 @@ export function emptyViews() {
  * 已读位置存在内存里的 web.db，第一次打开时照常用现有会话初始化；「此刻」与服务的状态照服务里的
  * 接法装上（status 给了就用它代替）。给了 model 时再装上会话管理（回复由「此刻」旁听）、网页会话的
  * 对话接口与任务服务（网页会话的到点入口、取消任务的接口），接法与 main.ts 相同；taskTools 时
- * 任务工具接在 tools 后面。定时器不自己开始（测试里调 tasks.start()）。request 默认带上本机的 Host
+ * 任务工具接在 tools 后面。给了 monitors（服务层与 feeds.db）时任务服务带上监视的引擎；服务层里有服务时
+ * 任务工具还能建、改监视任务，最后多一个试跑监视的工具。定时器不自己开始（测试里调 tasks.start()）。
+ * request 默认带上本机的 Host
  */
 export async function testService({
   storage = createMemoryStorage(),
@@ -94,6 +99,7 @@ export async function testService({
   secrets = [],
   taskTools = false,
   clock,
+  monitors,
 }: {
   storage?: Storage;
   fileStore?: FileStore;
@@ -121,6 +127,8 @@ export async function testService({
   taskTools?: boolean;
   /** 任务服务的时钟（测试里用假的） */
   clock?: Clock;
+  /** 监视（ADR-0014）：服务层与 feeds.db */
+  monitors?: { layer: ServiceLayer; feeds: FeedsDb };
 } = {}) {
   const { logger, entries } = recordingLogger();
   const webState = await openWebState(':memory:', async () =>
@@ -129,18 +137,41 @@ export async function testService({
     ),
   );
   let tasks: TaskService | undefined;
+  // 照服务的装配：服务层里有服务时才能建、试跑监视任务
+  const serving = monitors && monitors.layer.services.length > 0 ? monitors.layer : undefined;
   const installed = taskTools
     ? [
         ...tools,
         ...installTools(
-          createTaskTools(() => tasks!),
+          [
+            ...createTaskTools(
+              () => tasks!,
+              serving ? { monitors: { services: serving.services } } : {},
+            ),
+            ...(serving
+              ? [
+                  createTryMonitorTool({
+                    layer: serving,
+                    checkConversation: (id) => tasks!.allows(id),
+                  }),
+                ]
+              : []),
+          ],
           {},
         ).tools,
       ]
     : tools;
   const summarize = toolSummaries(installed);
   const redact = createRedactor(secrets);
-  const views = createViews({ storage, fileStore, webState, timeZone, now, summarize });
+  const views = createViews({
+    storage,
+    fileStore,
+    webState,
+    timeZone,
+    now,
+    summarize,
+    monitorView: (task) => tasks?.monitorView(task),
+  });
   // events 的 hello 要用 live，live 推事件要用 events：互相在用到时才取
   const lastReply = await storage.lastReply();
   const events = createEvents({
@@ -176,6 +207,19 @@ export async function testService({
       open: (conversationId) => opened().open(conversationId),
       logger,
       clock,
+      ...(monitors
+        ? {
+            monitors: {
+              ...monitors,
+              notify: (task) =>
+                relay.onChange({
+                  type: 'task',
+                  conversationId: task.conversationId,
+                  taskId: task.id,
+                }),
+            },
+          }
+        : {}),
     });
     sessions = createSessions({
       model,

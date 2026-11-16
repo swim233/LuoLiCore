@@ -8,6 +8,20 @@ import {
   type TaskChanges,
   type Trigger,
 } from '../../core/index.js';
+import type { FeedsDb } from '../feeds-db.js';
+import { checkMonitor, type MonitorDescription } from '../monitors/describe.js';
+import {
+  createMonitorEngine,
+  monitorOf,
+  sourceSpec,
+  type MonitorStatus,
+} from '../monitors/engine.js';
+import { monitorLine, serviceTitles } from '../monitors/format.js';
+import type { MonitorItem } from '../monitors/items.js';
+import type { TaskMonitor } from '../types.js';
+import { fetchFailureText, fetchItems } from '../monitors/trial.js';
+import { sourceIdentity } from '../feeds-db.js';
+import type { ServiceLayer } from '../services/layer.js';
 import {
   describeSchedule,
   formatDue,
@@ -15,6 +29,7 @@ import {
   nextDue,
   scheduleFrom,
   type ScheduleInput,
+  type ScheduleKind,
 } from './schedule.js';
 
 /** 晚了不超过这么久算到点，再晚算错过（服务停着、电脑睡着的那段时间） */
@@ -44,9 +59,9 @@ export const systemClock: Clock = {
 
 /**
  * 到点的一个任务：前端据此在「此刻」标出。platformMessageId 是任务来源消息在平台上的 id
- * （Telegram 的回复引用它）；来源没有时没有
+ * （Telegram 的回复引用它）；来源没有时没有。monitor：是监视任务（查到了新的东西，或者连续查不到）
  */
-export type DueTask = { id: number; action: string; platformMessageId?: string };
+export type DueTask = { id: number; action: string; platformMessageId?: string; monitor?: true };
 
 /**
  * 交给前端的一次到点：这个会话有任务到点了，事件已经写进去，前端当作一次触发。同一个会话同时到点的
@@ -72,23 +87,38 @@ export type TaskEntrance = {
   accepts(conversationId: string): boolean | Promise<boolean>;
 };
 
-/** 建任务的参数：工具给的，加上会话与触发者 */
-export type CreateTaskInput = ScheduleInput & {
+/**
+ * 建任务的参数：工具给的，加上会话与触发者。kind 是 monitor 时是监视任务，描述在 monitor 里
+ * （ADR-0014），时间的几项不写
+ */
+export type CreateTaskInput = Omit<ScheduleInput, 'kind'> & {
+  kind: ScheduleKind | 'monitor';
+  monitor?: unknown;
   conversationId: string | undefined;
   triggers: readonly Trigger[];
   action: string;
   /** 几个人一起触发时，写明是谁让建的：uid，没有 uid 时写名字 */
   requestedBy?: string;
+  /** 建监视任务时要真的查一次：工具的中止信号 */
+  signal?: AbortSignal;
 };
+
+/** 建好的任务；监视任务还有建的时候查到了几条（算已有的）、取条目时的提醒 */
+export type Created = { ok: true; task: Task; existing?: number; warnings?: string[] };
 
 /**
  * 改任务的参数：工具给的，加上会话。ref 是 t7 或 7；action 是新的「做什么」；时间的几项（kind、at、
  * time、weekday、day、until）给了任何一项就是整个时间换成新的。空的字符串当作没给
  */
-export type UpdateTaskInput = Partial<ScheduleInput> & {
+export type UpdateTaskInput = Partial<Omit<ScheduleInput, 'kind'>> & {
+  kind?: ScheduleKind | 'monitor';
   conversationId: string | undefined;
   ref: string;
   action?: string;
+  /** 监视任务：只写要改的字段，和原来的描述合起来再检查；null 是去掉这个字段 */
+  monitor?: Readonly<Record<string, unknown>>;
+  /** 改监视任务的来源时要真的查一次：工具的中止信号 */
+  signal?: AbortSignal;
 };
 
 /** 时间的几项：改任务时给了其中任何一项，就是要换时间 */
@@ -116,6 +146,7 @@ export function createTaskService({
   lateMs = lateLimitMs,
   waitMs = maxWaitMs,
   maxActive = maxActiveTasks,
+  monitors,
 }: {
   storage: Storage;
   /** 打开会话（会话管理的 open），写事件用 */
@@ -125,6 +156,16 @@ export function createTaskService({
   lateMs?: number;
   waitMs?: number;
   maxActive?: number;
+  /**
+   * 监视（ADR-0014）：给了就建引擎（洛璃服务总是给，一个服务都没装上时 layer 里没有服务：留着的
+   * 监视任务照查不到处理）。layer 是服务层，feeds 存来源、动态、谁在盯；notify 在监视任务的检查状态
+   * 变了时调（面板要知道）
+   */
+  monitors?: {
+    layer: Pick<ServiceLayer, 'services' | 'check' | 'call'>;
+    feeds: FeedsDb;
+    notify?: (task: Task) => void;
+  };
 }) {
   const entrances = new Map<string, TaskEntrance>();
   let chain: Promise<unknown> = Promise.resolve();
@@ -150,6 +191,29 @@ export function createTaskService({
     clock.clearTimeout(timer);
     timer = undefined;
   }
+
+  // 监视的引擎：处理查的结果、建、改、取消都排进这一串
+  const engine =
+    monitors &&
+    createMonitorEngine({
+      feeds: monitors.feeds,
+      layer: monitors.layer,
+      logger,
+      clock,
+      waitMs,
+      lateMs,
+      notify: monitors.notify,
+      host: {
+        run: exclusive,
+        writeEvent,
+        accepts,
+        deliver,
+        cancel: async (task) => {
+          await end(task, 'timer', 'not_accepted');
+        },
+        update: (task, changes) => storage.updateTask(task.id, changes),
+      },
+    });
 
   /** 重排定时器：等到最近的下次到点（最多 waitMs）。没有要到点的任务时不等 */
   function rearm(): void {
@@ -291,22 +355,31 @@ export function createTaskService({
         );
       }
     }
-    if (written.length === 0) return;
+    // 只记日志、不用 backOff：事件写了，任务也已经往下走了（改任务失败的上面已经记了），
+    // 下一次看一眼时不会再拿出这一次到点
+    await deliver(conversationId, written, fromSeq);
+  }
+
+  /** 交给会话所在平台的前端当作一次触发；没登记入口的平台只记日志，入口出错只记日志 */
+  async function deliver(
+    conversationId: string,
+    tasks: DueTask[],
+    fromSeq: number | undefined,
+  ): Promise<void> {
+    if (tasks.length === 0) return;
     const platform = (await storage.overview(conversationId))?.platform;
     const entrance = platform === undefined ? undefined : entrances.get(platform);
     if (!entrance) {
-      logger.info({ conversationId, platform, tasks: written.length }, 'task.no_entrance');
+      logger.info({ conversationId, platform, tasks: tasks.length }, 'task.no_entrance');
       return;
     }
     try {
       await entrance.deliver({
         conversationId,
-        tasks: written,
+        tasks,
         ...(fromSeq === undefined ? {} : { fromSeq }),
       });
     } catch (error) {
-      // 只记日志、不用 backOff：事件写了，任务也已经往下走了（改任务失败的上面已经记了），
-      // 下一次看一眼时不会再拿出这一次到点
       logger.error(
         { conversationId, platform, error: describeError(error) },
         'task.deliver_failed',
@@ -415,26 +488,30 @@ export function createTaskService({
     /** 现在（定时器的时钟）：工具判断时刻、写结果时用 */
     now: () => clock.now(),
 
-    /** 建任务：检查会话、触发者、做什么、时间、限额，都过了才建，定时器重排 */
-    create(input: CreateTaskInput): Promise<{ ok: true; task: Task } | Failure> {
+    /**
+     * 建任务：检查会话、触发者、做什么、时间、限额，都过了才建，定时器重排。监视任务（kind 为 monitor）
+     * 另走 createMonitor
+     */
+    create(input: CreateTaskInput): Promise<Created | Failure> {
+      if (input.kind === 'monitor') return createMonitor(input);
       return exclusive(async () => {
         const rejected = await checkConversation(input.conversationId);
         if (rejected) return rejected;
         const conversationId = input.conversationId!;
         const source = sourceOf(input.triggers, input.requestedBy);
         if (!source.ok) return source;
-        const action = input.action.trim();
-        if (!action) return fail('action 不能是空的：写明到点时要做什么');
-        if ([...action].length > maxActionChars) {
-          return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+        const action = checkAction(input.action);
+        if (!action.ok) return action;
+        if (input.monitor !== undefined) {
+          return fail('monitor 只在 kind 写 monitor 时写：定时任务不用描述');
         }
-        const timing = scheduleFrom(input, clock.now());
+        const timing = scheduleFrom({ ...input, kind: input.kind as ScheduleKind }, clock.now());
         if (!timing.ok) return timing;
         const active = await storage.listTasks({ conversationId, status: 'active' });
         if (active.length >= maxActive) return fail('这个会话的任务满了，先取消几个');
         const task = await storage.createTask({
           conversationId,
-          action,
+          action: action.text,
           schedule: timing.schedule,
           source: source.trigger,
           nextDueAt: timing.next.toISOString(),
@@ -476,20 +553,23 @@ export function createTaskService({
     /**
      * 工具改任务：只能改这个会话进行中的任务（别的一律「没有这个任务」，同 cancelIn）。只给 action
      * 时只换「做什么」，下次到点不变；给了时间的任何一项时整个时间换成新的，照建任务的规则检查，
-     * 下次到点从现在重新算。谁让建的、来源消息、到点次数不变。改完定时器重排
+     * 下次到点从现在重新算。谁让建的、来源消息、到点次数不变。改完定时器重排。
+     * 监视任务另走 updateMonitor；定时任务和监视任务不能互相改
      */
-    update(input: UpdateTaskInput): Promise<{ ok: true; task: Task } | Failure> {
+    async update(input: UpdateTaskInput): Promise<Created | Failure> {
+      // 先看一眼是哪种任务（改定时任务的检查都在那一串里重做一遍）
+      const found = await findIn(input.conversationId, input.ref);
+      if (found.ok && monitorOf(found.task)) return updateMonitor(input, found.task);
       return exclusive(async () => {
         const { conversationId } = input;
-        const rejected = await checkConversation(conversationId);
-        if (rejected) return rejected;
-        const id = parseTaskRef(input.ref);
-        const task = id === undefined ? undefined : await storage.getTask(id);
-        if (!task || task.conversationId !== conversationId || task.status !== 'active') {
-          return fail('没有这个任务');
+        const current = await findIn(conversationId, input.ref);
+        if (!current.ok) return current;
+        const { task } = current;
+        if (input.monitor !== undefined || input.kind === 'monitor') {
+          return fail('这是定时任务，不能改成监视任务：要盯着什么，取消它再建一个监视任务');
         }
         const action = input.action?.trim();
-        const timed = scheduleKeys.some((key) => input[key] !== undefined && input[key] !== '');
+        const timed = scheduleKeys.some((key) => given(input[key]));
         if (!action && !timed) {
           return fail('至少改一样：写新的 action，或者新的时间（kind 和它要的几项）');
         }
@@ -510,16 +590,7 @@ export function createTaskService({
           changes.nextDueAt = timing.next.toISOString();
         }
         const updated = await storage.updateTask(task.id, changes);
-        // 只记改了哪几样（和新时间的种类），不记「做什么」
-        logger.info(
-          {
-            taskId: task.id,
-            conversationId,
-            changed: Object.keys(changes).filter((key) => key !== 'nextDueAt'),
-            ...(changes.schedule ? { kind: changes.schedule.kind } : {}),
-          },
-          'task.updated',
-        );
+        logUpdated(updated, changes);
         rearm();
         return { ok: true, task: updated };
       });
@@ -537,18 +608,54 @@ export function createTaskService({
       });
     },
 
-    /** 开始：先看一眼（处理停机期间错过的、正好到点的），再盯着最近的下次到点 */
+    /**
+     * 能不能在这个会话里用任务（建、试跑监视）：不能时是给她看的原因（如 CLI 会话），能时 undefined
+     */
+    async allows(conversationId: string | undefined): Promise<string | undefined> {
+      return (await checkConversation(conversationId))?.error;
+    },
+
+    /** 监视任务的检查状态（上次检查、上次成功、是不是查不到）；不是监视任务、没在盯时没有 */
+    monitorStatus(taskId: number): MonitorStatus | undefined {
+      return engine?.status(taskId);
+    },
+
+    /**
+     * 监视任务在任务列表里的样子（给面板）：描述、写成人话的一行、检查的状态；不是监视任务时没有。
+     * 没在盯（已经结束了）时只有描述和那一行
+     */
+    monitorView(task: Task): TaskMonitor | undefined {
+      const monitor = monitorOf(task);
+      if (!monitor || task.schedule.kind !== 'monitor') return undefined;
+      const line = monitorLine(monitor, serviceTitles(monitors?.layer.services ?? []));
+      return { description: task.schedule.monitor, line, ...engine?.status(task.id) };
+    },
+
+    /**
+     * 开始：先看一眼（处理停机期间错过的、正好到点的），再盯着最近的下次到点；监视的引擎对账、
+     * 开始查
+     */
     start(): void {
       if (started || stopped) return;
       started = true;
       void exclusive(tick);
       rearm();
+      if (engine) {
+        void exclusive(async () => {
+          try {
+            await engine.start(await storage.listTasks({ status: 'active' }));
+          } catch (error) {
+            logger.error({ error: describeError(error) }, 'monitor.start_failed');
+          }
+        });
+      }
     },
 
-    /** 退出：停掉定时器，等正在处理的做完。之后不再到点（建、取消照常） */
+    /** 退出：停掉定时器和监视的引擎（中止进行中的请求），等正在处理的做完。之后不再到点 */
     async stop(): Promise<void> {
       stopped = true;
       clearTimer();
+      await engine?.stop();
       await settle();
     },
 
@@ -579,16 +686,212 @@ export function createTaskService({
       },
       'task.cancelled',
     );
+    engine?.unwatch(task.id);
     rearm();
     return ended;
   }
 
+  /** 排着的都做完，监视正在查的也做完（查完的结果又会排进来，所以两边轮流等，直到都没有） */
   async function settle(): Promise<void> {
-    for (let last; last !== chain;) {
-      last = chain;
+    for (;;) {
+      const last = chain;
       await last;
+      if (engine?.busy()) {
+        await engine.settled();
+        continue;
+      }
+      if (last === chain) return;
     }
   }
+
+  /** 「做什么」：去掉首尾空白，不能是空的，不能太长 */
+  function checkAction(raw: string): { ok: true; text: string } | Failure {
+    const text = raw.trim();
+    if (!text) return fail('action 不能是空的：写明到点时要做什么');
+    if ([...text].length > maxActionChars) {
+      return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+    }
+    return { ok: true, text };
+  }
+
+  /** 这个会话里进行中的这个任务（ref 是 t7 或 7）；不能用任务的会话、找不到时是说明 */
+  async function findIn(
+    conversationId: string | undefined,
+    ref: string,
+  ): Promise<{ ok: true; task: Task } | Failure> {
+    const rejected = await checkConversation(conversationId);
+    if (rejected) return rejected;
+    const id = parseTaskRef(ref);
+    const task = id === undefined ? undefined : await storage.getTask(id);
+    if (!task || task.conversationId !== conversationId || task.status !== 'active') {
+      return fail('没有这个任务');
+    }
+    return { ok: true, task };
+  }
+
+  /** 改任务的日志：只记改了哪几样（和新时间的种类），不记「做什么」、不记描述 */
+  function logUpdated(task: Task, changes: TaskChanges): void {
+    logger.info(
+      {
+        taskId: task.id,
+        conversationId: task.conversationId,
+        changed: Object.keys(changes).filter((key) => key !== 'nextDueAt'),
+        ...(changes.schedule ? { kind: changes.schedule.kind } : {}),
+      },
+      'task.updated',
+    );
+  }
+
+  /** 照描述真的查一次（建、改来源时）；没通过时是说明 */
+  async function fetchFor(
+    monitor: MonitorDescription,
+    signal: AbortSignal | undefined,
+    doing: string,
+  ): Promise<{ ok: true; items: MonitorItem[]; warnings: string[] } | Failure> {
+    const fetched = await fetchItems(monitors!.layer, monitor, { signal });
+    if (fetched.ok) return fetched;
+    return fail(`${doing}：照描述真的查了一次，没通过。${fetchFailureText(fetched)}`);
+  }
+
+  /**
+   * 建监视任务（ADR-0014）：静态检查 → 查上限等 → 照描述真的查一次（和试跑同一套，查不通就不建）→
+   * 存任务 → 让引擎开始盯。这次查到的条目存进动态，算已有的，不到点。请求在这一串外面发，
+   * 进了这一串再查一次上限
+   */
+  async function createMonitor(input: CreateTaskInput): Promise<Created | Failure> {
+    const rejected = await checkConversation(input.conversationId);
+    if (rejected) return rejected;
+    const conversationId = input.conversationId!;
+    const source = sourceOf(input.triggers, input.requestedBy);
+    if (!source.ok) return source;
+    const action = checkAction(input.action);
+    if (!action.ok) return action;
+    if (!monitors || monitors.layer.services.length === 0) {
+      return fail('现在一个服务都没有装上，建不了监视任务');
+    }
+    const extra = scheduleKeys.filter((key) => key !== 'kind' && given(input[key]));
+    if (extra.length > 0) {
+      return fail(
+        `监视任务不写时间的那几项（${extra.join('、')}）：多久查一次写在 monitor 的 interval_minutes 里`,
+      );
+    }
+    if (input.monitor === undefined) {
+      return fail('kind 写 monitor 时要写 monitor：监视任务的描述，写法见 read_docs 的 monitor');
+    }
+    const checked = checkMonitor(input.monitor, { services: monitors.layer, purpose: 'task' });
+    if (!checked.ok) return fail(`描述有问题，改了再建：\n${problemLines(checked.problems)}`);
+    const full = async () =>
+      (await storage.listTasks({ conversationId, status: 'active' })).length >= maxActive;
+    if (await full()) return fail('这个会话的任务满了，先取消几个');
+    const fetched = await fetchFor(checked.monitor, input.signal, '没建');
+    if (!fetched.ok) return fetched;
+    return exclusive(async () => {
+      if (await full()) return fail('这个会话的任务满了，先取消几个');
+      const task = await storage.createTask({
+        conversationId,
+        action: action.text,
+        schedule: { kind: 'monitor', monitor: checked.monitor },
+        source: source.trigger,
+        createdAt: clock.now().toISOString(),
+      });
+      engine!.watch(task, fetched.items);
+      logger.info({ taskId: task.id, conversationId, kind: 'monitor' }, 'task.created');
+      return { ok: true, task, existing: fetched.items.length, warnings: fetched.warnings };
+    });
+  }
+
+  /**
+   * 改监视任务：monitor 里只写要改的字段（null 是去掉），和原来的描述合起来再检查。改了 service、
+   * endpoint、params、items、key 中的任何一个：照新的描述真的查一次，通过才生效，算换了来源，这次查到的
+   * 只存不到点。只改别的、或只改 action：马上生效，不发请求。不能改成定时任务。
+   * 合并、检查都对着那一串里重新读到的任务做（同一步里两个修改不会互相盖掉）。要换来源时请求在外面发，
+   * 外面照看到的样子先合一次；进了那一串重新合出来的来源和查过的不一样（期间别人改过来源）时不改
+   */
+  async function updateMonitor(input: UpdateTaskInput, peeked: Task): Promise<Created | Failure> {
+    const timed = scheduleKeys.filter(
+      (key) => given(input[key]) && !(key === 'kind' && input.kind === 'monitor'),
+    );
+    if (timed.length > 0) {
+      return fail(
+        '这是监视任务，不能改成定时任务，也不用写时间的那几项（多久查一次写在 monitor 的 interval_minutes 里）；要定时做什么，取消它再建一个定时任务',
+      );
+    }
+    const action = input.action?.trim();
+    const patch = input.monitor;
+    const patched = patch !== undefined && Object.keys(patch).length > 0;
+    if (!action && !patched) {
+      return fail('至少改一样：写新的 action，或者 monitor 里写要改的字段');
+    }
+    if (action && [...action].length > maxActionChars) {
+      return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+    }
+    if (patched && (!monitors || monitors.layer.services.length === 0)) {
+      return fail('现在一个服务都没有装上，监视任务的描述改不了');
+    }
+    const check = (base: MonitorDescription) =>
+      checkMonitor(mergeMonitor(base, patch!), { services: monitors!.layer, purpose: 'task' });
+    // 外面先照看到的样子合一次：换了来源时在这一串外面查
+    let fetched: { identity: string; items: MonitorItem[]; warnings: string[] } | undefined;
+    if (patched) {
+      const old = monitorOf(peeked)!;
+      const draft = check(old);
+      const identity = draft.ok ? sourceIdentity(sourceSpec(draft.monitor)) : undefined;
+      if (draft.ok && identity !== sourceIdentity(sourceSpec(old))) {
+        const result = await fetchFor(draft.monitor, input.signal, '没改');
+        if (!result.ok) return result;
+        fetched = { identity: identity!, items: result.items, warnings: result.warnings };
+      }
+    }
+    return exclusive(async () => {
+      const current = await findIn(input.conversationId, input.ref);
+      if (!current.ok) return current;
+      const old = monitorOf(current.task);
+      if (!old) return fail('没有这个任务');
+      const changes: TaskChanges = {};
+      if (action) changes.action = action;
+      let moved = false;
+      if (patched) {
+        const checked = check(old);
+        if (!checked.ok) return fail(`描述有问题，没改：\n${problemLines(checked.problems)}`);
+        const identity = sourceIdentity(sourceSpec(checked.monitor));
+        moved = identity !== sourceIdentity(sourceSpec(old));
+        if (moved && fetched?.identity !== identity) {
+          return fail('没改：这个任务刚被改过，再改一次');
+        }
+        changes.schedule = { kind: 'monitor', monitor: checked.monitor };
+      }
+      const updated = await storage.updateTask(current.task.id, changes);
+      if (moved) engine?.watch(updated, fetched!.items);
+      else engine?.changed(updated);
+      logUpdated(updated, changes);
+      return moved
+        ? { ok: true, task: updated, existing: fetched!.items.length, warnings: fetched!.warnings }
+        : { ok: true, task: updated };
+    });
+  }
+}
+
+/** 原来的描述加上修改：写了的字段换掉，null 的去掉 */
+function mergeMonitor(
+  base: MonitorDescription,
+  patch: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [name, value] of Object.entries(patch)) {
+    if (value === null) delete merged[name];
+    else if (value !== undefined) merged[name] = value;
+  }
+  return merged;
+}
+
+/** 给了：不是 undefined，也不是空字符串（模型常给可选参数填空字符串） */
+function given(value: unknown): boolean {
+  return value !== undefined && value !== '';
+}
+
+/** 问题逐条列出 */
+function problemLines(problems: readonly string[]): string {
+  return problems.map((line) => `- ${line}`).join('\n');
 }
 
 export type TaskService = ReturnType<typeof createTaskService>;

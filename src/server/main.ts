@@ -72,31 +72,30 @@ if (!pluginSetup.ok) {
   process.exit(1);
 }
 
-// 服务层：装上了服务时才有。每天的请求数记在 feeds.db 里，打不开时退出；请求经防内网的安全请求
-let services: { layer: ServiceLayer; feeds: FeedsDb; requester: Requester } | undefined;
-if (pluginSetup.services.length > 0) {
-  let feeds: FeedsDb;
-  try {
-    mkdirSync(dirname(config.feedsDbPath), { recursive: true });
-    feeds = openFeedsDb(config.feedsDbPath);
-  } catch (error) {
-    console.error(`打开 feeds.db 失败（${config.feedsDbPath}）：${(error as Error).message}`);
-    process.exit(1);
-  }
-  const requester = createRequester();
-  services = {
-    layer: createServiceLayer({ services: pluginSetup.services, feeds, requester, logger }),
-    feeds,
-    requester,
-  };
+// 服务层与 feeds.db：总是有（ADR-0014）。feeds.db 记每天的请求数和监视的来源、动态、谁在盯，打不开时
+// 退出；请求经防内网的安全请求。一个服务都没装上时服务层里没有服务：没有读文档、调服务、试跑监视
+// 三个工具，也建不了监视任务；以前建的监视任务留着，照「服务没有装上」的查不到处理
+let feeds: FeedsDb;
+try {
+  mkdirSync(dirname(config.feedsDbPath), { recursive: true });
+  feeds = openFeedsDb(config.feedsDbPath);
+} catch (error) {
+  console.error(`打开 feeds.db 失败（${config.feedsDbPath}）：${(error as Error).message}`);
+  process.exit(1);
 }
+const requester: Requester = createRequester();
+const services: { layer: ServiceLayer; feeds: FeedsDb; requester: Requester } = {
+  layer: createServiceLayer({ services: pluginSetup.services, feeds, requester, logger }),
+  feeds,
+  requester,
+};
 
-// 工具：插件的工具、读文档与调服务（装上了服务时）、任务工具（ADR-0010），按这个顺序。
-// 工具有误时退出；缺环境变量的不装，各提示一行。所有会话共用装上的这一份。
-// 任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
+// 工具：插件的工具、读文档与调服务（装上了服务时）、任务工具（ADR-0010）、试跑监视（装上了服务时，
+// ADR-0014），按这个顺序。工具有误、监视的元文档有误时退出；缺环境变量的不装，各提示一行。
+// 所有会话共用装上的这一份。任务服务要等包过一层的存储建好才有（见下文），任务工具执行时才取它
 const installed = setupServiceTools({
   tools: pluginSetup.tools,
-  services: services?.layer,
+  services: services.layer,
   tasks: () => taskService,
   env: process.env,
   logger,
@@ -189,17 +188,33 @@ const status = createStatus({
 const events = config.web
   ? createEvents({ hello: () => ({ ...status.status(), live: live.snapshot() }), logger })
   : undefined;
-const views = webState && createViews({ storage, fileStore, webState, summarize });
+const views =
+  webState &&
+  createViews({
+    storage,
+    fileStore,
+    webState,
+    summarize,
+    // 监视任务的描述、检查的状态（任务服务建好以后才用到）
+    monitorView: (task) => taskService.monitorView(task),
+  });
 const relay = views && events && relayChanges({ views, events, logger });
 const observed = relay ? observeStorage(storage, relay.onChange) : storage;
 
-// 任务（ADR-0010）：建、列出、取消，定时器。事件写进会话管理里的会话，任务的写入经包过的存储推给面板。
+// 任务（ADR-0010）：建、列出、改、取消，定时器。事件写进会话管理里的会话，任务的写入经包过的存储推给面板。
 // 到点交给会话所在平台的前端（网页会话在下面登记，Telegram 在它启动时登记）；定时器在所有前端都起来
-// 之后才开始
+// 之后才开始。监视的引擎（ADR-0014）总是有：来源、动态存在 feeds.db，每次检查以后把监视任务的新样子
+// 推给面板；没有监视任务时它什么都不做
 const taskService = createTaskService({
   storage: observed,
   open: (conversationId) => sessions.open(conversationId),
   logger,
+  monitors: {
+    layer: services.layer,
+    feeds: services.feeds,
+    notify: (task) =>
+      relay?.onChange({ type: 'task', conversationId: task.conversationId, taskId: task.id }),
+  },
 });
 
 // 会话管理：所有会话对象都从这里取，同一个会话只有一个
@@ -255,8 +270,8 @@ async function fail(message: string, web?: { events: Events; listener: Listener 
 
 /** 关掉服务层用的请求器和 feeds.db */
 async function closeServices(): Promise<void> {
-  await services?.requester.close();
-  services?.feeds.close();
+  await services.requester.close();
+  services.feeds.close();
 }
 
 // 先开网页服务：端口被占用时，在连 Telegram 之前就退出
@@ -303,7 +318,7 @@ if (config.telegram) {
   }
 }
 
-// 前端都起来了：先处理停机期间错过的、正好到点的任务，再盯着最近的下次到点
+// 前端都起来了：先处理停机期间错过的、正好到点的任务，再盯着最近的下次到点；监视的引擎对账、开始查
 taskService.start();
 
 logger.info(
@@ -320,7 +335,8 @@ const stop = async () => {
   if (stopping) process.exit(1);
   stopping = true;
   console.log('正在退出……');
-  // 先停掉定时器：不再有新的到点（正在处理的那次做完）
+  // 先停掉定时器和监视的引擎：不再有新的到点、新的检查（进行中的请求中止，正在处理的那次做完）；
+  // feeds.db 在后面关
   await taskService.stop();
   // 不再接新连接；开着的连接留到最后，期间面板还连着
   web?.listener.stopListening();

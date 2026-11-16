@@ -84,6 +84,7 @@ function readDocsTool(
         text.trimEnd(),
         '',
         '---',
+        ...(monitorDoc ? [limitsLine(service)] : []),
         `这份文档的各节（读一节：read_docs，doc 写 ${doc}，section 写接口 id）：`,
         ...service.endpoints.map(({ id, title }) => `- ${id}：${title}`),
       ].join('\n');
@@ -143,6 +144,14 @@ function callServiceTool(layer: ServiceLayer): ToolDefinition {
       ].join('\n');
     },
   });
+}
+
+/**
+ * 总说明的结尾（有监视时）：监视这个服务最短多久查一次、每天最多多少次请求。数字取自服务的声明
+ */
+function limitsLine({ name, minIntervalSeconds, maxRequestsPerDay }: ServiceInfo): string {
+  const minutes = Math.max(1, Math.ceil(minIntervalSeconds / 60));
+  return `监视任务盯服务 ${name} 时，最短每 ${minutes} 分钟查一次（interval_minutes 不能小于 ${minutes}）；这个服务每天最多发 ${maxRequestsPerDay} 次请求，一次性的查询（call_service）和监视合在一起算。`;
 }
 
 /** 服务层的错误换成模型看到的说明（ToolError）；别的错误原样抛出 */

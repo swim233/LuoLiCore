@@ -53,6 +53,8 @@ export type ServiceInfo = {
   endpoints: Array<{ id: string; title: string; pathParams: string[]; query: string[] }>;
   /** 最短多久查一次（秒），监视的间隔不能比它短 */
   minIntervalSeconds: number;
+  /** 每天最多发多少次请求（一次性的查询和监视合在一起算） */
+  maxRequestsPerDay: number;
 };
 
 export type ServiceLayer = {
@@ -131,7 +133,7 @@ export function createServiceLayer({
   }
 
   return {
-    services: services.map(({ definition }) => ({
+    services: services.map(({ definition, maxRequestsPerDay }) => ({
       name: definition.name,
       title: definition.title,
       summary: definition.summary,
@@ -142,6 +144,7 @@ export function createServiceLayer({
         query: [...query],
       })),
       minIntervalSeconds: definition.limits.minIntervalSeconds,
+      maxRequestsPerDay,
     })),
 
     check(name, endpointId, params = {}) {

@@ -6,24 +6,55 @@ import {
   type Task,
   type ToolDefinition,
 } from '../../core/index.js';
-import { describeSchedule, formatDue, scheduleKinds } from './schedule.js';
-import { maxActionChars, maxActiveTasks, personOf, type TaskService } from './service.js';
+import type { MonitorDescription } from '../monitors/describe.js';
+import { monitorOf, type MonitorStatus } from '../monitors/engine.js';
+import {
+  conditionText,
+  modeText,
+  monitorFacts,
+  monitorLine,
+  paramsText,
+  serviceTitles,
+  type ServiceTitles,
+} from '../monitors/format.js';
+import { monitorInput } from '../monitors/tools.js';
+import type { ServiceInfo } from '../services/layer.js';
+import { resultNotice } from '../services/tools.js';
+import { describeSchedule, formatDue, formatShort, scheduleKinds } from './schedule.js';
+import {
+  maxActionChars,
+  maxActiveTasks,
+  personOf,
+  type Created,
+  type TaskService,
+} from './service.js';
 
 // 任务工具（ADR-0010、ADR-0014）：建任务、列出任务、取消任务、改任务。由服务提供，接在插件的工具
-// 后面一起装配，所有会话共用；只看、只取消、只改本会话的任务。检查不过都以错误结果告诉模型
+// 后面一起装配，所有会话共用；只看、只取消、只改本会话的任务。检查不过都以错误结果告诉模型。
+// 装上了服务时还能建、改监视任务（kind 多一种 monitor，多一个参数 monitor）；没有时和以前完全一样
 
-type Service = Pick<TaskService, 'create' | 'list' | 'cancelIn' | 'update' | 'now'>;
+type Service = Pick<
+  TaskService,
+  'create' | 'list' | 'cancelIn' | 'update' | 'now' | 'monitorStatus'
+>;
+
+/** 监视：装上的服务（建、改监视任务的说明，结果里的服务、接口名称） */
+type Monitors = { services: readonly ServiceInfo[] };
 
 /**
  * 造四个任务工具，把任务服务传进去。给的是取服务的函数：工具在服务启动时就要装配，任务服务要等
- * 包过一层的存储建好才有，工具执行时才取
+ * 包过一层的存储建好才有，工具执行时才取。给了 monitors（装上了服务）时能建、改监视任务
  */
-export function createTaskTools(service: () => Service): ToolDefinition[] {
+export function createTaskTools(
+  service: () => Service,
+  { monitors }: { monitors?: Monitors } = {},
+): ToolDefinition[] {
+  const titles = serviceTitles(monitors?.services ?? []);
   return [
-    createTaskTool(service),
-    listTasksTool(service),
+    createTaskTool(service, monitors, titles),
+    listTasksTool(service, titles),
     cancelTaskTool(service),
-    updateTaskTool(service),
+    updateTaskTool(service, monitors, titles),
   ];
 }
 
@@ -39,6 +70,10 @@ const createDescription = [
   '结果给出任务 id（如 t7）、下次到点和周期，告诉让你建任务的人。',
 ].join('\n');
 
+/** 装上了服务时，建任务的说明在「每个会话最多……」那一行前面多这一行 */
+const createMonitorLine =
+  '- kind 写 monitor 是监视任务：程序替你定时去查一个服务的接口，有新的条目才叫你（有人说「有新的…就说一声」时用）。这时不写时间那几项，monitor 里写描述：先读 read_docs 的 monitor，用 try_monitor 试跑通过再建。建的时候程序会照描述再查一次，查不通就不建。';
+
 const kindText = 'once 一次性；daily 每天；weekdays 每个工作日；weekly 每周几；monthly 每月几号';
 
 /** 时间的几项（kind 之外），建任务、改任务写法相同 */
@@ -50,33 +85,57 @@ const timeFields = {
   until: z.string().optional().describe('周期的可选：到这一天为止（含这一天），YYYY-MM-DD'),
 };
 
+const actionInput = z
+  .string()
+  .describe(
+    `到点时要做什么：能单独看懂的一句话，写明对谁（用名字，不写 uid）、做什么，最多 ${maxActionChars} 字`,
+  );
+const requestedByInput = z
+  .string()
+  .optional()
+  .describe('几个人一起触发这次回复时：是谁让建的，<message> 里的 uid，没有 uid 时写名字');
+
 const createInput = z.object({
-  action: z
-    .string()
-    .describe(
-      `到点时要做什么：能单独看懂的一句话，写明对谁（用名字，不写 uid）、做什么，最多 ${maxActionChars} 字`,
-    ),
+  action: actionInput,
   kind: z.enum(scheduleKinds).describe(kindText),
   ...timeFields,
-  requested_by: z
-    .string()
-    .optional()
-    .describe('几个人一起触发这次回复时：是谁让建的，<message> 里的 uid，没有 uid 时写名字'),
+  requested_by: requestedByInput,
 });
 
-function createTaskTool(service: () => Service): ToolDefinition {
+/** 装上了服务时建任务的参数：kind 多一种 monitor，多一个参数 monitor */
+const createMonitorInput = z.object({
+  action: actionInput,
+  kind: z
+    .enum([...scheduleKinds, 'monitor'])
+    .describe(`${kindText}；monitor 监视任务（写 monitor，不写时间那几项）`),
+  ...timeFields,
+  monitor: monitorInput('task').optional(),
+  requested_by: requestedByInput,
+});
+
+type CreateInput = z.output<typeof createMonitorInput>;
+
+function createTaskTool(
+  service: () => Service,
+  monitors: Monitors | undefined,
+  titles: ServiceTitles,
+): ToolDefinition {
+  const description = monitors
+    ? createDescription.replace('\n- 每个会话最多', `\n${createMonitorLine}\n- 每个会话最多`)
+    : createDescription;
   return defineTool({
     name: 'create_task',
-    description: createDescription,
-    input: createInput,
+    description,
+    input: (monitors ? createMonitorInput : createInput) as typeof createMonitorInput,
     history: 'full',
     summary: ({ input, output }) => {
       const text = typeof output === 'string' ? output : '';
-      const ref = /已建任务 (t\d+)/.exec(text)?.[1];
+      const ref = /已建(?:监视)?任务 (t\d+)/.exec(text)?.[1];
       const due = /下次到点：\d{4}-(\d{2}-\d{2} \d{2}:\d{2})/.exec(text)?.[1];
-      return [ref, due ?? timingOf(input), input.action].filter(Boolean).join(' · ');
+      const timing = input.kind === 'monitor' ? monitorTiming(input.monitor, titles) : undefined;
+      return [ref, due ?? timing ?? timingOf(input), input.action].filter(Boolean).join(' · ');
     },
-    async execute(input, ctx) {
+    async execute(input: CreateInput, ctx) {
       const result = await service().create({
         conversationId: ctx.conversation.id,
         triggers: ctx.triggers,
@@ -87,10 +146,22 @@ function createTaskTool(service: () => Service): ToolDefinition {
         weekday: input.weekday,
         day: input.day,
         until: input.until,
+        ...(input.monitor === undefined ? {} : { monitor: input.monitor }),
         requestedBy: input.requested_by,
+        signal: ctx.abortSignal,
       });
       if (!result.ok) throw new ToolError(result.error);
       const { task } = result;
+      const monitor = monitorOf(task);
+      if (monitor) {
+        return [
+          ...noticeLines(result),
+          `已建监视任务 ${taskRef(task.id)}。`,
+          `做什么：${task.action}`,
+          ...monitorFacts(monitor, titles),
+          ...existingLines(result),
+        ].join('\n');
+      }
       return [
         `已建任务 ${taskRef(task.id)}。`,
         `下次到点：${formatDue(new Date(task.nextDueAt!))}`,
@@ -100,7 +171,29 @@ function createTaskTool(service: () => Service): ToolDefinition {
   });
 }
 
-function listTasksTool(service: () => Service): ToolDefinition {
+/** 有提醒时（里面有服务返回的键名）结果开头照试跑的做法加一行：下面有服务返回的数据，只当数据看 */
+function noticeLines({ existing, warnings = [] }: Created): string[] {
+  return existing !== undefined && warnings.length > 0 ? [resultNotice] : [];
+}
+
+/** 建、换来源时已有几条（不算新的），取条目时的提醒 */
+function existingLines({ existing, warnings = [] }: Created): string[] {
+  if (existing === undefined) return [];
+  return [
+    `现在已有 ${existing} 条，算已经有的，不会到点；以后查到新的才到点。`,
+    ...(warnings.length > 0 ? ['提醒：', ...warnings.map((warning) => `- ${warning}`)] : []),
+  ];
+}
+
+/** 还没有结果时，界面摘要里监视任务的「时间」：「监视 · 服务的名称 · 接口的名称」 */
+function monitorTiming(monitor: unknown, titles: ServiceTitles): string {
+  const { service, endpoint } = (monitor ?? {}) as { service?: unknown; endpoint?: unknown };
+  if (typeof service !== 'string' || typeof endpoint !== 'string') return '监视';
+  const named = titles(service, endpoint);
+  return `监视 · ${named.service} · ${named.endpoint}`;
+}
+
+function listTasksTool(service: () => Service, titles: ServiceTitles): ToolDefinition {
   return defineTool({
     name: 'list_tasks',
     description:
@@ -119,7 +212,9 @@ function listTasksTool(service: () => Service): ToolDefinition {
       const now = service().now();
       return [
         `这个会话进行中的任务有 ${result.tasks.length} 个：`,
-        ...result.tasks.map((task) => `- ${taskLine(task, now)}`),
+        ...result.tasks.map(
+          (task) => `- ${taskLine(task, now, titles, service().monitorStatus(task.id))}`,
+        ),
       ].join('\n');
     },
   });
@@ -152,7 +247,11 @@ const updateDescription = [
   '结果给出改完以后的任务：id、做什么、下次到点和周期，告诉让你改的人。',
 ].join('\n');
 
-const updateInput = z.object({
+/** 装上了服务时，改任务的说明在「两样至少改一样」那一行前面多这一行 */
+const updateMonitorLine =
+  '- 监视任务：monitor 里只写要改的字段，和原来的描述合起来再检查。params、where、show 写了就整个换成新的，要写全。改 interval_minutes、where、title、show、mode 马上生效；改 service、endpoint、params、items、key 时程序会重新查一次，查通了才生效。监视任务和定时任务不能互相改，要换就取消再建。';
+
+const updateFields = {
   task: z.string().describe('要改的任务 id，如 t7'),
   action: z
     .string()
@@ -162,13 +261,30 @@ const updateInput = z.object({
     ),
   kind: z.enum(scheduleKinds).optional().describe(`改时间时必写，不改时间时不写。${kindText}`),
   ...timeFields,
+};
+
+const updateInput = z.object(updateFields);
+
+/** 装上了服务时改任务的参数：多一个 monitor（只写要改的字段） */
+const updateMonitorInput = z.object({
+  ...updateFields,
+  monitor: monitorInput('update').optional(),
 });
 
-function updateTaskTool(service: () => Service): ToolDefinition {
+type UpdateInput = z.output<typeof updateMonitorInput>;
+
+function updateTaskTool(
+  service: () => Service,
+  monitors: Monitors | undefined,
+  titles: ServiceTitles,
+): ToolDefinition {
+  const description = monitors
+    ? updateDescription.replace('\n- 两样至少改一样', `\n${updateMonitorLine}\n- 两样至少改一样`)
+    : updateDescription;
   return defineTool({
     name: 'update_task',
-    description: updateDescription,
-    input: updateInput,
+    description,
+    input: (monitors ? updateMonitorInput : updateInput) as typeof updateMonitorInput,
     history: 'full',
     summary: ({ input, output }) => {
       const text = typeof output === 'string' ? output : '';
@@ -182,7 +298,7 @@ function updateTaskTool(service: () => Service): ToolDefinition {
       const action = /^做什么：(.*)$/m.exec(text)?.[1];
       return [`改 ${ref}`, due, action].filter(Boolean).join(' · ');
     },
-    async execute(input, ctx) {
+    async execute(input: UpdateInput, ctx) {
       const result = await service().update({
         conversationId: ctx.conversation.id,
         ref: input.task,
@@ -193,9 +309,21 @@ function updateTaskTool(service: () => Service): ToolDefinition {
         weekday: input.weekday,
         day: input.day,
         until: input.until,
+        ...(input.monitor === undefined ? {} : { monitor: input.monitor }),
+        signal: ctx.abortSignal,
       });
       if (!result.ok) throw new ToolError(result.error);
       const { task } = result;
+      const monitor = monitorOf(task);
+      if (monitor) {
+        return [
+          ...noticeLines(result),
+          `已改任务 ${taskRef(task.id)}。`,
+          `做什么：${task.action}`,
+          ...monitorFacts(monitor, titles),
+          ...(result.existing === undefined ? [] : ['换了来源：', ...existingLines(result)]),
+        ].join('\n');
+      }
       return [
         `已改任务 ${taskRef(task.id)}。`,
         `做什么：${task.action}`,
@@ -206,16 +334,52 @@ function updateTaskTool(service: () => Service): ToolDefinition {
   });
 }
 
-/** 列出任务时的一行 */
-function taskLine(task: Task, now: Date): string {
+/** 列出任务时的一行；监视任务写出盯的是什么、多久查一次、只要哪些、处理方式、上次检查 */
+function taskLine(
+  task: Task,
+  now: Date,
+  titles: ServiceTitles,
+  status: MonitorStatus | undefined,
+): string {
+  const who = `${personOf(task.source.author)}让建的`;
+  const monitor = monitorOf(task);
+  if (monitor) {
+    return `${taskRef(task.id)}：${task.action}（${monitorWords(monitor, titles, status)}，${who}）`;
+  }
   const next =
     task.nextDueAt === undefined ? '' : `，下次到点 ${formatDue(new Date(task.nextDueAt))}`;
-  return `${taskRef(task.id)}：${task.action}（${describeSchedule(task.schedule, now)}${next}，${personOf(task.source.author)}让建的）`;
+  return `${taskRef(task.id)}：${task.action}（${describeSchedule(task.schedule, now)}${next}，${who}）`;
+}
+
+/** 监视任务写成一串：「监视 · 每 10 分钟查一次 · 和风天气 · 天气预警 · 参数 … · 只要 … · 触发回复 · 上次检查 …」 */
+function monitorWords(
+  monitor: MonitorDescription,
+  titles: ServiceTitles,
+  status: MonitorStatus | undefined,
+): string {
+  const params = paramsText(monitor.params);
+  return [
+    '监视',
+    monitorLine(monitor, titles),
+    ...(params ? [`参数 ${params}`] : []),
+    monitor.where ? `只要 ${conditionText(monitor.where)}` : '全都要',
+    modeText(monitor.mode),
+    checkedText(status),
+  ].join(' · ');
+}
+
+/** 检查的情况：查不到（从什么时候起、原因）、上次检查正常、还没查过 */
+function checkedText(status: MonitorStatus | undefined): string {
+  if (status?.failing) {
+    return `从 ${formatShort(new Date(status.failing.since))} 起查不到：${status.failing.reason}`;
+  }
+  if (status?.lastCheckedAt) return `上次检查 ${formatShort(new Date(status.lastCheckedAt))}，正常`;
+  return '还没查过';
 }
 
 /** 还没有结果时，界面摘要里的时间：照参数写个大概 */
 function timingOf(
-  input: Pick<z.output<typeof createInput>, 'kind' | 'at' | 'time' | 'weekday' | 'day'>,
+  input: Pick<CreateInput, 'kind' | 'at' | 'time' | 'weekday' | 'day'>,
 ): string | undefined {
   const names: Record<string, string> = {
     daily: '每天',

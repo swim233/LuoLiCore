@@ -654,7 +654,12 @@ export function createChats({
      */
     async due({ conversationId, tasks, fromSeq }: TaskDue): Promise<void> {
       if (closing) return;
-      const refs: LiveTask[] = tasks.map(({ id, action }) => ({ id, ref: taskRef(id), action }));
+      const refs: LiveTask[] = tasks.map(({ id, action, monitor }) => ({
+        id,
+        ref: taskRef(id),
+        action,
+        ...(monitor ? { monitor } : {}),
+      }));
       const conversation = await sessions.open(conversationId);
       // 打开会话期间可能开始了退出、开始了别的回复
       if (closing) return;

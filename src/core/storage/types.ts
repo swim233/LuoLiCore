@@ -250,14 +250,16 @@ export type StoredConversation = ConversationInfo & { platform: string };
  * 每周的加星期几 weekday（1 是周一，7 是周日），每月的加几号 day（1–31）；
  * until 是截止的时刻（ISO，UTC），下一次到点晚于它就算完成，不给时不截止。
  * 新建时 at、until 换成 toISOString 的写法，其余原样。
- * 以后的触发方式（第八阶段的监视）在这里加一种 kind
+ * monitor 是监视任务（ADR-0014）：没有约好的时刻（也就没有下次到点），带着洛璃写的一份描述
+ * （monitor），核心只当它是数据，不解读里面的字段，校验和定时去查都在洛璃服务里
  */
 export type TaskSchedule =
   | { kind: 'once'; at: string }
   | { kind: 'daily'; time: string; until?: string }
   | { kind: 'weekdays'; time: string; until?: string }
   | { kind: 'weekly'; weekday: number; time: string; until?: string }
-  | { kind: 'monthly'; day: number; time: string; until?: string };
+  | { kind: 'monthly'; day: number; time: string; until?: string }
+  | { kind: 'monitor'; monitor: Readonly<Record<string, unknown>> };
 
 /** active：进行中；done：已完成（一次性的到点了，周期的过了截止）；cancelled：已取消（不删） */
 export type TaskStatus = 'active' | 'done' | 'cancelled';

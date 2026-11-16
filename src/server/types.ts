@@ -324,6 +324,8 @@ export type LiveTask = {
   ref: string;
   /** 做什么 */
   action: string;
+  /** 是监视任务（查到了新的东西，或者连续查不到）；定时任务没有 */
+  monitor?: true;
 };
 
 /** 回复里的一段：思考、文字、工具调用。step 是第几步（从 1 起，一步是向模型发一次请求） */
@@ -684,6 +686,22 @@ export type TaskRow = TaskBrief & {
   createdAt: string;
   /** 完成或取消的时间；进行中的没有 */
   endedAt?: string;
+  /** 监视任务才有（ADR-0014）：描述和检查的状态。监视任务没有下次到点 */
+  monitor?: TaskMonitor;
+};
+
+/** 监视任务在任务列表里的样子 */
+export type TaskMonitor = {
+  /** 洛璃写的描述，原样 */
+  description: Readonly<Record<string, unknown>>;
+  /** 写成人话的一行，如「每 10 分钟查一次 · 和风天气 · 天气预警」（和 scheduleText 相同） */
+  line: string;
+  /** 上次检查（成功、失败都算）；还没查过时没有 */
+  lastCheckedAt?: string;
+  /** 上次查通 */
+  lastSuccessAt?: string;
+  /** 现在查不到：从什么时候起、最近一次的原因；查得通时没有 */
+  failing?: { since: string; reason: string };
 };
 
 /** GET /api/tasks 的返回：按建立先后 */

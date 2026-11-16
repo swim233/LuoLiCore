@@ -59,6 +59,18 @@ export async function fetchItems(
   return extracted;
 }
 
+/** 查一次没通过时的说法：是哪一步、为什么（服务层的说明原样带上） */
+export function fetchFailureText(failure: Extract<FetchResult, { ok: false }>): string {
+  switch (failure.step) {
+    case 'call':
+      return `调接口出错。${failure.error}`;
+    case 'parse':
+      return failure.error;
+    case 'items':
+      return `返回的样子和描述对不上。${failure.error}`;
+  }
+}
+
 /** 试跑的结果：通过时有描述、条目、每条符不符合 where、提醒 */
 export type TrialResult =
   | {
@@ -69,7 +81,8 @@ export type TrialResult =
       matched: boolean[];
       warnings: string[];
     }
-  | { ok: false; step: 'describe' | FetchFailure['step']; error: string };
+  | { ok: false; step: 'describe'; error: string }
+  | (FetchFailure & { step: FetchFailure['step'] });
 
 type FetchFailure = Extract<FetchResult, { ok: false }>;
 
@@ -88,7 +101,7 @@ export async function runTrial(
   }
   const { monitor } = checked;
   const fetched = await fetchItems(layer, monitor, { signal });
-  if (!fetched.ok) return { ok: false, step: fetched.step, error: fetched.error };
+  if (!fetched.ok) return fetched;
   return {
     ok: true,
     monitor,

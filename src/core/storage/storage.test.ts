@@ -1373,6 +1373,42 @@ describe.each([
       expect(await storage.getTask(other.id)).toStrictEqual(other);
     });
 
+    it('监视任务：描述跟着 schedule 原样存取，核心不解读；没有下次到点，不算进到点的和最早的下次到点；能改描述、记到点', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const monitor = {
+        service: 'qweather',
+        endpoint: 'weather_alert',
+        params: { latitude: 31.23, localTime: true },
+        where: { all: [{ field: 'color.code', op: 'in', value: ['red'] }] },
+        anything: { nested: [1, '2'] },
+      };
+      const timed = await storage.createTask(newTask(c));
+      const watching = await storage.createTask(
+        newTask(c, { schedule: { kind: 'monitor', monitor }, nextDueAt: undefined }),
+      );
+
+      expect(watching).toMatchObject({ schedule: { kind: 'monitor', monitor }, status: 'active' });
+      expect(watching).not.toHaveProperty('nextDueAt');
+      expect(await storage.getTask(watching.id)).toStrictEqual(watching);
+      expect(await storage.listTasks({ status: 'active' })).toStrictEqual([timed, watching]);
+      expect(await storage.dueTasks('2030-01-01T00:00:00.000Z')).toStrictEqual([timed]);
+      expect(await storage.nextDueAt()).toBe(timed.nextDueAt);
+
+      const changed = await storage.updateTask(watching.id, {
+        schedule: { kind: 'monitor', monitor: { ...monitor, interval_minutes: 10 } },
+        lastDueAt: '2026-11-10T02:00:00.000Z',
+        dueCount: 1,
+      });
+      expect(changed).toStrictEqual({
+        ...watching,
+        schedule: { kind: 'monitor', monitor: { ...monitor, interval_minutes: 10 } },
+        lastDueAt: '2026-11-10T02:00:00.000Z',
+        dueCount: 1,
+      });
+      expect(await storage.getTask(watching.id)).toStrictEqual(changed);
+    });
+
     it('修改：没有这个任务时报错', async () => {
       const storage = await open();
 

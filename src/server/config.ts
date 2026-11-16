@@ -27,8 +27,8 @@ export type ServerConfig = CommonConfig & {
    */
   web?: { port: number; dbPath: string; author: string };
   /**
-   * 洛璃服务自己的 SQLite 文件（ADR-0014）：服务每天发了多少次请求，以后还有监视查到的动态。
-   * LUOLI_FEEDS_DB，默认为数据库所在目录下的 feeds.db。一个服务都没装上时不打开
+   * 洛璃服务自己的 SQLite 文件（ADR-0014）：外部服务每天发了多少次请求，监视的来源、动态、谁在盯。
+   * LUOLI_FEEDS_DB，默认为数据库所在目录下的 feeds.db。总是打开（一个服务都没装上时也是）
    */
   feedsDbPath: string;
 };
