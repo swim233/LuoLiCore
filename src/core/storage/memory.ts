@@ -405,9 +405,11 @@ export function createMemoryStorage(): Storage {
     },
     async updateTask(id, changes) {
       // 先换好写法：时间不合法时抛错，任务不变
-      const { status, dueCount, ...times } = normalizeChanges(changes);
+      const { action, schedule, status, dueCount, ...times } = normalizeChanges(changes);
       const task = findTask(id);
       if (!task) throw new Error(`任务 ${id} 不存在`);
+      if (action !== undefined) task.action = action;
+      if (schedule !== undefined) task.schedule = schedule;
       if (status !== undefined) task.status = status;
       if (dueCount !== undefined) task.dueCount = dueCount;
       for (const key of ['nextDueAt', 'lastDueAt', 'endedAt'] as const) {

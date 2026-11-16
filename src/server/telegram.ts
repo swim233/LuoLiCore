@@ -11,7 +11,8 @@ import type { TaskService } from './tasks/service.js';
  * 在洛璃服务里启动 Telegram 前端：会话对象从会话管理取；等待合并、回复中又被触发等通知交给「此刻」；
  * 连上、断开 Telegram 时推 status 事件。启动好之后状态改从它读连接，并推一次 status
  * （这时已经拿到 bot 的用户名）。启动期间的连接变化不单独推，由启动好后的那一次带上。
- * 给了任务服务时，启动好之后登记 Telegram 的到点入口：交给 bot 当作一次触发，马上返回。
+ * 给了任务服务时，启动好之后登记 Telegram 的到点入口：交给 bot 当作一次触发，马上返回；
+ * 「这个会话还收不收」由 bot 照白名单回答。
  * 其余参数原样交给 startTelegram（测试里调小轮询、等待的时长）
  */
 export async function startTelegramFrontend({
@@ -54,12 +55,14 @@ export async function startTelegramFrontend({
     ...options,
   });
   status.attachTelegram(() => telegram.link());
-  tasks?.setEntrance('telegram', ({ conversationId, tasks: due }) =>
-    telegram.bot.due({
-      conversationId,
-      tasks: due.map((task) => ({ ...task, ref: taskRef(task.id) })),
-    }),
-  );
+  tasks?.setEntrance('telegram', {
+    deliver: ({ conversationId, tasks: due }) =>
+      telegram.bot.due({
+        conversationId,
+        tasks: due.map((task) => ({ ...task, ref: taskRef(task.id) })),
+      }),
+    accepts: (conversationId) => telegram.bot.accepts(conversationId),
+  });
   started = true;
   announce();
   return telegram;

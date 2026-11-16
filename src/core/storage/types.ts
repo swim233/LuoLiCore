@@ -298,8 +298,13 @@ export type NewTask = {
   createdAt?: string;
 };
 
-/** 修改任务：只改给出的项；给 null 是清掉（如结束时清掉下次到点） */
+/**
+ * 修改任务：只改给出的项；给 null 是清掉（如结束时清掉下次到点）。action、schedule 是洛璃改任务时
+ * 换的「做什么」和整个时间（schedule 照新建时的写法存）
+ */
 export type TaskChanges = {
+  action?: string;
+  schedule?: TaskSchedule;
   status?: TaskStatus;
   nextDueAt?: string | null;
   lastDueAt?: string | null;

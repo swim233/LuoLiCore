@@ -236,7 +236,8 @@ const chats: Chats | undefined =
     : undefined;
 if (chats) {
   const webChats = chats;
-  taskService.setEntrance('web', (due) => webChats.due(due));
+  // 网页会话总是收到点
+  taskService.setEntrance('web', { deliver: (due) => webChats.due(due), accepts: () => true });
 }
 
 /** 启动失败时：关掉已经打开的，退出 */

@@ -200,7 +200,7 @@ export async function testService({
       redact,
     });
     const webChats = chats;
-    tasks.setEntrance('web', (due) => webChats.due(due));
+    tasks.setEntrance('web', { deliver: (due) => webChats.due(due), accepts: () => true });
   }
   const app = createApp({
     port: testPort,

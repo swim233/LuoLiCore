@@ -5,6 +5,7 @@ import {
   type Message,
   type Storage,
   type Task,
+  type TaskChanges,
   type Trigger,
 } from '../../core/index.js';
 import {
@@ -59,8 +60,17 @@ export type TaskDue = {
   fromSeq?: number;
 };
 
-/** 前端的到点入口：按会话所在的平台登记。出错只记日志 */
-export type TaskEntrance = (due: TaskDue) => void | Promise<void>;
+/**
+ * 前端的到点入口：按会话所在的平台登记。出错只记日志
+ * - deliver：交给前端当作一次触发；
+ * - accepts：这个会话现在还收不收到点（如 Telegram 的群已经被移出白名单就不收）。到点时（准时的、
+ *   超时的都算）在写事件之前先问；不收时这次到点的任务取消，不写事件、不触发。前端正在退出不算不收。
+ *   任务服务不认识白名单，由前端回答
+ */
+export type TaskEntrance = {
+  deliver(due: TaskDue): void | Promise<void>;
+  accepts(conversationId: string): boolean | Promise<boolean>;
+};
 
 /** 建任务的参数：工具给的，加上会话与触发者 */
 export type CreateTaskInput = ScheduleInput & {
@@ -71,15 +81,30 @@ export type CreateTaskInput = ScheduleInput & {
   requestedBy?: string;
 };
 
+/**
+ * 改任务的参数：工具给的，加上会话。ref 是 t7 或 7；action 是新的「做什么」；时间的几项（kind、at、
+ * time、weekday、day、until）给了任何一项就是整个时间换成新的。空的字符串当作没给
+ */
+export type UpdateTaskInput = Partial<ScheduleInput> & {
+  conversationId: string | undefined;
+  ref: string;
+  action?: string;
+};
+
+/** 时间的几项：改任务时给了其中任何一项，就是要换时间 */
+const scheduleKeys = ['kind', 'at', 'time', 'weekday', 'day', 'until'] as const;
+
 type Failure = { ok: false; error: string };
 const fail = (error: string): Failure => ({ ok: false, error });
 
 /**
- * 任务服务（ADR-0010）：任务工具与面板经它建、列出、取消任务；定时器在这里。
- * - 定时器盯着最近的「下次到点」，等待封顶 maxWaitMs；任务增删时重排。到点时晚了不超过 lateMs 的
- *   算到点：写一条 task 事件，交给会话所在平台的前端（setEntrance 登记）当作一次触发；再晚的算错过：
- *   写一条 task-missed 事件，不触发，周期任务错过几次也只写一条，然后从现在起算下一次。
- * - 建任务、取消、到点的处理排成一串（一次只做一件），免得同时改同一个任务、超过限额。
+ * 任务服务（ADR-0010）：任务工具与面板经它建、列出、改、取消任务；定时器在这里。
+ * - 定时器盯着最近的「下次到点」，等待封顶 maxWaitMs；任务增删、改时间时重排。到点时先问会话所在
+ *   平台的前端（setEntrance 登记）还收不收这个会话，不收的取消（ADR-0014）。收的：晚了不超过 lateMs
+ *   的算到点，写一条 task 事件，交给前端当作一次触发；再晚的算错过：写一条 task-missed 事件，不触发，
+ *   周期任务错过几次也只写一条，然后从现在起算下一次。
+ * - 建任务、改任务、取消、到点的处理排成一串（一次只做一件），免得同时改同一个任务、超过限额，
+ *   也不会刚改好的下次到点被到点的处理拿旧的算出来的盖掉。
  * - 存储用包过一层的那份：任务的写入经它推给面板。
  * 日志只记任务 id、会话 id、晚了多久，不记「做什么」
  */
@@ -274,7 +299,7 @@ export function createTaskService({
       return;
     }
     try {
-      await entrance({
+      await entrance.deliver({
         conversationId,
         tasks: written,
         ...(fromSeq === undefined ? {} : { fromSeq }),
@@ -290,8 +315,8 @@ export function createTaskService({
   }
 
   /**
-   * 看一眼到点了没有：先处理错过的，再把到点的按会话合在一起处理。每个任务的同一次到点只处理一次
-   * （见 handled）；出错只记日志，下一次按 waitMs 再看（见 backOff）
+   * 看一眼到点了没有：先问前端收不收、不收的取消，再处理错过的，再把到点的按会话合在一起处理。
+   * 每个任务的同一次到点只处理一次（见 handled）；出错只记日志，下一次按 waitMs 再看（见 backOff）
    */
   async function tick(): Promise<void> {
     if (stopped) return;
@@ -304,14 +329,25 @@ export function createTaskService({
       logger.error({ error: describeError(error) }, 'task.timer_failed');
       return;
     }
+    const fresh = found.filter((task) => {
+      if (handled.get(task.id) !== task.nextDueAt) return true;
+      backOff = true;
+      return false;
+    });
+    // 先问前端这些会话还收不收（ADR-0014）：不收的，这次到点的任务取消，不写事件、不触发
+    const refused = new Set<string>();
+    for (const conversationId of new Set(fresh.map((task) => task.conversationId))) {
+      if (!(await accepts(conversationId))) refused.add(conversationId);
+    }
     const byConversation = new Map<string, Task[]>();
-    for (let task of found) {
-      if (handled.get(task.id) === task.nextDueAt) {
-        backOff = true;
-        continue;
-      }
+    for (let task of fresh) {
       handled.set(task.id, task.nextDueAt!);
       try {
+        if (refused.has(task.conversationId)) {
+          await end(task, 'timer', 'not_accepted');
+          handled.delete(task.id);
+          continue;
+        }
         if (now.getTime() - Date.parse(task.nextDueAt!) > lateMs) {
           task = await miss(task, now);
           // 错过之后的下一次正好就在这几分钟里：照常到点
@@ -323,6 +359,8 @@ export function createTaskService({
         ]);
       } catch (error) {
         backOff = true;
+        // 取消失败的下一次再试：没写事件，再来一遍也不会多写
+        if (refused.has(task.conversationId)) handled.delete(task.id);
         logger.error(
           { taskId: task.id, conversationId: task.conversationId, error: describeError(error) },
           'task.timer_failed',
@@ -339,6 +377,21 @@ export function createTaskService({
     }
   }
 
+  /**
+   * 会话所在平台的前端还收不收这个会话的到点。没登记入口的平台照旧（算收）；问不了（读不到会话、
+   * 前端出错）时也算收，照原来的做法写事件、交给前端，只记一行日志
+   */
+  async function accepts(conversationId: string): Promise<boolean> {
+    try {
+      const platform = (await storage.overview(conversationId))?.platform;
+      const entrance = platform === undefined ? undefined : entrances.get(platform);
+      return entrance === undefined || (await entrance.accepts(conversationId));
+    } catch (error) {
+      logger.error({ conversationId, error: describeError(error) }, 'task.accepts_failed');
+      return true;
+    }
+  }
+
   /** 会话要在，不能是 CLI 会话 */
   async function checkConversation(
     conversationId: string | undefined,
@@ -352,8 +405,8 @@ export function createTaskService({
 
   return {
     /**
-     * 登记一个平台的到点入口（网页会话的在服务里登记，Telegram 的在它启动时登记）。入口在这一串里
-     * 被 await：要马上返回，不等合并、不等回复
+     * 登记一个平台的到点入口（网页会话的在服务里登记，Telegram 的在它启动时登记）。入口的两个函数
+     * 都在这一串里被 await：要马上返回，不等合并、不等回复
      */
     setEntrance(platform: string, entrance: TaskEntrance): void {
       entrances.set(platform, entrance);
@@ -420,6 +473,58 @@ export function createTaskService({
       });
     },
 
+    /**
+     * 工具改任务：只能改这个会话进行中的任务（别的一律「没有这个任务」，同 cancelIn）。只给 action
+     * 时只换「做什么」，下次到点不变；给了时间的任何一项时整个时间换成新的，照建任务的规则检查，
+     * 下次到点从现在重新算。谁让建的、来源消息、到点次数不变。改完定时器重排
+     */
+    update(input: UpdateTaskInput): Promise<{ ok: true; task: Task } | Failure> {
+      return exclusive(async () => {
+        const { conversationId } = input;
+        const rejected = await checkConversation(conversationId);
+        if (rejected) return rejected;
+        const id = parseTaskRef(input.ref);
+        const task = id === undefined ? undefined : await storage.getTask(id);
+        if (!task || task.conversationId !== conversationId || task.status !== 'active') {
+          return fail('没有这个任务');
+        }
+        const action = input.action?.trim();
+        const timed = scheduleKeys.some((key) => input[key] !== undefined && input[key] !== '');
+        if (!action && !timed) {
+          return fail('至少改一样：写新的 action，或者新的时间（kind 和它要的几项）');
+        }
+        const changes: TaskChanges = {};
+        if (action) {
+          if ([...action].length > maxActionChars) {
+            return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+          }
+          changes.action = action;
+        }
+        if (timed) {
+          if (input.kind === undefined) {
+            return fail('改时间要写 kind：时间整个换成新的，kind 和它要的几项都要写');
+          }
+          const timing = scheduleFrom({ ...input, kind: input.kind }, clock.now());
+          if (!timing.ok) return timing;
+          changes.schedule = timing.schedule;
+          changes.nextDueAt = timing.next.toISOString();
+        }
+        const updated = await storage.updateTask(task.id, changes);
+        // 只记改了哪几样（和新时间的种类），不记「做什么」
+        logger.info(
+          {
+            taskId: task.id,
+            conversationId,
+            changed: Object.keys(changes).filter((key) => key !== 'nextDueAt'),
+            ...(changes.schedule ? { kind: changes.schedule.kind } : {}),
+          },
+          'task.updated',
+        );
+        rearm();
+        return { ok: true, task: updated };
+      });
+    },
+
     /** 面板取消任务：任何会话的都行。没有这个任务、已经结束时说明是哪一种 */
     cancel(
       id: number,
@@ -451,14 +556,29 @@ export function createTaskService({
     settled: settle,
   };
 
-  /** 取消：状态改为已取消，记下结束时间，定时器重排 */
-  async function end(task: Task, by: 'tool' | 'panel'): Promise<Task> {
+  /**
+   * 取消：状态改为已取消，记下结束时间，定时器重排。by 是谁取消的：工具、面板，或者定时器
+   * （到点时会话的前端不收了，reason 写原因）
+   */
+  async function end(
+    task: Task,
+    by: 'tool' | 'panel' | 'timer',
+    reason?: 'not_accepted',
+  ): Promise<Task> {
     const ended = await storage.updateTask(task.id, {
       status: 'cancelled',
       nextDueAt: null,
       endedAt: clock.now().toISOString(),
     });
-    logger.info({ taskId: task.id, conversationId: task.conversationId, by }, 'task.cancelled');
+    logger.info(
+      {
+        taskId: task.id,
+        conversationId: task.conversationId,
+        by,
+        ...(reason === undefined ? {} : { reason }),
+      },
+      'task.cancelled',
+    );
     rearm();
     return ended;
   }

@@ -24,7 +24,7 @@ const tasks = () => {
   throw new Error('装配时不该取任务服务');
 };
 
-const taskToolNames = ['create_task', 'list_tasks', 'cancel_task'];
+const taskToolNames = ['create_task', 'list_tasks', 'cancel_task', 'update_task'];
 const serviceToolNames = ['read_docs', 'call_service'];
 
 /**
@@ -71,7 +71,7 @@ function ed25519KeyFile(): string {
 }
 
 describe('服务启动时装配插件与工具', () => {
-  it('插件清单（没配和风天气）：工具还是 fetch 加任务的三个，和以前一样；和风天气不装，提示一行', () => {
+  it('插件清单（没配和风天气）：工具是 fetch 加任务的四个；和风天气不装，提示一行', () => {
     const { names, entries, lines } = assemble(plugins);
 
     expect(names).toEqual(['fetch', ...taskToolNames]);
@@ -90,7 +90,7 @@ describe('服务启动时装配插件与工具', () => {
     ]);
   });
 
-  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的三个', () => {
+  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的四个', () => {
     const env = {
       QWEATHER_API_HOST: 'https://abc123.def.qweatherapi.com/',
       QWEATHER_DEVELOPER_ID: 'developer-id-1',
@@ -118,7 +118,7 @@ describe('服务启动时装配插件与工具', () => {
     expect(names).toEqual(['b2', 'b1', 'a1', ...taskToolNames]);
   });
 
-  it('装上了服务时：插件的工具、读文档与调服务、任务的三个；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
+  it('装上了服务时：插件的工具、读文档与调服务、任务的四个；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
     const { names, services } = assemble([
       definePlugin({ name: 'a', tools: [tool('a1')] }),
       definePlugin({ name: 'b', services: [fakeService({ name: 'one' })] }),

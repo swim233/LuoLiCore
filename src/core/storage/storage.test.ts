@@ -1326,6 +1326,53 @@ describe.each([
       expect(await storage.getTask(other.id)).toStrictEqual(other);
     });
 
+    it('修改：换「做什么」和整个时间，时间照新建时的写法存；一次性和周期的能互换，别的项不动；再取、列出、到点的也是新的', async () => {
+      const storage = await open();
+      const c = await storage.createConversation({ platform: 'web' });
+      const created = await storage.createTask(newTask(c));
+      const other = await storage.createTask(newTask(c));
+      const fired = await storage.updateTask(created.id, { dueCount: 2 });
+
+      const daily = await storage.updateTask(created.id, {
+        action: '提醒 Alice 喝水',
+        schedule: { kind: 'daily', time: '08:00', until: '2026-12-31T23:59:59.999+08:00' },
+        nextDueAt: '2026-11-11T08:00:00+08:00',
+      });
+      expect(daily).toStrictEqual({
+        ...fired,
+        action: '提醒 Alice 喝水',
+        schedule: { kind: 'daily', time: '08:00', until: '2026-12-31T15:59:59.999Z' },
+        nextDueAt: '2026-11-11T00:00:00.000Z',
+      });
+      expect(await storage.getTask(created.id)).toStrictEqual(daily);
+
+      // 只换时间：做什么、到点次数、来源都不动
+      const once = await storage.updateTask(created.id, {
+        schedule: { kind: 'once', at: '2026-11-09T21:00:00-04:00' },
+        nextDueAt: '2026-11-10T01:00:00.000Z',
+      });
+      expect(once).toStrictEqual({
+        ...daily,
+        schedule: { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        nextDueAt: '2026-11-10T01:00:00.000Z',
+      });
+      // 只换做什么
+      const renamed = await storage.updateTask(created.id, { action: '提醒 Bob 交周报' });
+      expect(renamed).toStrictEqual({ ...once, action: '提醒 Bob 交周报' });
+
+      expect(await storage.listTasks({ conversationId: c })).toStrictEqual([renamed, other]);
+      expect(await storage.dueTasks('2026-11-10T01:00:00.000Z')).toStrictEqual([renamed, other]);
+      // 时刻不合法：报错，什么都不改
+      await expect(
+        storage.updateTask(created.id, {
+          action: '不该改',
+          schedule: { kind: 'once', at: '明天' },
+        }),
+      ).rejects.toThrow('不是合法的时间');
+      expect(await storage.getTask(created.id)).toStrictEqual(renamed);
+      expect(await storage.getTask(other.id)).toStrictEqual(other);
+    });
+
     it('修改：没有这个任务时报错', async () => {
       const storage = await open();
 
@@ -2149,6 +2196,29 @@ describe('SQLite 存储', () => {
     cleanups.push(async () => reopened.close());
     expect(await reopened.getTask(1)).toStrictEqual(created);
     expect(await reopened.dueTasks('2026-11-10T01:00:00.000Z')).toStrictEqual([created]);
+  });
+
+  it('改过「做什么」和时间的任务：关掉再打开，读出来一样', async () => {
+    const dir = await tempDir();
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, 'luoli.db');
+    const storage = openSqliteStorage(path);
+    const c = await storage.createConversation({ platform: 'web' });
+    const created = await storage.createTask(newTask(c));
+    const updated = await storage.updateTask(created.id, {
+      action: '提醒 Bob 交周报',
+      schedule: { kind: 'weekly', weekday: 3, time: '20:00', until: '2027-01-31T15:59:59.999Z' },
+      nextDueAt: '2026-11-11T12:00:00.000Z',
+    });
+    storage.close();
+
+    const reopened = openSqliteStorage(path);
+    cleanups.push(async () => reopened.close());
+    expect(await reopened.getTask(created.id)).toStrictEqual(updated);
+    expect(updated).toMatchObject({
+      action: '提醒 Bob 交周报',
+      schedule: { kind: 'weekly', weekday: 3, time: '20:00', until: '2027-01-31T15:59:59.999Z' },
+    });
   });
 
   it('版本 3 的库：打开时升到版本 6，旧的工具调用行没有调用 id，新写入的有；都能读回', async () => {

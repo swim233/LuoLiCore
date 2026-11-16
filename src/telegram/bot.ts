@@ -692,6 +692,17 @@ export function createTelegramBot({
   }
 
   /**
+   * 存储里的会话对应哪个聊天：Telegram 的会话、平台 id 是能当 chat id 的整数时给出 chatId，
+   * 否则（别的平台、没有平台 id）没有
+   */
+  async function chatOf(conversationId: string) {
+    const overview = await storage.overview(conversationId, { textChars: 0 });
+    const id = overview?.platform === 'telegram' ? overview.platformConversationId : undefined;
+    const chatId = id !== undefined && Number.isSafeInteger(Number(id)) ? id : undefined;
+    return { overview, chatId };
+  }
+
+  /**
    * 到点时找 bot 里这个群的会话，还没有时打开（服务刚启动、这个群还没人说话），和群里来消息时
    * 用同一张表。正在关闭时不再打开，为 undefined
    */
@@ -915,12 +926,23 @@ export function createTelegramBot({
     },
 
     /**
+     * 任务服务问：这个会话现在还收不收任务到点（ADR-0014）。照白名单答：群看群的白名单，私聊看
+     * 用户的白名单；会话不是 Telegram 的、取不到 chat id 的也算不收。正在关闭不算不收（那是服务
+     * 要停了），照样答白名单。不收时任务服务把这次到点的任务取消，不写事件
+     */
+    async accepts(conversationId: string): Promise<boolean> {
+      const { chatId } = await chatOf(conversationId);
+      return chatId !== undefined && isAllowedChat(chatId, { chats, users });
+    },
+
+    /**
      * 任务到点（ADR-0010）：事件已经写进会话，当作一次触发，走等待合并那一套（空闲时等待合并，
      * 等待中并进这一轮，回复中这次发出后再回复一次），回复引用最后一个任务的来源消息。
      * 发到会话的平台 id（chat id）那个群。以下情况不回复，只记一行 telegram.due_skipped
      * （会话 id、任务 id、原因），事件已经在历史里，不撤回：
      * - no_chat：会话不是 Telegram 的，或者取不到 chat id；
-     * - not_allowed：这个群（私聊则那个用户）现在不在白名单里，比如建任务之后被移出了；
+     * - not_allowed：这个群（私聊则那个用户）现在不在白名单里。任务服务到点前先问过 accepts，
+     *   不收的已经取消、不会走到这里；这一条留着兜底；
      * - closing：正在关闭，不再开始新的一轮。
      * 过期触发的规则只管群里来的消息，这里不看。马上返回，不等合并、不等回复：
      * 任务服务里排着的建任务、取消任务都在等它。从不抛错
@@ -934,12 +956,8 @@ export function createTelegramBot({
         );
       void (async () => {
         if (closing) return skip('closing');
-        const overview = await storage.overview(conversationId, { textChars: 0 });
-        const chatId =
-          overview?.platform === 'telegram' ? overview.platformConversationId : undefined;
-        if (chatId === undefined || !Number.isSafeInteger(Number(chatId))) {
-          return skip('no_chat', { platform: overview?.platform });
-        }
+        const { overview, chatId } = await chatOf(conversationId);
+        if (chatId === undefined) return skip('no_chat', { platform: overview?.platform });
         if (!isAllowedChat(chatId, { chats, users })) return skip('not_allowed');
         const session = await sessionById(conversationId, chatId, overview?.title);
         if (!session || closing) return skip('closing');

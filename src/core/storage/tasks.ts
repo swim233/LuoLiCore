@@ -30,12 +30,16 @@ export function normalizeSchedule(schedule: TaskSchedule): TaskSchedule {
   }
 }
 
-/** 修改里的时间换成同一种写法；null（清掉）与没给的项原样 */
+/**
+ * 修改里的时间换成同一种写法，schedule 照新建时的写法（normalizeSchedule）；null（清掉）与
+ * 没给的项原样
+ */
 export function normalizeChanges(changes: TaskChanges): TaskChanges {
   const time = (value: string | null | undefined) =>
     value === null || value === undefined ? value : isoTime(value);
   return {
     ...changes,
+    ...(changes.schedule === undefined ? {} : { schedule: normalizeSchedule(changes.schedule) }),
     ...('nextDueAt' in changes ? { nextDueAt: time(changes.nextDueAt) } : {}),
     ...('lastDueAt' in changes ? { lastDueAt: time(changes.lastDueAt) } : {}),
     ...('endedAt' in changes ? { endedAt: time(changes.endedAt) } : {}),

@@ -27,6 +27,7 @@ import type {
   TaskRow,
   TasksResponse,
 } from '../types.js';
+import type { TaskDue } from './service.js';
 import { createTaskTools } from './tools.js';
 
 // 任务的工具、定时器、到点进网页会话、接口与 SSE。时间按上海（UTC+8）：结果里的时刻是确定的。
@@ -190,7 +191,7 @@ async function setup(
   // 直接调工具：ctx 照核心给的样子
   const tools = Object.fromEntries(
     createTaskTools(() => tasks).map((definition) => [definition.name, definition]),
-  ) as Record<'create_task' | 'list_tasks' | 'cancel_task', ToolDefinition>;
+  ) as Record<'create_task' | 'list_tasks' | 'cancel_task' | 'update_task', ToolDefinition>;
   async function run(
     name: keyof typeof tools,
     input: unknown,
@@ -427,7 +428,7 @@ describe('任务工具', () => {
     );
   });
 
-  it('CLI 会话：三个工具都回「CLI 会话不能建任务」', async () => {
+  it('CLI 会话：四个工具都回「CLI 会话不能建任务」', async () => {
     const { observed, refused } = await setup();
     const id = await observed.createConversation({ platform: 'cli' });
     const by = { conversationId: id, triggers: [trigger({ name: 'swim' }, 'm-1')] };
@@ -436,6 +437,7 @@ describe('任务工具', () => {
       ['create_task', { action: '提醒', kind: 'once', at: '2026-11-10 09:00' }],
       ['list_tasks', {}],
       ['cancel_task', { task: 't1' }],
+      ['update_task', { task: 't1', action: '提醒' }],
     ] as const) {
       expect(await refused(name, input, by)).toBe('CLI 会话不能建任务');
     }
@@ -556,6 +558,312 @@ describe('任务工具', () => {
       expect(await refused('cancel_task', { task }, by)).toBe('没有这个任务');
     }
     expect((await storage.getTask(1))?.status).toBe('active');
+  });
+});
+
+// ─── 改任务 ─────────────────────────────────────────────────────────────
+
+describe('改任务', () => {
+  /** 一个网页会话里 Alice 让建的任务；by 是之后 Bob 在这个会话里说话 */
+  async function withTask(s: Awaited<ReturnType<typeof setup>>, input: Record<string, unknown>) {
+    const id = await s.observed.createConversation({ platform: 'web' });
+    await s.run(
+      'create_task',
+      { action: '提醒 Alice 交周报', ...input },
+      { conversationId: id, triggers: [trigger(alice, 'm-src')] },
+    );
+    return { id, by: { conversationId: id, triggers: [trigger(bob, 'm-bob')] } };
+  }
+
+  it('只改做什么：时间和下次到点不变；白名单里谁都能改，谁让建的、来源消息不变', async () => {
+    const s = await setup();
+    const { id, by } = await withTask(s, { kind: 'once', at: '2026-11-10 09:00' });
+    const before = await s.storage.getTask(1);
+
+    const output = await s.run('update_task', { task: 't1', action: ' 提醒 Alice 交月报 ' }, by);
+
+    expect(output).toBe(
+      '已改任务 t1。\n做什么：提醒 Alice 交月报\n下次到点：2026-11-10 09:00（周二）\n周期：一次性',
+    );
+    expect(await s.storage.getTask(1)).toStrictEqual({ ...before!, action: '提醒 Alice 交月报' });
+    expect((await s.storage.getTask(1))?.source).toEqual({
+      author: alice,
+      messageId: 'm-src',
+    });
+    expect(s.entries.find((entry) => entry.msg === 'task.updated')?.fields).toStrictEqual({
+      taskId: 1,
+      conversationId: id,
+      changed: ['action'],
+    });
+  });
+
+  it('只改时间：整个时间换成新的，下次到点从现在重新算，做什么不变；时刻写法同建任务', async () => {
+    const s = await setup();
+    const { by } = await withTask(s, { kind: 'once', at: '2026-11-10 09:00' });
+
+    const output = await s.run(
+      'update_task',
+      { task: '1', kind: 'once', at: '2026-11-10 7:30' },
+      by,
+    );
+
+    expect(output).toBe(
+      '已改任务 t1。\n做什么：提醒 Alice 交周报\n下次到点：2026-11-10 07:30（周二）\n周期：一次性',
+    );
+    expect(await s.storage.getTask(1)).toMatchObject({
+      action: '提醒 Alice 交周报',
+      schedule: { kind: 'once', at: '2026-11-09T23:30:00.000Z' },
+      nextDueAt: '2026-11-09T23:30:00.000Z',
+      status: 'active',
+    });
+  });
+
+  it('两样都改；一次性改成周期的、周期的改回一次性，别的项（截止日期等）不留下来', async () => {
+    const s = await setup();
+    const { by } = await withTask(s, { kind: 'once', at: '2026-11-10 09:00' });
+
+    expect(
+      await s.run(
+        'update_task',
+        {
+          task: 't1',
+          action: '说说天气',
+          kind: 'weekly',
+          weekday: 3,
+          time: '08:00',
+          until: '2026-12-31',
+        },
+        by,
+      ),
+    ).toBe(
+      '已改任务 t1。\n做什么：说说天气\n下次到点：2026-11-11 08:00（周三）\n周期：每周三 08:00，到 12-31 为止',
+    );
+    expect(await s.storage.getTask(1)).toMatchObject({
+      action: '说说天气',
+      schedule: { kind: 'weekly', weekday: 3, time: '08:00', until: '2026-12-31T15:59:59.999Z' },
+      nextDueAt: '2026-11-11T00:00:00.000Z',
+    });
+    // 日志只记改了哪几样和新时间的种类，没有「做什么」
+    expect(s.entries.find((entry) => entry.msg === 'task.updated')?.fields).toMatchObject({
+      changed: ['action', 'schedule'],
+      kind: 'weekly',
+    });
+    expect(JSON.stringify(s.entries)).not.toContain('说说天气');
+
+    expect(
+      await s.run('update_task', { task: 't1', kind: 'once', at: '2026-11-20 10:00' }, by),
+    ).toBe('已改任务 t1。\n做什么：说说天气\n下次到点：2026-11-20 10:00（周五）\n周期：一次性');
+    const once = await s.storage.getTask(1);
+    expect(once?.schedule).toStrictEqual({ kind: 'once', at: '2026-11-20T02:00:00.000Z' });
+    expect(once?.nextDueAt).toBe('2026-11-20T02:00:00.000Z');
+
+    await s.run('update_task', { task: 't1', kind: 'daily', time: '21:00' }, by);
+    // 今天的 21:00 已经过了：从现在算是明天
+    expect(await s.storage.getTask(1)).toMatchObject({
+      schedule: { kind: 'daily', time: '21:00' },
+      nextDueAt: '2026-11-10T13:00:00.000Z',
+    });
+  });
+
+  it('新的时间不对：照建任务的规则报错，什么都不改（做什么也不改）；给了时间却没写 kind 时说明要写', async () => {
+    const s = await setup();
+    const { by } = await withTask(s, { kind: 'daily', time: '08:00' });
+    const before = await s.storage.getTask(1);
+    const update = (input: object) =>
+      s.refused('update_task', { task: 't1', action: '不该改', ...input }, by);
+
+    expect(await update({ kind: 'once', at: '2026-11-09 21:00' })).toBe(
+      '这个时刻已经过了（现在是 2026-11-09 21:30（周一））',
+    );
+    expect(await update({ kind: 'once', at: '2027-12-01 09:00' })).toBe(
+      '最远只能约到一年后（2027-11-09 21:30）',
+    );
+    expect(await update({ kind: 'once', at: '2026-11-10 09:00', time: '08:00' })).toBe(
+      '一次性任务只写 at，不用 time',
+    );
+    expect(await update({ kind: 'weekly', time: '08:00' })).toContain('weekly 要写 weekday');
+    expect(await update({ kind: 'daily', time: '08:00', until: '2026-11-01' })).toContain(
+      '截止日期已经过了',
+    );
+    expect(await update({ time: '09:00' })).toBe(
+      '改时间要写 kind：时间整个换成新的，kind 和它要的几项都要写',
+    );
+    expect(await update({ until: '2026-12-31' })).toContain('改时间要写 kind');
+    expect(await s.refused('update_task', { task: 't1', action: '长'.repeat(201) }, by)).toBe(
+      'action 最多 200 个字，写成一句话',
+    );
+    expect(await s.storage.getTask(1)).toStrictEqual(before);
+    expect(s.entries.filter((entry) => entry.msg === 'task.updated')).toEqual([]);
+  });
+
+  it('什么都不给（空的、只有空白的也算没给）：以错误结束，说至少改一样', async () => {
+    const s = await setup();
+    const { by } = await withTask(s, { kind: 'daily', time: '08:00' });
+    const before = await s.storage.getTask(1);
+    const message = '至少改一样：写新的 action，或者新的时间（kind 和它要的几项）';
+
+    expect(await s.refused('update_task', { task: 't1' }, by)).toBe(message);
+    expect(await s.refused('update_task', { task: 't1', action: '  ', at: '', time: '' }, by)).toBe(
+      message,
+    );
+    // 时间给了、action 是空白：只改时间
+    await s.run('update_task', { task: 't1', action: ' ', kind: 'daily', time: '09:00' }, by);
+    expect(await s.storage.getTask(1)).toMatchObject({
+      action: before!.action,
+      schedule: { kind: 'daily', time: '09:00' },
+    });
+  });
+
+  it('改别的会话的、已经结束的、不存在的：一律「没有这个任务」，不动那个任务', async () => {
+    const s = await setup();
+    const { by: other } = await withTask(s, { kind: 'daily', time: '08:00' });
+    const { by } = await withTask(s, { kind: 'daily', time: '08:00' });
+    await s.run('create_task', { action: '取消了的', kind: 'daily', time: '08:00' }, by);
+    await s.run('cancel_task', { task: 't3' }, by);
+    const before = await s.storage.listTasks();
+
+    for (const task of ['t1', 't3', 't99', '第一个']) {
+      expect(await s.refused('update_task', { task, action: '改' }, by)).toBe('没有这个任务');
+    }
+    expect(await s.refused('update_task', { task: 't3', action: '改' }, other)).toBe(
+      '没有这个任务',
+    );
+    expect(await s.storage.listTasks()).toStrictEqual(before);
+  });
+
+  it('改完定时器重排：改早就等到新的时刻，改晚就照旧最多等 60 秒', async () => {
+    const s = await setup();
+    const { by } = await withTask(s, { kind: 'once', at: '2026-11-09 21:40' });
+    s.tasks.start();
+    await s.tasks.settled();
+    expect(s.clock.pending()).toEqual([minute]);
+
+    await s.advance(30_000);
+    await s.run('update_task', { task: 't1', kind: 'once', at: '2026-11-09 21:31' }, by);
+    await s.tasks.settled();
+    expect(s.clock.pending()).toEqual([30_000]);
+
+    await s.run('update_task', { task: 't1', kind: 'daily', time: '23:00' }, by);
+    await s.tasks.settled();
+    expect(s.clock.pending()).toEqual([minute]);
+  });
+
+  it('到点次数不清零；改完照新的时间到点，事件里是新的做什么', async () => {
+    const model = scripted(answer('该交周报了'), answer('该交月报了'));
+    const s = await setup(model);
+    const { id, by } = await withTask(s, { kind: 'daily', time: '21:31' });
+    s.tasks.start();
+    await s.advance(minute);
+    await waitUntil(() => model.doStreamCalls.length === 1 && !s.chats!.busy(id), '第一次到点');
+
+    await s.run(
+      'update_task',
+      { task: 't1', action: '提醒 Alice 交月报', kind: 'daily', time: '21:40' },
+      by,
+    );
+    expect(await s.storage.getTask(1)).toMatchObject({
+      dueCount: 1,
+      lastDueAt: '2026-11-09T13:31:00.000Z',
+      nextDueAt: '2026-11-09T13:40:00.000Z',
+    });
+    for (let i = 0; i < 9; i++) await s.advance(minute);
+    await waitUntil(() => model.doStreamCalls.length === 2 && !s.chats!.busy(id), '改过以后到点');
+
+    const events = (await s.messages(id)).filter((m) => m.metadata?.event?.type === 'task');
+    expect(events.map(textOf)).toEqual([
+      '任务到点：提醒 Alice 交周报。Alice（uid u-alice）在 11-09 21:30 让你建的，周期任务（每天 21:31）。',
+      '任务到点：提醒 Alice 交月报。Alice（uid u-alice）在 11-09 21:30 让你建的，周期任务（每天 21:40）。',
+    ]);
+    expect(await s.storage.getTask(1)).toMatchObject({
+      dueCount: 2,
+      lastDueAt: '2026-11-09T13:40:00.000Z',
+      nextDueAt: '2026-11-10T13:40:00.000Z',
+    });
+  });
+
+  it('改和到点挤在一起：排在到点的处理后面，下次到点照新的时间算，不被到点的处理拿旧的时间盖掉', async () => {
+    const model = scripted(answer('该交周报了'));
+    const storage = createMemoryStorage();
+    // 到点的处理取到任务以后停住：改任务正好在它拿到旧的样子之后进来
+    const held = gate();
+    let holding = false;
+    const s = await setup(model, {
+      storage: {
+        ...storage,
+        dueTasks: async (at) => {
+          const found = await storage.dueTasks(at);
+          if (holding) await held.promise;
+          return found;
+        },
+      },
+    });
+    const { id, by } = await withTask(s, { kind: 'daily', time: '21:31' });
+    s.tasks.start();
+    await s.tasks.settled();
+    holding = true;
+
+    s.clock.advance(minute);
+    const updated = s.run(
+      'update_task',
+      { task: 't1', action: '提醒 Alice 交月报', kind: 'daily', time: '21:45' },
+      by,
+    );
+    await sleep(20);
+    held.open();
+
+    expect(await updated).toBe(
+      '已改任务 t1。\n做什么：提醒 Alice 交月报\n下次到点：2026-11-09 21:45（周一）\n周期：每天 21:45',
+    );
+    await s.tasks.settled();
+    await waitUntil(() => model.doStreamCalls.length === 1 && !s.chats!.busy(id), '到点的回复');
+    // 这次到点是改之前的样子；之后是新的
+    expect(textOf((await s.messages(id))[0]!)).toContain('提醒 Alice 交周报');
+    expect(await s.storage.getTask(1)).toMatchObject({
+      action: '提醒 Alice 交月报',
+      schedule: { kind: 'daily', time: '21:45' },
+      nextDueAt: '2026-11-09T13:45:00.000Z',
+      lastDueAt: '2026-11-09T13:31:00.000Z',
+      dueCount: 1,
+    });
+  });
+
+  it('面板经现有的变更通知收到改过的这一行', async () => {
+    const s = await setup();
+    const listening = await panel(s);
+    const { by } = await withTask(s, { kind: 'once', at: '2026-11-10 09:00' });
+    await s.run('update_task', { task: 't1', action: '提醒 Alice 交月报' }, by);
+    await s.run('update_task', { task: 't1', kind: 'daily', time: '08:00' }, by);
+
+    const rows = await listening.tasks(3);
+    expect(rows.map((row) => [row.ref, row.action, row.schedule, row.nextDueAt])).toEqual([
+      [
+        't1',
+        '提醒 Alice 交周报',
+        { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        '2026-11-10T01:00:00.000Z',
+      ],
+      [
+        't1',
+        '提醒 Alice 交月报',
+        { kind: 'once', at: '2026-11-10T01:00:00.000Z' },
+        '2026-11-10T01:00:00.000Z',
+      ],
+      ['t1', '提醒 Alice 交月报', { kind: 'daily', time: '08:00' }, '2026-11-10T00:00:00.000Z'],
+    ]);
+  });
+
+  it('界面摘要：「改 t1 · 11-10 09:00 · 做什么」；还没有结果时照参数写', async () => {
+    const { tools } = await setup();
+    const summary = (args: unknown, output?: unknown) =>
+      tools.update_task.summary!({ input: tools.update_task.input.parse(args), output });
+    const done =
+      '已改任务 t1。\n做什么：提醒交月报\n下次到点：2026-11-10 09:00（周二）\n周期：一次性';
+
+    expect(summary({ task: 't1', action: '提醒交月报' })).toBe('改 t1 · 提醒交月报');
+    expect(summary({ task: 't1', kind: 'daily', time: '08:00' })).toBe('改 t1 · 每天 08:00');
+    expect(summary({ task: 't1', kind: 'once', at: '2026-11-10 09:00' }, done)).toBe(
+      '改 t1 · 11-10 09:00 · 提醒交月报',
+    );
   });
 });
 
@@ -869,6 +1177,8 @@ describe('定时器', () => {
 
     expect((await s.messages(id)).map((m) => m.metadata?.event?.type)).toEqual(['task']);
     expect(model.doStreamCalls).toHaveLength(0);
+    // 没登记入口的平台没人回答收不收：照旧，不取消
+    expect(await s.storage.getTask(1)).toMatchObject({ status: 'done', dueCount: 1 });
     expect(s.entries.find((entry) => entry.msg === 'task.no_entrance')?.fields).toMatchObject({
       conversationId: id,
       platform: 'telegram',
@@ -898,6 +1208,148 @@ describe('定时器', () => {
       missed: 1,
     });
     expect(JSON.stringify(s.entries)).not.toContain('喝水');
+  });
+});
+
+// ─── 到点时前端不收 ─────────────────────────────────────────────────────
+
+describe('到点时前端不收', () => {
+  /** 给 Telegram 会话登记一个假的入口：收不收由 accepts 答；记下问了谁、交给它的 */
+  function fakeEntrance(
+    s: Awaited<ReturnType<typeof setup>>,
+    accepts: (conversationId: string) => boolean,
+  ) {
+    const asked: string[] = [];
+    const delivered: TaskDue[] = [];
+    s.tasks.setEntrance('telegram', {
+      deliver: (due) => {
+        delivered.push(due);
+      },
+      accepts: (conversationId) => {
+        asked.push(conversationId);
+        return accepts(conversationId);
+      },
+    });
+    return { asked, delivered };
+  }
+
+  /** 一个 Telegram 群的会话，里面 Alice 让建的任务 */
+  async function inGroup(
+    s: Awaited<ReturnType<typeof setup>>,
+    chatId: string,
+    ...inputs: Array<Record<string, unknown>>
+  ) {
+    const id = await s.observed.createConversation({
+      platform: 'telegram',
+      platformConversationId: chatId,
+    });
+    for (const input of inputs) {
+      await s.run(
+        'create_task',
+        { action: '提醒一下', ...input },
+        { conversationId: id, triggers: [trigger(alice, 'm-src')] },
+      );
+    }
+    return id;
+  }
+
+  it('不收的会话：准时的和超时的任务都取消（记下结束时间），不写事件、不交给前端，各记一行日志；收的会话照旧', async () => {
+    const s = await setup();
+    const listening = await panel(s);
+    const removed = await inGroup(
+      s,
+      '-100',
+      { kind: 'once', at: '2026-11-09 21:31' },
+      { kind: 'daily', time: '21:35', action: '说说天气' },
+    );
+    const kept = await inGroup(s, '-200', { kind: 'once', at: '2026-11-09 21:31' });
+    const { asked, delivered } = fakeEntrance(s, (id) => id !== removed);
+    // 服务停着的时候过了点：t1、t3 晚了 10 秒，t2 晚了 11 分钟多（超时）
+    s.clock.advance(minute + 10_000);
+    await s.storage.updateTask(2, { nextDueAt: '2026-11-09T13:20:00.000Z' });
+
+    s.tasks.start();
+    await s.tasks.settled();
+
+    expect(await s.messages(removed)).toEqual([]);
+    for (const id of [1, 2]) {
+      const task = await s.storage.getTask(id);
+      expect(task).toMatchObject({
+        status: 'cancelled',
+        dueCount: 0,
+        endedAt: '2026-11-09T13:31:10.000Z',
+      });
+      expect(task).not.toHaveProperty('nextDueAt');
+    }
+    expect(
+      s.entries.filter((entry) => entry.msg === 'task.cancelled').map((entry) => entry.fields),
+    ).toEqual([
+      { taskId: 2, conversationId: removed, by: 'timer', reason: 'not_accepted' },
+      { taskId: 1, conversationId: removed, by: 'timer', reason: 'not_accepted' },
+    ]);
+    expect(
+      s.entries.filter((e) => ['task.due', 'task.missed'].includes(e.msg)).map((e) => e.fields),
+    ).toEqual([{ taskId: 3, conversationId: kept, lateMs: 10_000 }]);
+    // 每个会话问一次；收的照旧写事件、交给前端
+    expect([...asked].sort()).toEqual([kept, removed].sort());
+    expect((await s.messages(kept)).map((m) => m.metadata?.event?.type)).toEqual(['task']);
+    expect(delivered).toEqual([
+      { conversationId: kept, tasks: [{ id: 3, action: '提醒一下' }], fromSeq: 1 },
+    ]);
+    // 都结束了：不再等
+    expect(s.clock.pending()).toEqual([]);
+    // 面板照常收到取消的这一行（建三个、取消两个、到点一个）
+    const rows = await listening.tasks(6);
+    expect(
+      rows.filter((row) => row.status === 'cancelled').map((row) => [row.ref, row.endedAt]),
+    ).toEqual([
+      ['t2', '2026-11-09T13:31:10.000Z'],
+      ['t1', '2026-11-09T13:31:10.000Z'],
+    ]);
+  });
+
+  it('问不了（前端出错）：算收，照旧写事件、交给前端，记一行日志', async () => {
+    const s = await setup();
+    const id = await inGroup(s, '-100', { kind: 'once', at: '2026-11-09 21:31' });
+    const { delivered } = fakeEntrance(s, () => {
+      throw new Error('答不上来');
+    });
+    s.tasks.start();
+
+    await s.advance(minute);
+
+    expect((await s.messages(id)).map((m) => m.metadata?.event?.type)).toEqual(['task']);
+    expect(delivered).toHaveLength(1);
+    expect(await s.storage.getTask(1)).toMatchObject({ status: 'done', dueCount: 1 });
+    expect(s.entries.find((entry) => entry.msg === 'task.accepts_failed')).toEqual({
+      level: 'error',
+      msg: 'task.accepts_failed',
+      fields: { conversationId: id, error: 'Error: 答不上来' },
+    });
+  });
+
+  it('取消失败：不写事件、不交给前端；60 秒后再问、再试', async () => {
+    const s = await setup(scripted(), {
+      storage: {
+        ...createMemoryStorage(),
+        updateTask: async () => {
+          throw new Error('写不进去');
+        },
+      },
+    });
+    const id = await inGroup(s, '-100', { kind: 'once', at: '2026-11-09 21:31' });
+    const { asked, delivered } = fakeEntrance(s, () => false);
+    s.tasks.start();
+
+    await s.advance(minute);
+    expect(s.clock.pending()).toEqual([minute]);
+    await s.advance(minute);
+
+    expect(await s.messages(id)).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(asked).toEqual([id, id]);
+    expect(s.entries.filter((entry) => entry.msg === 'task.timer_failed')).toHaveLength(2);
+    expect((await s.storage.getTask(1))?.status).toBe('active');
   });
 });
 
@@ -1492,7 +1944,7 @@ describe('到点进 Telegram', () => {
     expect(s.entries.some((entry) => entry.msg === 'task.no_entrance')).toBe(false);
   });
 
-  it('群、私聊的用户被移出白名单之后，任务到点不回复：事件照写，只记一行日志（会话、任务、原因）', async () => {
+  it('群、私聊的用户被移出白名单之后任务到点（准时的、超时的都是）：任务取消，不写事件、不回复，记一行日志', async () => {
     const model = scripted(answer('不该出现'));
     const s = await setup(model);
     const t = await withTelegram(s);
@@ -1514,30 +1966,61 @@ describe('到点进 Telegram', () => {
         { conversationId: id, triggers: [trigger(bob, 'm-src')] },
       );
     }
+    // 私聊的那个服务停着时过了点：到时候算超时
+    await s.storage.updateTask(2, { nextDueAt: '2026-11-09T13:20:00.000Z' });
     s.tasks.start();
     await s.tasks.settled();
 
     await s.advance(minute);
-    const skipped = () => t.entries.filter((e) => e.msg === 'telegram.due_skipped');
-    await waitUntil(() => skipped().length === 2, '日志');
     await sleep(150);
 
-    expect(skipped().map((e) => e.fields)).toEqual(
+    expect(await kinds(s, inGroup)).toEqual([]);
+    expect(await kinds(s, withBob)).toEqual([]);
+    expect((await s.storage.listTasks()).map((task) => [task.id, task.status])).toEqual([
+      [1, 'cancelled'],
+      [2, 'cancelled'],
+    ]);
+    expect(
+      s.entries.filter((entry) => entry.msg === 'task.cancelled').map((entry) => entry.fields),
+    ).toEqual(
       expect.arrayContaining([
-        { conversationId: inGroup, tasks: [1], reason: 'not_allowed' },
-        { conversationId: withBob, tasks: [2], reason: 'not_allowed' },
+        { taskId: 1, conversationId: inGroup, by: 'timer', reason: 'not_accepted' },
+        { taskId: 2, conversationId: withBob, by: 'timer', reason: 'not_accepted' },
       ]),
     );
-    expect(skipped().map((e) => e.level)).toEqual(['info', 'info']);
-    expect(await kinds(s, inGroup)).toEqual(['task']);
-    expect(await kinds(s, withBob)).toEqual(['task']);
+    expect(t.entries.filter((e) => e.msg === 'telegram.due_skipped')).toEqual([]);
     expect(model.doStreamCalls).toHaveLength(0);
     expect(t.api.calls.map((call) => call.method).filter(isSend)).toEqual([]);
     expect(t.api.calls.map((call) => call.method)).not.toContain('sendChatAction');
     expect(s.lives().filter((event) => event.type === 'wait')).toEqual([]);
   });
 
-  it('取不到群（会话没有 chat id）：事件照写，只记日志，不回复', async () => {
+  it('兜底：问过以后白名单才变（不收的会话直接交给 bot）：不回复，只记一行日志（会话、任务、原因）', async () => {
+    const s = await setup();
+    const t = await withTelegram(s);
+    const id = await s.observed.createConversation({
+      platform: 'telegram',
+      platformConversationId: String(otherGroup.id),
+    });
+
+    t.telegram.bot.due({
+      conversationId: id,
+      tasks: [{ id: 9, ref: 't9', action: '提醒一下', platformMessageId: '5' }],
+    });
+    const skipped = () => t.entries.filter((e) => e.msg === 'telegram.due_skipped');
+    await waitUntil(() => skipped().length === 1, '日志');
+    await sleep(100);
+
+    expect(skipped()[0]).toEqual({
+      level: 'info',
+      msg: 'telegram.due_skipped',
+      fields: { conversationId: id, tasks: [9], reason: 'not_allowed' },
+    });
+    expect(t.api.calls.map((call) => call.method).filter(isSend)).toEqual([]);
+    expect(t.api.calls.map((call) => call.method)).not.toContain('sendChatAction');
+  });
+
+  it('取不到群（会话没有 chat id）：算不收，任务取消，不写事件、不回复', async () => {
     const model = scripted(answer('不该出现'));
     const s = await setup(model);
     const t = await withTelegram(s);
@@ -1551,17 +2034,13 @@ describe('到点进 Telegram', () => {
     await s.tasks.settled();
 
     await s.advance(minute);
-    const skipped = () => t.entries.find((e) => e.msg === 'telegram.due_skipped');
-    await waitUntil(() => skipped() !== undefined, '日志');
     await sleep(150);
 
-    expect(await kinds(s, id)).toEqual(['task']);
+    expect(await kinds(s, id)).toEqual([]);
+    expect((await s.storage.getTask(1))?.status).toBe('cancelled');
     expect(model.doStreamCalls).toHaveLength(0);
     expect(t.api.delivered).toEqual([]);
-    expect(skipped()).toMatchObject({
-      level: 'warn',
-      fields: { conversationId: id, tasks: [1], reason: 'no_chat', platform: 'telegram' },
-    });
+    expect(t.entries.filter((e) => e.msg === 'telegram.due_skipped')).toEqual([]);
   });
 
   it('引用不上（来源消息被删了）：照样发出，不带引用', async () => {
@@ -1645,6 +2124,8 @@ describe('到点进 Telegram', () => {
     expect(model.doStreamCalls).toHaveLength(1);
     expect(t.api.delivered).toMatchObject([{ text: '先说完这句', replyTo: asked }]);
     expect(await kinds(s, id)).toEqual(['user', 'user', 'assistant', 'task']);
+    // 正在退出不算不收：任务照常到点、完成，没有被取消
+    expect(await s.storage.getTask(1)).toMatchObject({ status: 'done', dueCount: 1 });
     expect(s.lives().some((event) => event.type === 'again')).toBe(false);
   });
 

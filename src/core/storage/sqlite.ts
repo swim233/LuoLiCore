@@ -624,7 +624,15 @@ export function openSqliteStorage(path: string): Storage {
                 `UPDATE tasks SET ${given.map((key) => `${taskColumns[key]} = ?`).join(', ')}
                  WHERE id = ? RETURNING *`,
               )
-              .get(...given.map((key) => normalized[key] ?? null), id);
+              .get(
+                ...given.map((key) =>
+                  // schedule 存成 JSON，与新建时相同
+                  key === 'schedule'
+                    ? JSON.stringify(normalized.schedule)
+                    : (normalized[key] ?? null),
+                ),
+                id,
+              );
       if (!row) throw new Error(`任务 ${id} 不存在`);
       return task(row);
     },
@@ -774,6 +782,8 @@ function modelCall(row: Record<string, unknown>): ModelCall {
 
 /** 修改任务时能改的几项与对应的列 */
 const taskColumns = {
+  action: 'action',
+  schedule: 'schedule',
   status: 'status',
   nextDueAt: 'next_due_at',
   lastDueAt: 'last_due_at',
