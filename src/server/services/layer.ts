@@ -45,12 +45,14 @@ export type ServiceResponse = {
   truncated: boolean;
 };
 
-/** 装上的服务里给工具看的部分 */
+/** 装上的服务里给工具、监视看的部分 */
 export type ServiceInfo = {
   name: string;
   title: string;
   summary: string;
   endpoints: Array<{ id: string; title: string; pathParams: string[]; query: string[] }>;
+  /** 最短多久查一次（秒），监视的间隔不能比它短 */
+  minIntervalSeconds: number;
 };
 
 export type ServiceLayer = {
@@ -66,6 +68,11 @@ export type ServiceLayer = {
     params?: unknown,
     options?: { signal?: AbortSignal },
   ): Promise<ServiceResponse>;
+  /**
+   * 只检查、不发请求（也不算次数）：服务装没装、有没有这个接口、参数过不过得了 call 的检查。
+   * 不过时抛 ServiceError（unknown、params），说明和 call 的相同
+   */
+  check(service: string, endpoint: string, params?: unknown): void;
   /**
    * 读文档：不给 section 时是总说明（overview.md），给了是那个接口的一节（<接口 id>.md）。
    * 每次都重新读文件；读不到时抛 ServiceError
@@ -111,6 +118,18 @@ export function createServiceLayer({
     return service;
   }
 
+  function endpointOf(service: InstalledService, id: string) {
+    const endpoint = service.definition.endpoints.find((candidate) => candidate.id === id);
+    if (!endpoint) {
+      const ids = list(service.definition.endpoints.map((candidate) => candidate.id));
+      throw new ServiceError(
+        'unknown',
+        `服务 ${service.definition.name} 没有接口 ${id}（有：${ids}）`,
+      );
+    }
+    return endpoint;
+  }
+
   return {
     services: services.map(({ definition }) => ({
       name: definition.name,
@@ -122,7 +141,12 @@ export function createServiceLayer({
         pathParams: pathParams(path) ?? [],
         query: [...query],
       })),
+      minIntervalSeconds: definition.limits.minIntervalSeconds,
     })),
+
+    check(name, endpointId, params = {}) {
+      buildPath(endpointOf(find(name), endpointId), params);
+    },
 
     async call(name, endpointId, params = {}, { signal } = {}) {
       const started = performance.now();
@@ -138,11 +162,7 @@ export function createServiceLayer({
       try {
         const service = find(name);
         known = true;
-        const endpoint = service.definition.endpoints.find(({ id }) => id === endpointId);
-        if (!endpoint) {
-          const ids = list(service.definition.endpoints.map(({ id }) => id));
-          throw new ServiceError('unknown', `服务 ${name} 没有接口 ${endpointId}（有：${ids}）`);
-        }
+        const endpoint = endpointOf(service, endpointId);
         knownEndpoint = true;
         const path = buildPath(endpoint, params);
 

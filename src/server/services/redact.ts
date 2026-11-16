@@ -1,4 +1,5 @@
 import { createRedactor } from '../../core/index.js';
+import { parseJson, stringifyJson } from './json.js';
 
 // 服务层交出去的文字里抹掉凭据（ADR-0014）：环境变量的值、贴上去的请求头的值、由环境变量算出来的主机名。
 // 服务可能把凭据回显在正文里，而且可能用 JSON 的转义写法（PHP 默认把 / 写成 \/，有的把每个字都写成
@@ -61,11 +62,12 @@ export function createServiceRedactor(
 
 /**
  * 正文是 JSON 时规整：解析再序列化（indent 是缩进的空格数，0 是一行），序列化只转义 `"`、`\` 和控制字符，
- * 凭据的别的转义写法都还原成了原文，抹的那一步一定认得出。不是 JSON 时原样
+ * 凭据的别的转义写法都还原成了原文，抹的那一步一定认得出。数字照原文的写法写回去，不走样
+ * （大整数、1.10，见 json.ts）。不是 JSON 时原样
  */
 export function normalizeJson(text: string, indent = 0): { text: string; json: boolean } {
   try {
-    return { text: JSON.stringify(JSON.parse(text), null, indent || undefined), json: true };
+    return { text: stringifyJson(parseJson(text), indent), json: true };
   } catch {
     return { text, json: false };
   }

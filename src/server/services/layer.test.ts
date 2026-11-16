@@ -202,6 +202,64 @@ describe('调一个接口', () => {
   });
 });
 
+describe('只检查、不发请求', () => {
+  it('服务、接口、参数的检查和 call 的一样；通过时什么都不做，不发请求，也不算次数', async () => {
+    const { server, service } = await local(echoPath);
+    const { layer, feeds, entries } = layerFor([service]);
+
+    expect(() => layer.check('demo', 'item', { id: '7', q: 'x' })).not.toThrow();
+    expect(() => layer.check('demo', 'search')).not.toThrow();
+    for (const [args, kind, message] of [
+      [['nope', 'item', {}], 'unknown', '没有这个服务：nope（有：demo）'],
+      [['demo', 'nope', {}], 'unknown', '服务 demo 没有接口 nope（有：item、search）'],
+      [['demo', 'search', { x: 1 }], 'params', '参数 x 不认识。接口 search 能用的参数：q'],
+      [
+        ['demo', 'item', {}],
+        'params',
+        '缺少路径参数 id。接口 item 能用的参数：id（路径参数，必填）、lang、q',
+      ],
+      [['demo', 'item', { id: '..' }], 'params', '路径参数 id 不能是空的、. 或 ..'],
+      [['demo', 'search', []], 'params', '参数要写成一个对象。接口 search 能用的参数：q'],
+    ] as const) {
+      let caught: unknown;
+      try {
+        layer.check(...(args as unknown as [string, string, unknown]));
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ServiceError);
+      expect([(caught as ServiceError).kind, (caught as ServiceError).message]).toEqual([
+        kind,
+        message,
+      ]);
+      // call 的说明一样
+      const viaCall = await failure(layer.call(...(args as unknown as [string, string, unknown])));
+      expect(viaCall.message).toBe(message);
+    }
+    expect(server.requests).toEqual([]);
+    expect(feeds.requestsOn('demo', '2026-11-16')).toBe(0);
+    // 日志只有那几次 call 的：检查不记日志
+    expect(entries.map((entry) => entry.msg)).toEqual(Array(6).fill('service.call'));
+  });
+});
+
+describe('正文里的数字', () => {
+  it('JSON 规整、排版时数字照原文：超过安全整数的编号、1.10 都不走样', async () => {
+    const { service } = await local(
+      ok('{"alerts":[{"id":202611161600008896177761,"level":1.10,"n":9007199254740993}]}', {
+        'content-type': 'application/json',
+      }),
+    );
+    const { layer } = layerFor([service]);
+
+    const { body } = await layer.call('demo', 'search');
+
+    expect(body).toContain('"id": 202611161600008896177761');
+    expect(body).toContain('"level": 1.10');
+    expect(body).toContain('"n": 9007199254740993');
+  });
+});
+
 describe('认证', () => {
   it('写在声明里的：环境变量的值加前缀放进请求头', async () => {
     const { server, service } = await local(ok('{}'), {
@@ -641,7 +699,7 @@ describe('读文档', () => {
     expect([missing.kind, missing.message]).toEqual(['docs', '服务 demo 的文档读不了：search.md']);
   });
 
-  it('装上的服务列在 services 里：名字、名称、简介、接口（id、名称、路径参数、查询参数）', () => {
+  it('装上的服务列在 services 里：名字、名称、简介、接口（id、名称、路径参数、查询参数）、最短间隔', () => {
     const { layer } = layerFor([fakeService()]);
     expect(layer.services).toEqual([
       {
@@ -652,6 +710,7 @@ describe('读文档', () => {
           { id: 'item', title: '条目', pathParams: ['id'], query: ['lang', 'q'] },
           { id: 'search', title: '搜索', pathParams: [], query: ['q'] },
         ],
+        minIntervalSeconds: 60,
       },
     ]);
   });
