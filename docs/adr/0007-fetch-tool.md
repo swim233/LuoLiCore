@@ -1,6 +1,6 @@
 # fetch：照 oh-my-pi 的主干，按群聊场景收窄
 
-第一个真正的工具是 fetch：读一个网址，把内容转成 Markdown 交给模型；网址本身是图片时，把图片交给模型看。它是通用工具，放在 `src/tools/fetch/`（ADR-0006）。
+第一个真正的工具是 fetch：读一个网址，把内容转成 Markdown 交给模型；网址本身是图片时，把图片交给模型看。它是通用工具，现在是插件 `plugins/fetch/`（ADR-0006、ADR-0014；第八阶段之前在 `src/tools/fetch/`）。
 
 设计参照开源 coding agent oh-my-pi（MIT）的网页读取。它的流程是一条长退路链：75 个站点处理器、按内容类型分派、HTML 依次试页面自带的 Markdown 版本、内容协商、一串转换器（自带的 Rust 转换器、trafilatura、lynx、两个付费服务、r.jina.ai），最后返回原始 HTML。我们取它的主干：站点处理器在前，通用请求按内容类型分派，HTML 本地转换，转不出时交给 r.jina.ai。去掉了重的分支：命令行工具、付费服务、PDF 与 Office 转换、全文另存翻页。又补上它没有的两样：内网防护，以及正文与整页两种模式。
 
