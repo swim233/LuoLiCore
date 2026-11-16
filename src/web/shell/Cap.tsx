@@ -1,11 +1,11 @@
 import { memo, useLayoutEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import { Badge } from '../components/Badge';
-import { env } from '@luoli/ui/env';
 import { SLOW } from '../lib/debug';
 import { desk, getDef, useDesk, useWidgetRefresh } from '../state/desk';
 import { expand, hideWidget } from '../state/actions';
-import { pop } from '../state/ui';
+import { PopoverTrigger } from '@luoli/ui/overlay';
+import { popHandle } from '../state/ui';
 import { setFace } from './faces';
 import { dragStart, wasDragged } from './drag';
 
@@ -27,40 +27,39 @@ export const Cap = memo(function Cap({ id, island = false }: { id: string; islan
         `${def.name}：${textRef.current.textContent}。单击展开`,
       );
   });
+  const capBtn = (
+    <button
+      ref={(el) => {
+        btnRef.current = el;
+        if (!island) setFace(id, 'capBtn')(el);
+      }}
+      className={'cap ll-sky' + (id === 'now' ? ' cap-now' : '') + (calling ? ' is-calling' : '')}
+      data-shape="pill"
+      type="button"
+      title="单击展开"
+      onClick={() => {
+        if (desk.get().arranging || wasDragged()) return;
+        expand(id);
+      }}
+      onPointerDown={(ev) => {
+        dragStart(ev, id, 'cap');
+      }}
+    >
+      <i className="w-edge" />
+      <span className="cap-icon">{id === 'now' ? <Badge size={26} /> : def.icon}</span>
+      <span className="cap-name">{def.name}</span>
+      <span className="cap-text" ref={textRef}>
+        {thumb}
+      </span>
+    </button>
+  );
   const inner = (
     <>
-      <button
-        ref={(el) => {
-          btnRef.current = el;
-          if (!island) setFace(id, 'capBtn')(el);
-        }}
-        className={'cap ll-sky' + (id === 'now' ? ' cap-now' : '') + (calling ? ' is-calling' : '')}
-        data-shape="pill"
-        type="button"
-        title="单击展开"
-        onClick={() => {
-          if (desk.get().arranging || wasDragged()) return;
-          expand(id);
-        }}
-        onPointerDown={(ev) => {
-          dragStart(ev, id, 'cap');
-        }}
-        onPointerEnter={
-          id === 'now'
-            ? (e) => {
-                if (env.hover && e.currentTarget) pop.show(e.currentTarget);
-              }
-            : undefined
-        }
-        onPointerLeave={id === 'now' ? () => pop.hide() : undefined}
-      >
-        <i className="w-edge" />
-        <span className="cap-icon">{id === 'now' ? <Badge size={26} /> : def.icon}</span>
-        <span className="cap-name">{def.name}</span>
-        <span className="cap-text" ref={textRef}>
-          {thumb}
-        </span>
-      </button>
+      {id === 'now' ? (
+        <PopoverTrigger handle={popHandle} openOnHover delay={0} closeDelay={0} render={capBtn} />
+      ) : (
+        capBtn
+      )}
       <button
         className="cap-x"
         type="button"

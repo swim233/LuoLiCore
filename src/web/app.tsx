@@ -8,7 +8,8 @@ import { DeskWrap } from './shell/Desk';
 import { TopBar } from './shell/TopBar';
 import { FullscreenLayer } from './shell/FullscreenLayer';
 import { MorphHost, motionBusy } from './shell/morph';
-import { ArrangeBar, Pop, Toast, Tray } from './shell/Overlays';
+import { Toaster } from '@luoli/ui/overlay';
+import { ArrangeBar, Pop, Tray } from './shell/Overlays';
 import { devSlot } from './lib/dev-slot';
 import { setArranging } from './state/actions';
 import { useDesk } from './state/desk';
@@ -125,7 +126,7 @@ export function App() {
       <canvas id="fx" className="fx" ref={fxRef} aria-hidden="true" />
       <Pop />
       {DevPanel && <DevPanel />}
-      <Toast />
+      <Toaster duration={2600} />
     </MotionConfig>
   );
 }

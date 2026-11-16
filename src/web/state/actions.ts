@@ -20,7 +20,7 @@ import {
   saveLayout,
   unregisterWidget,
 } from './desk';
-import { pop } from './ui';
+import { popHandle } from './ui';
 import {
   cloneFace,
   deskFace,
@@ -247,7 +247,7 @@ export function relayout(mutate: (() => void) | null, opts: RelayoutOpts = {}): 
         relayout(mutate, opts).then(res);
       }),
     );
-  pop.hide();
+  popHandle.close();
   const anim = motionOn() && !opts.instant;
   /* 桌面上还在走的形变：这次重排如果正好把它变回去（缩到一半又点开、展开到一半又缩回），就让它从此刻的位置原路退回；否则立刻收尾 */
   const running = morphStore.get().list.filter((m) => !m.dead && m.kind === 'desk');
@@ -642,7 +642,7 @@ export const nowCtl = {
     this.cancel();
     if (!desk.get().nowFloat) return;
     desk.set({ nowFloat: false, floatTop: null });
-    pop.hide();
+    popHandle.close();
     relayout(null);
     nowModel.clearEnded();
   },
@@ -892,7 +892,7 @@ export function openFull(id: string, params?: FullParams): void {
     return;
   }
   if (desk.get().arranging) setArranging(false);
-  pop.hide();
+  popHandle.close();
   const seq = ++fsSeq;
   const anim = motionOn();
   const face = deskFace(id);

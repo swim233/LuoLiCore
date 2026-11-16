@@ -13,7 +13,7 @@ import { TASKS_DEF } from './widgets/tasks/Tasks';
 import { TODAY_DEF } from './widgets/today/Today';
 import { desk, registerWidget } from './state/desk';
 import { closeFull, installPressTracking, setArranging } from './state/actions';
-import { pop } from './state/ui';
+import { popHandle } from './state/ui';
 import { hideGlides, installWheel } from '@luoli/ui/scroll';
 import { morphStore, motionBusy } from './shell/morph';
 import { chatEscAbort } from './widgets/chat/chatEsc';
@@ -63,7 +63,7 @@ export function boot({ todayAlways }: { todayAlways: boolean }) {
       setArranging(false);
       return;
     }
-    pop.hide();
+    popHandle.close();
   });
   status.emit();
   setTimeout(warmFs, 700);

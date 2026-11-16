@@ -6,12 +6,12 @@ import { Thumb } from '../../components/Hl';
 import { VirtualLog } from '@luoli/ui/scroll';
 import { skyLogHooks } from '../../components/bubble-sky';
 import { Pane } from '@luoli/ui/scroll';
-import { useGlide } from '@luoli/ui/scroll';
 import type { LogItem, ScrollState } from '@luoli/ui/scroll';
 import { IconChat } from '../../components/icons';
-import { Button, Chevron, Empty, IconButton, Notice, Spinner } from '@luoli/ui/controls';
+import { Button, Empty, IconButton, Notice, Spinner } from '@luoli/ui/controls';
 import { IconChevronLeft } from '@luoli/ui/icons';
 import { useStore } from '@luoli/ui/store';
+import { Menu, MenuButton, MenuContent, MenuItem } from '@luoli/ui/overlay';
 import { fmtDay, fmtShort } from '../../lib/util';
 import { bus } from '../../model/bus';
 import { partsOfChat, partsOfRow } from '../../model/bubble';
@@ -641,23 +641,12 @@ function ChatView({ mode }: ViewProps) {
   const c = db.conv(cur);
   const [menu, setMenu] = useState(false);
   const [detail, setDetail] = useState(true);
-  const barRef = useRef<HTMLDivElement>(null);
-  const pickRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!menu) return;
-    const outside = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (barRef.current?.querySelector('.chat-menu')?.contains(t) || pickRef.current?.contains(t))
-        return;
-      setMenu(false);
-    };
-    document.addEventListener('pointerdown', outside, true);
-    const off = bus.on('chat:switch', () => setMenu(false));
-    return () => {
-      document.removeEventListener('pointerdown', outside, true);
-      off();
-    };
+    return bus.on('chat:switch', () => setMenu(false));
   }, [menu]);
+  /* 选会话的菜单留在这个窗口的卡片里（库的 Menu 的 container）：窗口形变、整理时跟着卡片走，不会飘在别处 */
+  const [card, setCard] = useState<HTMLElement | null>(null);
   const convs = webConvs();
   const title = c ? c.title : '新对话';
   const body = cur ? <ChatLog key={'log-' + cur} convId={cur} /> : <NewLog key="log-new" />;
@@ -675,18 +664,33 @@ function ChatView({ mode }: ViewProps) {
       <Pane
         className="chat"
         top={
-          <div className="chat-bar" ref={barRef}>
-            <Button
-              className="chat-pick"
-              ref={pickRef}
-              aria-haspopup="true"
-              aria-expanded={menu}
-              title="切换对话"
-              onClick={() => setMenu(!menu)}
-            >
-              <span className="chat-pick-label">{title}</span>
-              <Chevron dir="down" />
-            </Button>
+          <div className="chat-bar">
+            <Menu open={menu} onOpenChange={setMenu}>
+              <MenuButton
+                kind="slot"
+                className="chat-pick"
+                ref={(el: HTMLButtonElement | null) => {
+                  const w = el ? el.closest<HTMLElement>('.w-card') : null;
+                  setCard((p) => (p === w ? p : w));
+                }}
+                title="切换对话"
+              >
+                {title}
+              </MenuButton>
+              <MenuContent container={card}>
+                {convs.map((x) => (
+                  <MenuItem
+                    key={x.id}
+                    current={x.id === cur}
+                    hint={fmtShort(db.lastAt(x.id))}
+                    onClick={() => switchTo(x.id)}
+                  >
+                    {x.title}
+                  </MenuItem>
+                ))}
+                <MenuItem onClick={() => newWebConv()}>＋ 新对话</MenuItem>
+              </MenuContent>
+            </Menu>
             <Button
               className="chat-new"
               onClick={() => {
@@ -696,7 +700,6 @@ function ChatView({ mode }: ViewProps) {
             >
               ＋ 新对话
             </Button>
-            {menu && <ChatMenu convs={convs} cur={cur} close={() => setMenu(false)} />}
           </div>
         }
         bottom={bottom}
@@ -758,57 +761,6 @@ function ChatView({ mode }: ViewProps) {
       >
         {body}
       </Pane>
-    </div>
-  );
-}
-
-/* 对话里选会话的下拉菜单：玻璃底；悬停时一块高亮跟着鼠标从一项滑到另一项（和会话列表同一套，@luoli/ui/scroll 的 useGlide） */
-function ChatMenu({
-  convs,
-  cur,
-  close,
-}: {
-  convs: ReturnType<typeof webConvs>;
-  cur: string | null;
-  close: () => void;
-}) {
-  const g = useGlide('.chat-menu > button');
-  return (
-    <div
-      className="chat-menu"
-      role="menu"
-      ref={(el) => {
-        g.list.current = el;
-      }}
-    >
-      <i className="ll-glide" ref={(el) => void (g.glide.current = el)} aria-hidden="true" />
-      {convs.map((x) => (
-        <button
-          key={x.id}
-          type="button"
-          role="menuitem"
-          className="ll-glide-item"
-          aria-current={x.id === cur}
-          onClick={() => {
-            close();
-            switchTo(x.id);
-          }}
-        >
-          <span>{x.title}</span>
-          <time>{fmtShort(db.lastAt(x.id))}</time>
-        </button>
-      ))}
-      <button
-        type="button"
-        role="menuitem"
-        className="ll-glide-item"
-        onClick={() => {
-          close();
-          newWebConv();
-        }}
-      >
-        <span className="chat-menu-new">＋ 新对话</span>
-      </button>
     </div>
   );
 }

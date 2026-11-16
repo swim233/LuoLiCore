@@ -4,6 +4,8 @@
    拷问定稿（.grill/ui/final.md）的取值：页面是夜蓝的底加两团辉光，部件是比页面亮一档的夜空窗口；金色只给洛璃（名字、星星、未读数）。
    这里只留面板自己的：全屏的暗层和外壳的布局尺寸。动画的曲线和时长（--ll-ease-out、--ll-dur-hover……）由 @luoli/ui/easing 在页面启动时再写进 <head> 里的 <style>（值和 tokens.css 里的一样，有 JS 时以它为准） */
 :root {
+  /* toast（库的 Toaster）离窗口底边 76px，安全区库自己再加 */
+  --ll-toast-bottom: 76px;
   /* 全屏时盖在桌面上的暗层（另有固定半径的模糊） */
   --scrim: color-mix(in srgb, var(--ll-bg) 62%, transparent);
   --scrim-narrow: color-mix(in srgb, var(--ll-bg) 80%, transparent);
@@ -445,11 +447,6 @@ body::before {
 .ll-pane > .tline {
   scrollbar-gutter: stable;
 }
-/* 上浮层里打开着下拉菜单（对话里选会话）：整层提到下浮层上面，矮的窗口里菜单压过输入框、点得到。
-   和窗口标题同一层（z 5）、排在它后面：上浮层顶上是透明、不接鼠标的空位，标题照旧看得见、点得到 */
-.ll-pane-top:has(.chat-menu) {
-  z-index: 5;
-}
 /* 形变结束、换回模糊时：模糊半径从 0 长到原样（库里写的同一条过渡）。
    !important：形变收尾时 unmorph 用 .no-tr 关掉了所有过渡，这一个要留着（库里不写 !important，层里的 !important 会盖过下面形变时关模糊的那一条） */
 .ll-pane-ov > i {
@@ -457,9 +454,16 @@ body::before {
 }
 /* 形变期间换成只有渐变的底：缩成胶囊、展开（复制层 .is-morphing、藏着的真身 [data-hide]）、全屏打开与关闭（全屏窗口 .is-morphing、
    桌面上被挪走的那份 [data-lifted]）、整理模式（整个期间卡片在晃，含拖动的副本）。停下来换回时模糊淡入（见上面的 transition）。
-   窗口里别的带模糊的东西（时间线顶上的小提示、会话菜单）同样关掉，复制层里从头到尾没有 backdrop-filter */
+   窗口里别的带模糊的东西（时间线顶上的小提示、库的菜单和弹出框的面）同样关掉，复制层里从头到尾没有 backdrop-filter */
 :is(.is-morphing, [data-hide], [data-lifted], .drag-clone, .arranging .w, .arr-leaving .w)
-  :is(.ll-pane-ov > i:not(.ll-pane-tn), .log-pill, .chat-menu, .term-jump) {
+  :is(
+    .ll-pane-ov > i:not(.ll-pane-tn),
+    .log-pill,
+    .ll-menu,
+    .ll-popover,
+    .ll-grow-surf,
+    .term-jump
+  ) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   transition: none !important;
@@ -1388,22 +1392,12 @@ body::before {
   animation: b-blink 0.8s ease-in-out infinite;
 }
 
-/* ---------- 弹出的各群状态 ---------- */
-.pop {
-  position: fixed;
-  z-index: 110;
-  min-width: 200px;
-  max-width: min(320px, calc(100vw - 32px));
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--ll-glass-edge);
-  font-size: 13px;
-  color: var(--ll-fg-2);
-  pointer-events: none;
+/* ---------- 弹出的各群状态 ----------
+   外壳（玻璃面、位置、翻面）是库的 Popover（Overlays.tsx 的 Pop）：这里只写最小宽度和里面的行 */
+.pop-body {
+  min-width: 224px;
 }
+
 .pop-title {
   font-size: 12px;
   color: var(--ll-fg-3);
@@ -2702,15 +2696,8 @@ body::before {
   min-width: 0;
   position: relative;
 }
-/* 选会话的按钮、「＋ 新对话」是库的 Button（md）：这里只留版面（选会话的标题太长时省略，「新对话」靠右）。
-   选会话的菜单开着时按钮保持亮着：库的 soft 按钮 aria-expanded='true' 时亮着 */
+/* 选会话的钮是库的下拉钮（MenuButton，槽），「＋ 新对话」是库的 Button（md）：这里只留版面（选会话的标题太长时省略由库的下拉钮管，「新对话」靠右） */
 .chat-pick {
-  min-width: 0;
-}
-.chat-pick-label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   min-width: 0;
 }
 .chat-new {
@@ -2730,66 +2717,7 @@ body::before {
   text-overflow: ellipsis;
   min-width: 0;
 }
-/* 选会话的下拉菜单：玻璃底；当前会话那项是强调色 15% 的底；悬停高亮同会话列表（.ll-glide） */
-.chat-menu {
-  --ll-glide-radius: 9px;
-  position: absolute;
-  left: 12px;
-  top: calc(100% - 2px);
-  z-index: 10;
-  width: min(280px, calc(100% - 24px));
-  /* 不超出窗口：窗口矮时在菜单里面滚（--ll-pane-ph 是窗格的高度，--ll-pane-ht 是上浮层到这一行下沿的高度） */
-  max-height: min(260px, calc(var(--ll-pane-ph, 9999px) - var(--ll-pane-ht, 0px) - 8px));
-  box-sizing: border-box;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 5px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  border-radius: 14px;
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--ll-glass-edge);
-  scrollbar-width: thin;
-  scrollbar-color: var(--ll-scrollbar) transparent;
-}
-.chat-menu > button {
-  position: relative;
-  z-index: 1;
-  flex: none;
-  width: 100%;
-  text-align: left;
-  padding: 7px 10px;
-  border-radius: 9px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--ll-fg-2);
-}
-.chat-menu > button[aria-current='true'] {
-  background: color-mix(in srgb, var(--ll-accent) 15%, transparent);
-  color: var(--ll-fg);
-}
-.chat-menu button span {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-.chat-menu time {
-  color: var(--ll-fg-dim);
-  font-size: 12px;
-  flex: none;
-}
-.chat-menu-new {
-  color: var(--ll-fg);
-}
+
 .chat .tline {
   --ll-pane-sc-pt: 10px;
   --ll-pane-sc-pb: 12px;
@@ -2977,7 +2905,7 @@ body::before {
 /* ---------- 任务 ----------
    任务部件：按会话分组的列表（窗格的滚动区，悬停高亮同会话列表），行的字号、行距、次要文字的颜色和会话列表一致；
    「下次到点」用强调色（蓝）：任务不是洛璃本人，不用金色。已结束的行整体暗一档。
-   全屏会话头部的浮层（.task-pop）借用 .chat-menu 的样子（玻璃底、模糊、形变期间关掉模糊的规则都在那一条上） */
+   全屏会话头部的浮层（.task-pop）是库的 Popover（长开），外壳（玻璃底、模糊、位置）库给，这里只写宽度、内边距和行的圆角 */
 .tasks {
   --ll-pane-sc-pt: 4px;
   --ll-pane-sc-pb: 8px;
@@ -3084,25 +3012,14 @@ body::before {
   flex: none;
   margin-left: auto;
 }
-.chat-menu.task-pop {
-  --ll-glide-radius: 9px;
-  left: auto;
-  right: -8px;
-  top: calc(100% + 4px);
+.task-pop {
+  --ll-popover-pad: 6px;
+  --ll-glide-radius: var(--ll-radius-md);
   width: min(420px, calc(100vw - 48px));
-  max-height: min(380px, calc(var(--ll-pane-ph, 9999px) - var(--ll-pane-ht, 0px) - 8px));
-  gap: 0;
-}
-/* 窗口里的头部窄：浮层相对头部（整排的宽度）定位，右对齐，宽度不超过窗口 */
-.sess-win-head .task-chip {
-  position: static;
-}
-.sess-win-head .chat-menu.task-pop {
-  right: 8px;
-  width: min(420px, calc(100% - 16px));
+  max-width: min(420px, var(--available-width, 420px));
 }
 .task-pop .task-row {
-  border-radius: 9px;
+  border-radius: var(--ll-radius-md);
 }
 
 /* ---------- 设置（骨架） ---------- */
@@ -3250,33 +3167,6 @@ body::before {
 }
 .per-row span:last-child {
   text-align: right;
-}
-
-.toast {
-  position: fixed;
-  z-index: 120;
-  left: 50%;
-  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
-  transform: translate(-50%, 12px);
-  max-width: calc(100vw - 32px);
-  padding: 9px 16px;
-  border-radius: 999px;
-  box-sizing: border-box;
-  background: var(--ll-glass-bg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--ll-glass-edge);
-  color: var(--ll-fg);
-  font-size: 13px;
-  opacity: 0;
-  pointer-events: none;
-  transition:
-    opacity 0.25s,
-    transform 0.25s var(--ll-ease-out);
-}
-.toast.is-on {
-  opacity: 1;
-  transform: translate(-50%, 0);
 }
 
 /* ---------- 窄屏：单列，「此刻」像灵动岛 ---------- */

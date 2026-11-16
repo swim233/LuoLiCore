@@ -103,9 +103,7 @@ export function occluded(face: Face, r: Rect) {
       if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
       const hit = document.elementsFromPoint(x, y).find((n) => !n.closest('#fs, #ghosts'));
       if (!hit || face.el.contains(hit)) continue;
-      const o = hit.closest(
-        '.w, .cap-wrap, .top, [data-dev], .tray, .arrange-bar, .pop, .island-slot',
-      );
+      const o = hit.closest('.w, .cap-wrap, .top, [data-dev], .tray, .arrange-bar, .island-slot');
       if (o && !face.el.contains(o) && !o.contains(face.el)) return true;
     }
   return false;
@@ -222,6 +220,15 @@ export function cloneFace(face: Face): CloneEl {
     const sd = scrollDrivenOpacity(a);
     ct.style.opacity = sd === null ? cs.opacity : String(sd);
   }
+  /* 库的浮层（菜单、弹出框）挂在窗口卡片里，复制时会连着它的副本一起走：副本里藏起来（不能删：按位置对滚动、动画用的下标不能错位）；
+     长开的浮层开着时钮被藏起来（data-away），副本里的钮要显示出来（上面照搬动画时可能把它的 opacity 也抄成了 0，一起去掉） */
+  c.querySelectorAll<HTMLElement>('.ll-menu-pos, .ll-popover-pos').forEach((n) => {
+    n.style.display = 'none';
+  });
+  c.querySelectorAll<HTMLElement>('[data-away]').forEach((n) => {
+    n.removeAttribute('data-away');
+    n.style.removeProperty('opacity');
+  });
   const all = src.querySelectorAll('*');
   c._scrolls = [];
   for (let i = 0; i < all.length; i++)

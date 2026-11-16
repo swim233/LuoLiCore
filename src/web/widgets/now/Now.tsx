@@ -14,7 +14,8 @@ import type { Session } from '../../model/nowModel';
 import { lastOnlineText, STATE_TEXT, STATE_TONE, status, useStatus } from '../../model/status';
 import { useAssistantName } from '../../model/who';
 import { nowCtl } from '../../state/actions';
-import { pop } from '../../state/ui';
+import { PopoverTrigger } from '@luoli/ui/overlay';
+import { popHandle } from '../../state/ui';
 import { stardustAtEnd, stardustStart } from './stardust';
 import { Terminal } from './Terminal';
 import type { ViewProps, WidgetDef } from '../types';
@@ -115,16 +116,20 @@ function NowView({ mode, handle }: ViewProps) {
   };
   const curId = pickSel();
   const topRef = useNowTop();
+  /* 大徽记只认悬停：不进 Tab 顺序、不写 role（Base UI 给 span 触发元素的默认是 tabindex=0 加 role=button，这里显式去掉，和换成库的浮层以前一样） */
   const badgeEl = (
-    <span
-      onPointerEnter={(e) => {
-        if (env.hover) pop.show(e.currentTarget as HTMLElement);
-      }}
-      onPointerLeave={() => pop.hide()}
-      style={{ display: 'inline-grid' }}
+    <PopoverTrigger
+      handle={popHandle}
+      openOnHover
+      delay={0}
+      closeDelay={0}
+      nativeButton={false}
+      tabIndex={undefined}
+      role={undefined}
+      render={<span style={{ display: 'inline-grid' }} />}
     >
       <Badge size={full ? 52 : 44} />
-    </span>
+    </PopoverTrigger>
   );
   let host: React.ReactNode;
   if (!full) {

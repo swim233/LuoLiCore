@@ -8,7 +8,8 @@ import { STATE_TEXT, useStatus } from '../model/status';
 import { useAssistantName } from '../model/who';
 import { hasDef, useDefsRev, useDesk } from '../state/desk';
 import { nowCtl, setArranging } from '../state/actions';
-import { pop } from '../state/ui';
+import { PopoverTrigger } from '@luoli/ui/overlay';
+import { popHandle } from '../state/ui';
 import { Cap } from './Cap';
 
 /* 顶栏：洛璃的状态按钮（点一下展开「此刻」）、窄屏时「此刻」的胶囊在正中（灵动岛）、整理、动画开关 */
@@ -27,19 +28,23 @@ export function TopBar() {
   return (
     <header className="top" id="top">
       <div className="top-in">
-        <button
-          className={'top-status' + (islandOn ? ' is-island-mode' : '')}
-          id="top-status"
-          type="button"
-          aria-label={`${name}的状态，点一下展开「此刻」`}
-          onClick={() => {
-            pop.hide();
-            nowCtl.manualExpand();
-          }}
-          onPointerEnter={(e) => {
-            if (e.pointerType === 'mouse') pop.show(e.currentTarget);
-          }}
-          onPointerLeave={() => pop.hide()}
+        <PopoverTrigger
+          handle={popHandle}
+          openOnHover
+          delay={0}
+          closeDelay={0}
+          render={
+            <button
+              className={'top-status' + (islandOn ? ' is-island-mode' : '')}
+              id="top-status"
+              type="button"
+              aria-label={`${name}的状态，点一下展开「此刻」`}
+              onClick={() => {
+                popHandle.close();
+                nowCtl.manualExpand();
+              }}
+            />
+          }
         >
           <span className="top-badge" id="top-badge">
             <Badge size={22} />
@@ -57,7 +62,7 @@ export function TopBar() {
               </>
             )}
           </span>
-        </button>
+        </PopoverTrigger>
         <div className="island-slot" id="island-slot">
           {islandOn && <Cap id="now" island />}
         </div>

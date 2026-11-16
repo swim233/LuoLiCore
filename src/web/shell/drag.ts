@@ -3,7 +3,7 @@ import { EASE_OUT } from '@luoli/ui/easing';
 import { motionOn } from '@luoli/ui/motion';
 import { desk, spanOf } from '../state/desk';
 import { hideWidget, placeBefore, unhideWidget } from '../state/actions';
-import { ui } from '../state/ui';
+import { popHandle, ui } from '../state/ui';
 import { realignSky } from '../components/bubble-sky';
 import { markBusy } from './morph';
 import { faces } from './faces';
@@ -174,6 +174,8 @@ export function dragStart(
   e0.preventDefault();
   const tray = document.getElementById('tray')!;
   function begin() {
+    /* 整理模式里拖「此刻」的胶囊：悬停着的状态弹出框马上收（以前是指针离开胶囊时收；库的弹出框要自己关） */
+    popHandle.close();
     const r = src!.getBoundingClientRect();
     offX = sx - r.left;
     offY = sy - r.top;
@@ -182,6 +184,11 @@ export function dragStart(
     clone.classList.remove('is-active', 'is-float', 'is-island');
     clone.removeAttribute('data-dragging');
     clone.classList.add('drag-clone');
+    /* 库的浮层的副本藏起来、被它藏起来的钮显示出来（同 cloneFace） */
+    clone.querySelectorAll<HTMLElement>('.ll-menu-pos, .ll-popover-pos').forEach((n) => {
+      n.style.display = 'none';
+    });
+    clone.querySelectorAll('[data-away]').forEach((n) => n.removeAttribute('data-away'));
     clone.style.cssText = `left:0;top:0;width:${r.width}px;height:${r.height}px;transform:translate(${r.left}px,${r.top}px)`;
     document.body.append(clone);
     realignSky(clone);
