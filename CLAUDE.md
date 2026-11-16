@@ -8,7 +8,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
 
 第一阶段（CLI MVP：多轮对话、重试与日志、中止、用量）、第二阶段（持久化与 Telegram）、第三阶段（工具接口与多步循环，ADR-0006）、第四阶段（fetch 工具与工具结果里的图片，ADR-0007）、第五阶段（请求记录与导出，ADR-0008）、第六阶段（洛璃服务与网页面板，ADR-0009）、第七阶段（定时任务，ADR-0010）已完成。第七阶段之后修过一轮网页面板（11 个问题，拷问记录在 `.grill/ui-fixes/`，已完成），又打磨过一轮（模糊过渡的曲线、平滑滚动、气泡的毛玻璃和洛璃气泡的配色、逐字输出时气泡的形变；拷问记录在 `.grill/ui-polish/`，结论和参数在那里的 `final.md`，已完成）。两轮留下没做的小问题记在 `.handoff/ui-fixes/notes-for-later.md`。
 
-正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 8 步（建包、设计变量、展示页、两批基础控件、滚动、浮层、表单控件）已完成；11 步做完再进第八阶段。
+正在做组件库：把网页面板里的组件抽成 `@luoli/ui`（`packages/ui/`），以后别的项目能复用。结论和 11 步的清单在 `.grill/component-lib/final.md`，每步的记录在 `.handoff/ui-lib/step-N/`。前 9 步（建包、设计变量、展示页、两批基础控件、滚动、浮层、表单控件、聊天内容）已完成；11 步做完再进第八阶段。
 
 之后的第八阶段是监视器、插件与动态，结论已写进 ADR-0010 的「以后怎么接」，开始前再确认一轮。登录与公网部署是第九阶段，设置的修改是第十阶段，各自开始前再拷问。
 
@@ -24,6 +24,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
   - 滚动用库的（`@luoli/ui/scroll`）：窗格 `Pane`（标题和输入框浮在内容上、上下渐变模糊）、长列表 `VirtualLog`（依赖 `@tanstack/react-virtual`，库里也声明了一份）、悬停高亮 `useGlide`、滚轮缓动 `installWheel`；滑动的算法在 `@luoli/ui/slide`。库不认识外壳，由面板在 `boot.ts` 里接上：形变开始时调 `hideGlides()`，大动画在不在走传给 `installWheel({ busy })`，气泡星空的重画经长列表的回调接上。点名外壳状态的样式（形变、整理期间关模糊等）留在面板的 `app.css`，对着库的类名写。「此刻」的终端自己滚，不用库的长列表。
   - 浮层用库的（`@luoli/ui/overlay`）：弹出框 `Popover`、下拉菜单 `Menu`、提示气泡 `Tooltip`、对话框 `Dialog` 和确认框 `ConfirmDialog`、`toast()`。用下拉钮（`MenuButton`、`PopoverButton`）打开的菜单和弹出框是「长开」：钮的底长成浮层的底，内容再出来；选值的钮用槽（`kind="slot"`），动作菜单用胶囊。面板这样接：根上挂一次 `<Toaster />`，`toast` 从 `state/ui` 转出；顶栏、胶囊、「此刻」徽记共用的那个悬停弹出框经 `popHandle`（`state/ui`）开关，形变、拖动开始时由面板关掉它；窗口里的菜单和弹出框把 `container` 设成所在的窗口，跟着窗口走；拖动、形变用的副本里把浮层去掉。点名外壳状态的样式留在 `app.css`，对着库的类名写。
   - 表单控件在 `@luoli/ui/forms`：单行输入 `Input`、密码 `PasswordInput`、数字 `NumberInput`、多行 `Textarea`、下拉选择 `Select`（和菜单一样「长开」）、复选框、单选、滑块 `Slider`、带校验的表单项 `Form` 与 `FormField`、列表编辑 `ListEdit`。默认尺寸是宽松档（高 32、字 13）。面板还没有用到（设置的修改是第十阶段）；`@luoli/ui/controls` 里只管摆放的表单项 `Field` 照旧。
+  - 聊天内容用库的（`@luoli/ui/chat`）：气泡 `ChatBubble`（含思考与工具的折叠）、`Markdown`、逐字输出 `Typed` 和光标 `Cursor`、正文高亮 `Hl`、图片 `Pic`、打字的三个点 `ChatTyping`、名字的颜色 `colorOf`。样式是单独的一份 `@luoli/ui/chat.css`，不在 `styles.css` 里，面板在入口另引一次；Markdown 的纯逻辑（一行预览等）另有不带组件的入口 `@luoli/ui/md`，面板的模型层引它。库不认识 AI SDK 的消息，由面板在 `model/bubble.ts` 里转成库的块（`ChatPart`），工具那一行写的话也在那里算好。面板这样接：根上放一次 `<ChatMentions>`（助手的名字、唤醒词、@用户名，正文里「提到她」的高亮用）；`boot.ts` 里调 `installBubbleFrame({ busy })`；气泡的毛玻璃经 `glass` 传进去，「预先糊好的星空」整套留在面板。点名面板部件的样式留在 `app.css`，对着库的类名写。库里的 `marked` 版本写死（`markdown.ts` 靠它内部的正则写法，升级靠测试把关）。
   - 库有自己的展示页：`pnpm ui:dev`（`127.0.0.1:5174`），不经过面板。
 - 洛璃服务（ADR-0009）：
   - 进程与入口：一个常驻进程。`pnpm start` 先构建网页（`pnpm web:build`），成功后再启动服务，构建失败就不启动；`pnpm serve` 只启动服务、不构建。设了 Telegram token 才启动 bot，没设时 stderr 提示一行；网页服务用 `LUOLI_WEB=off` 关闭，端口由 `LUOLI_WEB_PORT` 配置（默认 7310），被占用时报错退出。两个都没开时报错退出。
@@ -62,7 +63,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
   - 错过：服务停着、电脑睡眠，到点晚了超过 5 分钟的不补，写一条「任务超时」的事件（`createdAt` 是写入的时刻，原来该到点的时刻写进正文），不触发；周期任务错过几次也只写一条，然后接着算下一次。
 - 网页面板：
   - 技术：React + Motion，Vite 构建成静态文件，由服务提供。只管桌面 Chrome，保留窄屏和触屏的设计。
-  - Markdown：依赖 `marked`（用户已确认），只用它的词法分析，面板自己画成 React 元素；不用它的 HTML 输出，不用 `dangerouslySetInnerHTML`。挨着中日韩文字或全角标点的 `*` 放宽左右侧规则（`**注意：**请先备份` 能加粗），英文照 CommonMark。
+  - Markdown：依赖 `marked`（用户已确认），只用它的词法分析，由组件库（`@luoli/ui/chat`）画成 React 元素；不用它的 HTML 输出，不用 `dangerouslySetInnerHTML`。挨着中日韩文字或全角标点的 `*` 放宽左右侧规则（`**注意：**请先备份` 能加粗），英文照 CommonMark。
   - 不访问外网：字体随页面提供，不请求任何外部地址。
   - 网页自己的状态（未读数）由服务存在服务端，不进 core 的表。
   - 气泡的毛玻璃：用实时模糊。另有一套「预先糊好的星空」的做法（启动时糊一份垫在气泡里，滚动时每帧要对位、重画，主线程的开销比实时模糊大），代码留着，没有入口，只在开发模式的演示控制面板里能切；会话窗口里列表和时间线切换的那一下淡入淡出期间用它顶一下（那时实时模糊拿不到后面的画面）。
