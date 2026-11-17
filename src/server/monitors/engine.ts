@@ -521,7 +521,7 @@ export function createMonitorEngine({
       for (const { task, monitor, items, last } of entries) {
         const event = await host.writeEvent(task, {
           event: { type: 'monitor', taskId: task.id },
-          text: monitorEventText(task.action, items, monitor),
+          text: monitorEventText(task.action, `t${task.id}`, items, monitor),
         });
         // 没写进去：游标不动，下一次查完再试
         if (!event) continue;

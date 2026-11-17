@@ -533,7 +533,7 @@ describe('定时去查', () => {
         '标题 3\nlevel: red',
         '标题 4\nlevel: red',
         '标题 5\nlevel: red',
-        '其余 2 条仅列标题：\n- 标题 6\n- 标题 7',
+        '其余 2 条仅列标题：\n- 标题 6\n- 标题 7\n未写出内容的条目用 read_feed 查看（task 填 t1）。',
       ].join('\n\n'),
     );
   });
@@ -556,7 +556,7 @@ describe('定时去查', () => {
     expect(text).toContain('标题 2\nlevel: 长');
     expect(text).not.toContain('标题 3\nlevel');
     expect(text).toMatch(
-      /其余 6 条仅列标题：\n- 标题 3\n- 标题 4\n- 标题 5\n- 标题 6\n- 标题 7\n- 标题 8$/,
+      /其余 6 条仅列标题：\n- 标题 3\n- 标题 4\n- 标题 5\n- 标题 6\n- 标题 7\n- 标题 8\n未写出内容的条目用 read_feed 查看（task 填 t1）。$/,
     );
   });
 

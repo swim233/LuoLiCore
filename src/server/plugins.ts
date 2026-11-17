@@ -3,7 +3,7 @@ import type { Plugin } from '../plugin-api.js';
 import type { Env } from '../shared/config.js';
 import { setupTools } from '../shared/tools.js';
 import { createMonitorDoc, monitorDocClash, type MonitorDoc } from './monitors/docs.js';
-import { createTryMonitorTool } from './monitors/tools.js';
+import { createReadFeedTool, createTryMonitorTool } from './monitors/tools.js';
 import { installServices, type InstalledService } from './services/install.js';
 import type { ServiceLayer } from './services/layer.js';
 import { createServiceTools } from './services/tools.js';
@@ -12,7 +12,7 @@ import { createTaskTools } from './tasks/tools.js';
 
 // 插件（ADR-0014）：服务启动时分两步装配插件清单（plugins/index.ts）。先装插件：检查插件名，
 // 取出插件里的工具，装上插件声明的服务；再装工具：插件的工具、读文档与调服务两个工具（装上了服务时）、
-// 服务自己的任务工具（ADR-0010），最后是试跑监听的工具（装上了服务时），按这个顺序发给模型
+// 服务自己的任务工具（ADR-0010），最后是试跑监听、查动态两个工具（装上了服务时），按这个顺序发给模型
 
 /** 插件清单有误（名字不合规、重名）。信息里列出每个插件与它的问题 */
 export class PluginDefinitionError extends Error {
@@ -91,7 +91,7 @@ export function installPlugins({
 
 /**
  * 第二步，装工具：插件的工具在前；装上了服务时（给了服务层）接上读文档、调服务两个工具；
- * 然后是任务的四个工具；装上了服务时最后是试跑监听的工具（ADR-0014），这时 read_docs 能读元文档
+ * 然后是任务的四个工具；装上了服务时最后是试跑监听、查动态两个工具（ADR-0014），这时 read_docs 能读元文档
  * 「监听任务的写法」，建任务、改任务能写监听任务。按这个顺序发给模型。
  * 工具清单有误、元文档有误、有服务叫 monitor（和元文档重名）时返回错误信息（服务打到 stderr 后退出）；
  * 缺环境变量的工具不装，各提示一行（见 setupTools）。任务服务要等包过一层的存储建好才有，
@@ -108,11 +108,14 @@ export function setupServiceTools({
 }: {
   /** 插件里的工具（installPlugins 的结果） */
   tools: readonly ToolDefinition[];
-  /** 服务层；一个服务都没装上时（不给，或者里面没有服务）没有读文档、调服务、试跑监听三个工具，也不能建监听任务 */
+  /**
+   * 服务层；一个服务都没装上时（不给，或者里面没有服务）没有读文档、调服务、试跑监听、查动态四个工具，
+   * 也不能建监听任务
+   */
   services?: ServiceLayer;
   tasks: () => Pick<
     TaskService,
-    'create' | 'list' | 'cancelIn' | 'update' | 'now' | 'monitorStatus' | 'allows'
+    'create' | 'list' | 'cancelIn' | 'update' | 'now' | 'monitorStatus' | 'allows' | 'readFeed'
   >;
   env: Env;
   logger: Logger;
@@ -130,6 +133,7 @@ export function setupServiceTools({
       ...createServiceTools(layer, { monitorDoc }),
       ...createTaskTools(tasks, { monitors: { services: layer.services } }),
       createTryMonitorTool({ layer, checkConversation: (id) => tasks().allows(id) }),
+      createReadFeedTool({ tasks }),
     ],
     env,
     { logger, report },

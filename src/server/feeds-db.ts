@@ -52,6 +52,10 @@ CREATE TABLE watchers (
 );
 CREATE INDEX watchers_source ON watchers(source_id);
 `,
+  `
+-- 按来源取动态（往前翻、往后看、最后一条）不用把整张表读一遍再排序：id 是 rowid，在索引里按先后排好
+CREATE INDEX feed_items_source ON feed_items(source_id);
+`,
 ];
 
 /** 一条动态最多存多少字节 */
@@ -121,6 +125,8 @@ export type FeedsDb = {
   reserveRequest(service: string, day: string, limit: number): number | undefined;
   /** 找来源（按 sourceIdentity），没有时建一个 */
   ensureSource(spec: SourceSpec, at: string): FeedSource;
+  /** 找来源（按 sourceIdentity），没有时 undefined，不建 */
+  findSource(spec: SourceSpec): FeedSource | undefined;
   source(id: number): FeedSource | undefined;
   /**
    * 存一次查到的条目：没见过的编号存进来（按给的先后），见过的不动。data 超过 maxItemBytes 的截掉并标出。
@@ -137,6 +143,13 @@ export type FeedsDb = {
   itemsAfter(sourceId: number, after: number): FeedItem[];
   /** 这个来源的全部动态，按 id 的先后（测试、查看用） */
   items(sourceId: number): FeedItem[];
+  /** 这个来源一共存了几条动态 */
+  itemCount(sourceId: number): number;
+  /**
+   * 这个来源 id 小于 before 的动态（before 不给时从最新的起），由新到旧，最多 limit 条。
+   * 查动态的工具分批往前翻用
+   */
+  itemsBefore(sourceId: number, before: number | undefined, limit: number): FeedItem[];
   /** 查通了：记上次检查、上次成功的时间，清掉失败的记录 */
   recordSuccess(sourceId: number, at: string): void;
   /**
@@ -203,6 +216,10 @@ export function openFeedsDb(path: string): FeedsDb {
   const itemsAfter = db.prepare(
     'SELECT * FROM feed_items WHERE source_id = ? AND id > ? ORDER BY id',
   );
+  const itemsBefore = db.prepare(
+    'SELECT * FROM feed_items WHERE source_id = ? AND id < ? ORDER BY id DESC LIMIT ?',
+  );
+  const itemCount = db.prepare('SELECT COUNT(*) AS count FROM feed_items WHERE source_id = ?');
   const success = db.prepare(
     `UPDATE sources SET last_checked_at = ?, last_success_at = ?, failing_since = NULL,
        failures = 0, failure_kind = NULL, failure_status = NULL, failure_text = NULL,
@@ -259,6 +276,10 @@ export function openFeedsDb(path: string): FeedsDb {
         )!,
       );
     },
+    findSource(spec) {
+      const row = sourceByIdentity.get(sourceIdentity(spec));
+      return row && source(row);
+    },
     source(id) {
       const row = sourceById.get(id);
       return row && source(row);
@@ -281,6 +302,9 @@ export function openFeedsDb(path: string): FeedsDb {
     lastItemId: (sourceId) => Number(lastItem.get(sourceId)?.id ?? 0),
     itemsAfter: (sourceId, after) => itemsAfter.all(sourceId, after).map(feedItem),
     items: (sourceId) => itemsAfter.all(sourceId, 0).map(feedItem),
+    itemCount: (sourceId) => Number(itemCount.get(sourceId)?.count ?? 0),
+    itemsBefore: (sourceId, before, limit) =>
+      itemsBefore.all(sourceId, before ?? Number.MAX_SAFE_INTEGER, limit).map(feedItem),
     recordSuccess(sourceId, at) {
       success.run(at, at, sourceId);
     },

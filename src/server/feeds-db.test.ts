@@ -166,7 +166,7 @@ describe('feeds.db 的来源、动态、谁在盯', () => {
     feeds.close();
   });
 
-  it('版本 1 的库（只有每天的请求数）：打开时升到版本 2，计数还在；关掉再打开，来源和动态都在', () => {
+  it('版本 1 的库（只有每天的请求数）：打开时升到最新的版本，计数还在；关掉再打开，来源和动态都在', () => {
     const path = tempPath();
     const old = new DatabaseSync(path);
     old.exec(`
@@ -190,7 +190,117 @@ describe('feeds.db 的来源、动态、谁在盯', () => {
     expect(reopened.watcher(1)).toMatchObject({ sourceId: id });
     reopened.close();
     const check = new DatabaseSync(path, { readOnly: true });
-    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
     check.close();
+  });
+
+  it('版本 2 的库：打开时升到版本 3，每天的请求数、来源、动态、谁在盯都还在；按来源往前翻、往后看、最后一条照旧', () => {
+    const path = tempPath();
+    // 版本 2 的样子：照版本 2 的表结构写好数据，不经过版本 3 的程序
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE service_requests (
+        service TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (service, day)
+      );
+      CREATE TABLE sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, identity TEXT NOT NULL UNIQUE,
+        service TEXT NOT NULL, endpoint TEXT NOT NULL, params TEXT NOT NULL, items TEXT NOT NULL,
+        item_key TEXT NOT NULL, created_at TEXT NOT NULL, last_checked_at TEXT, last_success_at TEXT,
+        next_check_at TEXT, failing_since TEXT, failures INTEGER NOT NULL DEFAULT 0, failure_kind TEXT,
+        failure_status INTEGER, failure_text TEXT, failure_reported INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE feed_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL REFERENCES sources(id),
+        item_key TEXT NOT NULL, first_seen_at TEXT NOT NULL, data TEXT NOT NULL,
+        truncated INTEGER NOT NULL DEFAULT 0, UNIQUE (source_id, item_key)
+      );
+      CREATE TABLE watchers (
+        task_id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id),
+        cursor INTEGER, created_at TEXT NOT NULL
+      );
+      CREATE INDEX watchers_source ON watchers(source_id);
+      PRAGMA user_version = 2;
+    `);
+    old
+      .prepare(
+        `INSERT INTO sources (identity, service, endpoint, params, items, item_key, created_at,
+           last_success_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sourceIdentity(spec),
+        spec.service,
+        spec.endpoint,
+        JSON.stringify({ latitude: 31.23, localTime: true, longitude: 121.47 }),
+        spec.items,
+        spec.key,
+        at,
+        at,
+      );
+    old.exec(`INSERT INTO sources (identity, service, endpoint, params, items, item_key, created_at)
+      VALUES ('other', 'demo', 'search', '{}', 'list', 'id', '${at}')`);
+    const insert = old.prepare(
+      'INSERT INTO feed_items (source_id, item_key, first_seen_at, data) VALUES (?, ?, ?, ?)',
+    );
+    // 两个来源的动态交错着存：1、3、5 是第一个来源的
+    for (const [source, key] of [
+      [1, 'a'],
+      [2, 'x'],
+      [1, 'b'],
+      [2, 'y'],
+      [1, 'c'],
+    ] as const) {
+      insert.run(source, key, at, `{"id":"${key}"}`);
+    }
+    old.exec(`INSERT INTO service_requests VALUES ('qweather', '2026-11-16', 12);
+      INSERT INTO watchers VALUES (7, 1, 3, '${at}');`);
+    old.close();
+
+    const feeds = openFeedsDb(path);
+    expect(feeds.requestsOn('qweather', '2026-11-16')).toBe(12);
+    expect(feeds.findSource(spec)).toMatchObject({ id: 1, lastSuccessAt: at });
+    expect(feeds.watcher(7)).toEqual({ taskId: 7, sourceId: 1, cursor: 3, createdAt: at });
+    expect(feeds.itemCount(1)).toBe(3);
+    expect(feeds.lastItemId(1)).toBe(5);
+    expect(feeds.itemsAfter(1, 1).map(({ key }) => key)).toEqual(['b', 'c']);
+    expect(feeds.itemsBefore(1, undefined, 2).map(({ id, key }) => [id, key])).toEqual([
+      [5, 'c'],
+      [3, 'b'],
+    ]);
+    expect(feeds.itemsBefore(1, 3, 10).map(({ key }) => key)).toEqual(['a']);
+    expect(feeds.itemsBefore(2, undefined, 10).map(({ key }) => key)).toEqual(['y', 'x']);
+    // 升级以后照常写：新的编号接在后面，见过的不再存
+    expect(
+      feeds.storeItems(
+        1,
+        [
+          { key: 'd', data: '{"id":"d"}' },
+          { key: 'a', data: '{"id":"a"}' },
+        ],
+        at,
+      ),
+    ).toBe(1);
+    expect(feeds.itemsBefore(1, undefined, 1).map(({ key }) => key)).toEqual(['d']);
+    feeds.close();
+
+    const check = new DatabaseSync(path, { readOnly: true });
+    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+    check.close();
+  });
+
+  it('新建的库直接是最新的版本；比程序新的库打不开，文件不动', () => {
+    const path = tempPath();
+    openFeedsDb(path).close();
+    const created = new DatabaseSync(path, { readOnly: true });
+    expect(created.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+    created.close();
+
+    const newer = tempPath();
+    const raw = new DatabaseSync(newer);
+    raw.exec('PRAGMA user_version = 99');
+    raw.close();
+    expect(() => openFeedsDb(newer)).toThrow('feeds.db 的版本比程序新（文件为 99，程序支持 3）');
+    const after = new DatabaseSync(newer, { readOnly: true });
+    expect(after.prepare('PRAGMA user_version').get()?.user_version).toBe(99);
+    after.close();
   });
 });

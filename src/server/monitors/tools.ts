@@ -2,13 +2,15 @@ import { z } from 'zod';
 import { defineTool, ToolError, type ToolDefinition } from '../../core/index.js';
 import type { ServiceLayer } from '../services/layer.js';
 import { resultNotice } from '../services/tools.js';
+import { parseTaskRef, type TaskService } from '../tasks/service.js';
 import type { MonitorPurpose } from './describe.js';
+import { defaultFeedItems, maxFeedItems, type FeedLimits } from './feed.js';
 import { itemText, titleOf } from './format.js';
 import { fieldPaths } from './items.js';
 import { monitorFields, type MonitorField } from './rules.js';
 import { fetchFailureText, runTrial, type TrialResult } from './trial.js';
 
-// 监听的工具（ADR-0014）：试跑 try_monitor。由洛璃服务提供，装上了服务时才有
+// 监听的工具（ADR-0014）：试跑 try_monitor、查动态 read_feed。由洛璃服务提供，装上了服务时才有
 
 /** 试跑结果里写全的条数，其余只列标题 */
 const shownItems = 5;
@@ -159,4 +161,56 @@ export function trialText(result: Extract<TrialResult, { ok: true }>): string {
     }。`,
   );
   return lines.join('\n');
+}
+
+const readFeedDescription = [
+  '此工具用于查看监听任务已保存的条目。引擎每次执行时会保存获取到的新条目，创建任务时已存在的条目也在其中，任务取消后仍保留。',
+  '事件里仅列出标题的条目、之前触发过的内容、「最近有过什么」这类问题，用此工具查看；此工具不向服务发起请求。',
+  '仅能查看此会话的监听任务，task 填任务 id，如 t7。结果由新到旧，仅包含符合监听范围（where）的条目，每个条目给出标题和 show 的字段。',
+].join('\n');
+
+/**
+ * 造查动态的工具：只读 feeds.db 和任务表（经任务服务的 readFeed），不发请求。limits 是几道上限，
+ * 测试里换小
+ */
+export function createReadFeedTool({
+  tasks,
+  limits,
+}: {
+  tasks: () => Pick<TaskService, 'readFeed'>;
+  limits?: FeedLimits;
+}): ToolDefinition {
+  return defineTool({
+    name: 'read_feed',
+    description: readFeedDescription,
+    input: z.object({
+      task: z.string().describe('监听任务的 id，如 t7'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(maxFeedItems)
+        .optional()
+        .describe(`返回的条目数，1 到 ${maxFeedItems}，默认为 ${defaultFeedItems}`),
+      before: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('仅返回序号小于此值的条目，用于接着查看更早的条目；未填写时从最新的开始'),
+    }),
+    summary: ({ input }) => {
+      const id = typeof input.task === 'string' ? parseTaskRef(input.task) : undefined;
+      return id === undefined ? '条目' : `条目 · t${id}`;
+    },
+    async execute({ task, limit, before }, ctx) {
+      const result = await tasks().readFeed(ctx.conversation.id, task, {
+        limit,
+        before,
+        ...(limits ? { limits } : {}),
+      });
+      if (!result.ok) throw new ToolError(result.error);
+      return result.text;
+    },
+  });
 }

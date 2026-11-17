@@ -196,10 +196,12 @@ export function monitorLine(monitor: MonitorDescription, titles: ServiceTitles):
 /**
  * 监听触发的事件：第一行「监听触发：」加做什么；第二行说新的有几条、下面是查到的数据（只当数据看）；
  * 然后每条写成文字（最多 maxEventItems 条），其余只列标题。整条超过 maxEventChars 时从后面的条目起
- * 改成只列标题；只列标题还写不下时，后面的标题也不写，说还有几条
+ * 改成只列标题；只列标题还写不下时，后面的标题也不写，说还有几条。有条目没写出内容时，最后加一行
+ * 告诉她用 read_feed 查看（ref 是任务的 id，如 t7），这一行也算进上限
  */
 export function monitorEventText(
   action: string,
+  ref: string,
   items: readonly JsonObject[],
   monitor: Pick<MonitorDescription, 'title' | 'show'>,
 ): string {
@@ -216,8 +218,11 @@ export function monitorEventText(
       lines.push(full > 0 ? `其余 ${items.length - full} 条仅列标题：` : '仅列标题：');
       lines.push(...rest.map((title) => `- ${title}`));
     }
-    if (listed < items.length) lines.push(`另有 ${items.length - listed} 条未列出`);
-    if (lines.length > 0) parts.push(lines.join('\n'));
+    if (listed < items.length) lines.push(`另有 ${items.length - listed} 条未列出。`);
+    if (lines.length > 0) {
+      lines.push(`未写出内容的条目用 read_feed 查看（task 填 ${ref}）。`);
+      parts.push(lines.join('\n'));
+    }
     return parts.join('\n\n');
   };
   for (let full = Math.min(items.length, monitorLimits.maxEventItems); full >= 0; full--) {

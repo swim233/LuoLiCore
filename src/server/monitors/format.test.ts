@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseJson, type JsonObject } from '../services/json.js';
-import { itemText, titleOf } from './format.js';
+import { itemText, monitorEventText, titleOf } from './format.js';
 import { monitorLimits } from './rules.js';
 
 const item = parseJson(
@@ -56,5 +56,42 @@ describe('条目写成文字', () => {
     expect(title).toBe(`${'题'.repeat(max)}…（共 ${max + 5} 字，已截断）`);
     expect(d).toBe(`d: ${'字'.repeat(max)}`);
     expect(e).toBe(`e: ${'多'.repeat(max)}…（共 ${max + 1} 字，已截断）`);
+  });
+});
+
+describe('监听触发的事件', () => {
+  const entries = (count: number, value = 'red') =>
+    Array.from(
+      { length: count },
+      (_, i) => parseJson(JSON.stringify({ t: `标题 ${i + 1}`, level: value })) as JsonObject,
+    );
+  const monitor = { title: 't', show: ['level'] };
+  const hint = '未写出内容的条目用 read_feed 查看（task 填 t7）。';
+
+  it(`全部写了内容（不超过 ${monitorLimits.maxEventItems} 条）时没有 read_feed 那一行`, () => {
+    const text = monitorEventText('说一声', 't7', entries(monitorLimits.maxEventItems), monitor);
+    expect(text).toContain(`标题 ${monitorLimits.maxEventItems}\nlevel: red`);
+    expect(text).not.toContain('read_feed');
+  });
+
+  it('有条目只列了标题：那一段最后加一行，带上任务的 id', () => {
+    const count = monitorLimits.maxEventItems + 2;
+    const text = monitorEventText('说一声', 't7', entries(count), monitor);
+    expect(text.endsWith(`- 标题 ${count}\n${hint}`)).toBe(true);
+    expect(text.split(hint)).toHaveLength(2);
+  });
+
+  it(`标题也写不下（有「另有 N 条未列出。」）时照样有那一行，整条不超过 ${monitorLimits.maxEventChars} 字`, () => {
+    // 标题都是一千来字：只列标题也写不下全部
+    const long = Array.from(
+      { length: 12 },
+      (_, i) =>
+        parseJson(
+          JSON.stringify({ t: `${i + 1}${'题'.repeat(monitorLimits.maxShownChars)}`, level: 'x' }),
+        ) as JsonObject,
+    );
+    const text = monitorEventText('说一声', 't7', long, monitor);
+    expect([...text].length).toBeLessThanOrEqual(monitorLimits.maxEventChars);
+    expect(text).toMatch(/另有 \d+ 条未列出。\n未写出内容的条目用 read_feed 查看（task 填 t7）。$/);
   });
 });

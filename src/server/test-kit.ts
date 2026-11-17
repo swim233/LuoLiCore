@@ -13,7 +13,7 @@ import { createApp } from './app.js';
 import { createChats, type Chats } from './chat.js';
 import { createEvents } from './events.js';
 import type { FeedsDb } from './feeds-db.js';
-import { createTryMonitorTool } from './monitors/tools.js';
+import { createReadFeedTool, createTryMonitorTool } from './monitors/tools.js';
 import type { ServiceLayer } from './services/layer.js';
 import { createLive } from './live.js';
 import { observeStorage } from './observed-storage.js';
@@ -77,7 +77,7 @@ export function emptyViews() {
  * 接法装上（status 给了就用它代替）。给了 model 时再装上会话管理（回复由「此刻」旁听）、网页会话的
  * 对话接口与任务服务（网页会话的到点入口、取消任务的接口），接法与 main.ts 相同；taskTools 时
  * 任务工具接在 tools 后面。给了 monitors（服务层与 feeds.db）时任务服务带上监听的引擎；服务层里有服务时
- * 任务工具还能建、改监听任务，最后多一个试跑监听的工具。定时器不自己开始（测试里调 tasks.start()）。
+ * 任务工具还能建、改监听任务，最后多试跑监听、查动态两个工具。定时器不自己开始（测试里调 tasks.start()）。
  * request 默认带上本机的 Host
  */
 export async function testService({
@@ -154,6 +154,7 @@ export async function testService({
                     layer: serving,
                     checkConversation: (id) => tasks!.allows(id),
                   }),
+                  createReadFeedTool({ tasks: () => tasks! }),
                 ]
               : []),
           ],

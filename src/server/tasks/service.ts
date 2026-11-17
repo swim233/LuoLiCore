@@ -16,6 +16,7 @@ import {
   sourceSpec,
   type MonitorStatus,
 } from '../monitors/engine.js';
+import { feedText, type FeedLimits } from '../monitors/feed.js';
 import { monitorFactList, monitorLine, serviceTitles } from '../monitors/format.js';
 import type { MonitorItem } from '../monitors/items.js';
 import type { TaskMonitor } from '../types.js';
@@ -621,6 +622,28 @@ export function createTaskService({
      */
     async allows(conversationId: string | undefined): Promise<string | undefined> {
       return (await checkConversation(conversationId))?.error;
+    },
+
+    /**
+     * 查动态（read_feed）：ref 是 t7 或 7。这个会话的监听任务，进行中的、已经结束的都行；别的会话的、
+     * 不存在的、认不出的一律「任务不存在」（同 cancelIn，不透露别的会话有什么），定时任务另有一句。
+     * 结果的文字见 feedText。只读，不排进那一串
+     */
+    async readFeed(
+      conversationId: string | undefined,
+      ref: string,
+      options: { limit?: number; before?: number; limits?: FeedLimits } = {},
+    ): Promise<{ ok: true; text: string } | Failure> {
+      const id = parseTaskRef(ref);
+      const task =
+        id === undefined || conversationId === undefined ? undefined : await storage.getTask(id);
+      if (!task || task.conversationId !== conversationId) return fail('任务不存在');
+      const monitor = monitorOf(task);
+      if (!monitor) return fail('此任务为定时任务，没有保存的条目');
+      return {
+        ok: true,
+        text: feedText(monitors?.feeds, { ref: `t${task.id}`, monitor, ...options }),
+      };
     },
 
     /** 监听任务的检查状态（上次检查、上次成功、是不是查不到）；不是监听任务、没在盯时没有 */
