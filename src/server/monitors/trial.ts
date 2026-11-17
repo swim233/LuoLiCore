@@ -46,12 +46,12 @@ export async function fetchItems(
   try {
     data = parseJson(response.body);
   } catch {
-    const type = response.mimeType ?? '没写类型';
-    const cut = response.truncated ? '，而且太长、只读了前 1 MB' : '';
+    const type = response.mimeType ?? '未标明类型';
+    const cut = response.truncated ? '，且过长、仅读取了前 1 MB' : '';
     return {
       ok: false,
       step: 'parse',
-      error: `服务返回的正文不是 JSON（${type}${cut}）。监视只能盯返回 JSON 的接口`,
+      error: `服务返回的正文不是 JSON（${type}${cut}）。监听任务仅支持返回 JSON 的接口`,
     };
   }
   const extracted = extractItems(data, monitor);
@@ -63,11 +63,11 @@ export async function fetchItems(
 export function fetchFailureText(failure: Extract<FetchResult, { ok: false }>): string {
   switch (failure.step) {
     case 'call':
-      return `调接口出错。${failure.error}`;
+      return `调用接口出错。${failure.error}`;
     case 'parse':
       return failure.error;
     case 'items':
-      return `返回的样子和描述对不上。${failure.error}`;
+      return `返回数据的结构与描述不符。${failure.error}`;
   }
 }
 

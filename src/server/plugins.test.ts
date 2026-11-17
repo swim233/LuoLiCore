@@ -86,7 +86,7 @@ describe('服务启动时装配插件与工具', () => {
       'QWEATHER_KEY_ID',
       'QWEATHER_PRIVATE_KEY_FILE',
     ];
-    expect(lines).toEqual([`服务 qweather 没有装上：缺少环境变量 ${missing.join('、')}`]);
+    expect(lines).toEqual([`服务 qweather 未安装：缺少环境变量 ${missing.join('、')}`]);
     expect(entries).toEqual([
       { level: 'warn', msg: 'services.skipped', fields: { service: 'qweather', missing } },
       { level: 'info', msg: 'services.installed', fields: { services: [] } },
@@ -161,14 +161,14 @@ describe('服务启动时装配插件与工具', () => {
     expect(error).toBe('工具定义有误：same（重名）；list_tasks（重名）');
   });
 
-  it('有服务叫 monitor（和监视任务的文档重名）、监视任务的文档有误：返回错误信息（服务打到 stderr 后退出）', () => {
+  it('有服务叫 monitor（和监听任务的文档重名）、监视任务的文档有误：返回错误信息（服务打到 stderr 后退出）', () => {
     expect(
       assemble([definePlugin({ name: 'a', services: [fakeService({ name: 'monitor' })] })]).error,
-    ).toBe('服务名 monitor 和监视任务的文档重名，服务改个名字');
+    ).toBe('服务名 monitor 和监听任务的文档重名，服务改个名字');
     const broken = createMonitorDoc({ file: join(tempDir(), 'none.md') });
     expect(
       assemble([definePlugin({ name: 'a', services: [fakeService()] })], {}, broken).error,
-    ).toBe('监视任务的文档（src/server/monitors/docs/monitor.md）读不了：ENOENT');
+    ).toBe('监听任务的文档（src/server/monitors/docs/monitor.md）读不了：ENOENT');
     // 没装上服务时没有监视，不看元文档
     expect(assemble([definePlugin({ name: 'a', tools: [tool('a1')] })], {}, broken).names).toEqual([
       'a1',
@@ -190,7 +190,7 @@ describe('服务启动时装配插件与工具', () => {
     ]);
 
     expect(names).toEqual(['free', ...taskToolNames]);
-    expect(lines).toEqual(['工具 needs_key 没有装上：缺少环境变量 LUOLI_TEST_KEY']);
+    expect(lines).toEqual(['工具 needs_key 未安装：缺少环境变量 LUOLI_TEST_KEY']);
     expect(entries).toEqual([
       { level: 'info', msg: 'services.installed', fields: { services: [] } },
       {
@@ -220,7 +220,7 @@ describe('装配服务', () => {
 
     expect(services).toEqual(['free']);
     expect(names).toEqual(['read_docs', 'call_service', ...taskToolNames, ...monitorToolNames]);
-    expect(lines).toEqual(['服务 needs 没有装上：缺少环境变量 LUOLI_TEST_B']);
+    expect(lines).toEqual(['服务 needs 未安装：缺少环境变量 LUOLI_TEST_B']);
     expect(entries.slice(0, 2)).toEqual([
       {
         level: 'warn',

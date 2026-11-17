@@ -152,14 +152,14 @@ export function everyText(minutes: unknown): string | undefined {
 
 /**
  * 一句人话的周期：「一次性」「每天 08:00」「每个工作日 08:00，到 12-31 为止」「每周二 20:00」
- * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日。监视任务是「每 10 分钟查一次」
+ * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日。监视任务是「每 10 分钟执行一次」
  * （带服务、接口名称的那一行由监视那边写）
  */
 export function describeSchedule(schedule: TaskSchedule, now: Date): string {
   if (schedule.kind === 'once') return '一次性';
   if (schedule.kind === 'monitor') {
     const every = everyText(schedule.monitor.interval_minutes);
-    return every ? `${every}查一次` : '监视任务';
+    return every ? `${every}执行一次` : '监听任务';
   }
   const base = (() => {
     switch (schedule.kind) {
@@ -191,37 +191,37 @@ export function scheduleFrom(
 ): { ok: true; schedule: TaskSchedule; next: Date } | { ok: false; error: string } {
   const fail = (error: string) => ({ ok: false as const, error });
   const given = (value: string | number | undefined) => value !== undefined && value !== '';
-  const nowText = `现在是 ${formatDue(now)}`;
+  const nowText = `当前时间 ${formatDue(now)}`;
 
   if (input.kind === 'once') {
     const extra = (['time', 'weekday', 'day', 'until'] as const).filter((key) => given(input[key]));
     if (extra.length > 0) {
-      return fail(`一次性任务只写 at，不用 ${extra.join('、')}`);
+      return fail(`一次性任务只需填写 at，无需填写 ${extra.join('、')}`);
     }
-    if (!given(input.at)) return fail('一次性任务要写 at：到点的时刻，如 2026-11-10 09:00');
+    if (!given(input.at)) return fail('一次性任务须填写 at：触发的时刻，如 2026-11-10 09:00');
     const at = parseLocalTime(input.at!);
-    if (!at) return fail('at 的写法不对：写成 2026-11-10 09:00（按服务器的时区，日期要存在）');
-    if (at.getTime() <= now.getTime()) return fail(`这个时刻已经过了（${nowText}）`);
+    if (!at) return fail('at 的格式有误：应写作 2026-11-10 09:00（按服务器的时区，日期须存在）');
+    if (at.getTime() <= now.getTime()) return fail(`此时刻已过（${nowText}）`);
     const latest = new Date(now);
     latest.setFullYear(latest.getFullYear() + maxYearsAhead);
     if (at.getTime() > latest.getTime()) {
-      return fail(`最远只能约到一年后（${formatLocal(latest)}）`);
+      return fail(`最长只能设到一年后（${formatLocal(latest)}）`);
     }
     return { ok: true, schedule: { kind: 'once', at: at.toISOString() }, next: at };
   }
 
-  if (given(input.at)) return fail('周期任务不用 at，到点的时刻写在 time 里（HH:mm）');
-  if (!given(input.time)) return fail('周期任务要写 time：每次到点的时刻，如 08:00');
+  if (given(input.at)) return fail('周期任务无需填写 at，触发的时刻填在 time 里（HH:mm）');
+  if (!given(input.time)) return fail('周期任务须填写 time：每次触发的时刻，如 08:00');
   const time = parseClock(input.time!);
-  if (!time) return fail('time 的写法不对：写成 HH:mm，如 08:00');
-  if (input.kind !== 'weekly' && given(input.weekday)) return fail('只有 weekly 用 weekday');
-  if (input.kind !== 'monthly' && given(input.day)) return fail('只有 monthly 用 day');
+  if (!time) return fail('time 的格式有误：应写作 HH:mm，如 08:00');
+  if (input.kind !== 'weekly' && given(input.weekday)) return fail('weekday 仅用于 weekly');
+  if (input.kind !== 'monthly' && given(input.day)) return fail('day 仅用于 monthly');
 
   let until: string | undefined;
   if (given(input.until)) {
     const end = endOfLocalDay(input.until!);
-    if (!end) return fail('until 的写法不对：写成 2026-12-31（含这一天，日期要存在）');
-    if (end.getTime() < now.getTime()) return fail(`截止日期已经过了（${nowText}）`);
+    if (!end) return fail('until 的格式有误：应写作 2026-12-31（含当天，日期须存在）');
+    if (end.getTime() < now.getTime()) return fail(`截止日期已过（${nowText}）`);
     until = end.toISOString();
   }
   const limit = until === undefined ? {} : { until };
@@ -234,16 +234,16 @@ export function scheduleFrom(
       break;
     case 'weekly': {
       const weekday = input.weekday;
-      if (weekday === undefined) return fail('weekly 要写 weekday：1–7，1 是周一，7 是周日');
+      if (weekday === undefined) return fail('weekly 须填写 weekday：1–7，1 为周一，7 为周日');
       if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) {
-        return fail('weekday 只能是 1–7 的整数：1 是周一，7 是周日');
+        return fail('weekday 只能是 1–7 的整数：1 为周一，7 为周日');
       }
       schedule = { kind: 'weekly', weekday, time, ...limit };
       break;
     }
     case 'monthly': {
       const day = input.day;
-      if (day === undefined) return fail('monthly 要写 day：1–31');
+      if (day === undefined) return fail('monthly 须填写 day：1–31');
       if (!Number.isInteger(day) || day < 1 || day > 31) return fail('day 只能是 1–31 的整数');
       schedule = { kind: 'monthly', day, time, ...limit };
       break;
@@ -252,6 +252,6 @@ export function scheduleFrom(
       return fail('kind 只能是 once、daily、weekdays、weekly、monthly');
   }
   const next = nextDue(schedule, now);
-  if (!next) return fail(`截止日期之前没有能到点的时间了（${nowText}）`);
+  if (!next) return fail(`截止日期之前已没有可触发的时间（${nowText}）`);
   return { ok: true, schedule, next };
 }

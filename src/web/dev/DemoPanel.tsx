@@ -123,7 +123,7 @@ export function DemoPanel() {
                 data-act="task-due"
                 title="读书会：事件 → 等待合并 → 带任务的回复"
               >
-                任务到点（群）
+                任务触发（群）
               </button>
               <button
                 className="dbtn"
@@ -131,15 +131,15 @@ export function DemoPanel() {
                 data-act="task-due-web"
                 title="网页会话：没有请求接流，对话里写「正在回复」，「此刻」不自动展开"
               >
-                任务到点（网页）
+                任务触发（网页）
               </button>
               <button
                 className="dbtn"
                 type="button"
                 data-act="task-due-busy"
-                title="先触发一次回复，回复中再到点"
+                title="先触发一次回复，回复中任务再触发"
               >
-                回复中到点
+                回复中触发
               </button>
               <button
                 className="dbtn"
@@ -147,7 +147,7 @@ export function DemoPanel() {
                 data-act="task-due-two"
                 title="星空观测站：两个任务一起"
               >
-                同时到点两个
+                同时触发两个
               </button>
               <button
                 className="dbtn"
@@ -156,6 +156,22 @@ export function DemoPanel() {
                 title="只写事件，不回复"
               >
                 任务超时
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="monitor-due"
+                title="读书会：监听到新的预警 → 等待合并 → 带任务的回复，「此刻」里标出「监听触发」"
+              >
+                监听触发（群）
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="monitor-failed"
+                title="读书会：监听满 6 小时仍执行失败，会话里说一次，「此刻」里标出「监听失败」"
+              >
+                监听失败（群）
               </button>
               <button
                 className="dbtn is-wide"

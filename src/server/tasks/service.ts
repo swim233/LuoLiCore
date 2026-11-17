@@ -16,7 +16,7 @@ import {
   sourceSpec,
   type MonitorStatus,
 } from '../monitors/engine.js';
-import { monitorLine, serviceTitles } from '../monitors/format.js';
+import { monitorFactList, monitorLine, serviceTitles } from '../monitors/format.js';
 import type { MonitorItem } from '../monitors/items.js';
 import type { TaskMonitor } from '../types.js';
 import { fetchFailureText, fetchItems } from '../monitors/trial.js';
@@ -59,9 +59,15 @@ export const systemClock: Clock = {
 
 /**
  * 到点的一个任务：前端据此在「此刻」标出。platformMessageId 是任务来源消息在平台上的 id
- * （Telegram 的回复引用它）；来源没有时没有。monitor：是监视任务（查到了新的东西，或者连续查不到）
+ * （Telegram 的回复引用它）；来源没有时没有。event：监视任务写的是哪种事件（monitor 查到了新的东西，
+ * monitor-failed 连续查不到）；定时任务没有
  */
-export type DueTask = { id: number; action: string; platformMessageId?: string; monitor?: true };
+export type DueTask = {
+  id: number;
+  action: string;
+  platformMessageId?: string;
+  event?: 'monitor' | 'monitor-failed';
+};
 
 /**
  * 交给前端的一次到点：这个会话有任务到点了，事件已经写进去，前端当作一次触发。同一个会话同时到点的
@@ -469,10 +475,10 @@ export function createTaskService({
   async function checkConversation(
     conversationId: string | undefined,
   ): Promise<Failure | undefined> {
-    if (conversationId === undefined) return fail('不在任何会话里，用不了任务');
+    if (conversationId === undefined) return fail('当前不在任何会话中，无法使用任务');
     const overview = await storage.overview(conversationId);
-    if (!overview) return fail('没有这个会话');
-    if (overview.platform === 'cli') return fail('CLI 会话不能建任务');
+    if (!overview) return fail('会话不存在');
+    if (overview.platform === 'cli') return fail('CLI 会话不能创建任务');
     return undefined;
   }
 
@@ -503,12 +509,12 @@ export function createTaskService({
         const action = checkAction(input.action);
         if (!action.ok) return action;
         if (input.monitor !== undefined) {
-          return fail('monitor 只在 kind 写 monitor 时写：定时任务不用描述');
+          return fail('monitor 仅在 kind 为 monitor 时填写：定时任务无需描述');
         }
         const timing = scheduleFrom({ ...input, kind: input.kind as ScheduleKind }, clock.now());
         if (!timing.ok) return timing;
         const active = await storage.listTasks({ conversationId, status: 'active' });
-        if (active.length >= maxActive) return fail('这个会话的任务满了，先取消几个');
+        if (active.length >= maxActive) return fail('此会话的任务已达上限，请先取消几个');
         const task = await storage.createTask({
           conversationId,
           action: action.text,
@@ -544,7 +550,7 @@ export function createTaskService({
         const id = parseTaskRef(ref);
         const task = id === undefined ? undefined : await storage.getTask(id);
         if (!task || task.conversationId !== conversationId || task.status !== 'active') {
-          return fail('没有这个任务');
+          return fail('任务不存在');
         }
         return { ok: true, task: await end(task, 'tool') };
       });
@@ -566,23 +572,25 @@ export function createTaskService({
         if (!current.ok) return current;
         const { task } = current;
         if (input.monitor !== undefined || input.kind === 'monitor') {
-          return fail('这是定时任务，不能改成监视任务：要盯着什么，取消它再建一个监视任务');
+          return fail(
+            '此任务为定时任务，不能改为监听任务：需要监听时，取消此任务后另行创建监听任务',
+          );
         }
         const action = input.action?.trim();
         const timed = scheduleKeys.some((key) => given(input[key]));
         if (!action && !timed) {
-          return fail('至少改一样：写新的 action，或者新的时间（kind 和它要的几项）');
+          return fail('至少修改一项：填写新的 action，或者新的时间（kind 及其需要的参数）');
         }
         const changes: TaskChanges = {};
         if (action) {
           if ([...action].length > maxActionChars) {
-            return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+            return fail(`action 最多 ${maxActionChars} 个字，请写成一句话`);
           }
           changes.action = action;
         }
         if (timed) {
           if (input.kind === undefined) {
-            return fail('改时间要写 kind：时间整个换成新的，kind 和它要的几项都要写');
+            return fail('修改时间须填写 kind：时间整体替换，kind 及其需要的参数都要填写');
           }
           const timing = scheduleFrom({ ...input, kind: input.kind }, clock.now());
           if (!timing.ok) return timing;
@@ -627,8 +635,13 @@ export function createTaskService({
     monitorView(task: Task): TaskMonitor | undefined {
       const monitor = monitorOf(task);
       if (!monitor || task.schedule.kind !== 'monitor') return undefined;
-      const line = monitorLine(monitor, serviceTitles(monitors?.layer.services ?? []));
-      return { description: task.schedule.monitor, line, ...engine?.status(task.id) };
+      const titles = serviceTitles(monitors?.layer.services ?? []);
+      return {
+        description: task.schedule.monitor,
+        line: monitorLine(monitor, titles),
+        facts: monitorFactList(monitor, titles),
+        ...engine?.status(task.id),
+      };
     },
 
     /**
@@ -707,9 +720,9 @@ export function createTaskService({
   /** 「做什么」：去掉首尾空白，不能是空的，不能太长 */
   function checkAction(raw: string): { ok: true; text: string } | Failure {
     const text = raw.trim();
-    if (!text) return fail('action 不能是空的：写明到点时要做什么');
+    if (!text) return fail('action 不能为空：写明触发时要做什么');
     if ([...text].length > maxActionChars) {
-      return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+      return fail(`action 最多 ${maxActionChars} 个字，请写成一句话`);
     }
     return { ok: true, text };
   }
@@ -724,7 +737,7 @@ export function createTaskService({
     const id = parseTaskRef(ref);
     const task = id === undefined ? undefined : await storage.getTask(id);
     if (!task || task.conversationId !== conversationId || task.status !== 'active') {
-      return fail('没有这个任务');
+      return fail('任务不存在');
     }
     return { ok: true, task };
   }
@@ -750,7 +763,7 @@ export function createTaskService({
   ): Promise<{ ok: true; items: MonitorItem[]; warnings: string[] } | Failure> {
     const fetched = await fetchItems(monitors!.layer, monitor, { signal });
     if (fetched.ok) return fetched;
-    return fail(`${doing}：照描述真的查了一次，没通过。${fetchFailureText(fetched)}`);
+    return fail(`${doing}：按描述实际执行了一次请求，未通过。${fetchFailureText(fetched)}`);
   }
 
   /**
@@ -767,26 +780,27 @@ export function createTaskService({
     const action = checkAction(input.action);
     if (!action.ok) return action;
     if (!monitors || monitors.layer.services.length === 0) {
-      return fail('现在一个服务都没有装上，建不了监视任务');
+      return fail('当前没有已安装的服务，无法创建监听任务');
     }
     const extra = scheduleKeys.filter((key) => key !== 'kind' && given(input[key]));
     if (extra.length > 0) {
       return fail(
-        `监视任务不写时间的那几项（${extra.join('、')}）：多久查一次写在 monitor 的 interval_minutes 里`,
+        `监听任务无需填写时间相关的参数（${extra.join('、')}）：监听间隔填在 monitor 的 interval_minutes 里`,
       );
     }
     if (input.monitor === undefined) {
-      return fail('kind 写 monitor 时要写 monitor：监视任务的描述，写法见 read_docs 的 monitor');
+      return fail('kind 为 monitor 时须填写 monitor：监听任务的描述，写法见 read_docs 的 monitor');
     }
     const checked = checkMonitor(input.monitor, { services: monitors.layer, purpose: 'task' });
-    if (!checked.ok) return fail(`描述有问题，改了再建：\n${problemLines(checked.problems)}`);
+    if (!checked.ok)
+      return fail(`描述有问题，请修改后重新创建：\n${problemLines(checked.problems)}`);
     const full = async () =>
       (await storage.listTasks({ conversationId, status: 'active' })).length >= maxActive;
-    if (await full()) return fail('这个会话的任务满了，先取消几个');
-    const fetched = await fetchFor(checked.monitor, input.signal, '没建');
+    if (await full()) return fail('此会话的任务已达上限，请先取消几个');
+    const fetched = await fetchFor(checked.monitor, input.signal, '未创建');
     if (!fetched.ok) return fetched;
     return exclusive(async () => {
-      if (await full()) return fail('这个会话的任务满了，先取消几个');
+      if (await full()) return fail('此会话的任务已达上限，请先取消几个');
       const task = await storage.createTask({
         conversationId,
         action: action.text,
@@ -813,20 +827,20 @@ export function createTaskService({
     );
     if (timed.length > 0) {
       return fail(
-        '这是监视任务，不能改成定时任务，也不用写时间的那几项（多久查一次写在 monitor 的 interval_minutes 里）；要定时做什么，取消它再建一个定时任务',
+        '此任务为监听任务，不能改为定时任务，也无需填写时间相关的参数（监听间隔填在 monitor 的 interval_minutes 里）；需要定时任务时，取消此任务后另行创建',
       );
     }
     const action = input.action?.trim();
     const patch = input.monitor;
     const patched = patch !== undefined && Object.keys(patch).length > 0;
     if (!action && !patched) {
-      return fail('至少改一样：写新的 action，或者 monitor 里写要改的字段');
+      return fail('至少修改一项：填写新的 action，或者在 monitor 里填写要修改的字段');
     }
     if (action && [...action].length > maxActionChars) {
-      return fail(`action 最多 ${maxActionChars} 个字，写成一句话`);
+      return fail(`action 最多 ${maxActionChars} 个字，请写成一句话`);
     }
     if (patched && (!monitors || monitors.layer.services.length === 0)) {
-      return fail('现在一个服务都没有装上，监视任务的描述改不了');
+      return fail('当前没有已安装的服务，无法修改监听任务的描述');
     }
     const check = (base: MonitorDescription) =>
       checkMonitor(mergeMonitor(base, patch!), { services: monitors!.layer, purpose: 'task' });
@@ -837,7 +851,7 @@ export function createTaskService({
       const draft = check(old);
       const identity = draft.ok ? sourceIdentity(sourceSpec(draft.monitor)) : undefined;
       if (draft.ok && identity !== sourceIdentity(sourceSpec(old))) {
-        const result = await fetchFor(draft.monitor, input.signal, '没改');
+        const result = await fetchFor(draft.monitor, input.signal, '未修改');
         if (!result.ok) return result;
         fetched = { identity: identity!, items: result.items, warnings: result.warnings };
       }
@@ -846,17 +860,17 @@ export function createTaskService({
       const current = await findIn(input.conversationId, input.ref);
       if (!current.ok) return current;
       const old = monitorOf(current.task);
-      if (!old) return fail('没有这个任务');
+      if (!old) return fail('任务不存在');
       const changes: TaskChanges = {};
       if (action) changes.action = action;
       let moved = false;
       if (patched) {
         const checked = check(old);
-        if (!checked.ok) return fail(`描述有问题，没改：\n${problemLines(checked.problems)}`);
+        if (!checked.ok) return fail(`描述有问题，未修改：\n${problemLines(checked.problems)}`);
         const identity = sourceIdentity(sourceSpec(checked.monitor));
         moved = identity !== sourceIdentity(sourceSpec(old));
         if (moved && fetched?.identity !== identity) {
-          return fail('没改：这个任务刚被改过，再改一次');
+          return fail('未修改：此任务刚被修改过，请重新修改一次');
         }
         changes.schedule = { kind: 'monitor', monitor: checked.monitor };
       }
@@ -916,9 +930,7 @@ function sourceOf(
   requestedBy: string | undefined,
 ): { ok: true; trigger: Trigger } | Failure {
   if (triggers.length === 0) {
-    return fail(
-      '只能在有人让你建任务时建：这次回复是任务到点之类的事件触发的，不是哪个人发来的消息',
-    );
+    return fail('只能在有人要求时创建任务：本次回复由任务触发之类的事件引起，不是某个人发来的消息');
   }
   const keyOf = (trigger: Trigger) =>
     trigger.author.id === undefined ? `name:${trigger.author.name}` : `id:${trigger.author.id}`;
@@ -928,14 +940,14 @@ function sourceOf(
   const wanted = requestedBy?.trim();
   if (!wanted) {
     return fail(
-      `这次回复是几个人的消息一起触发的（${list}），用 requested_by 写明是谁让建的：<message> 里的 uid，没有 uid 时写名字`,
+      `本次回复由多人的消息共同触发（${list}），请用 requested_by 写明是谁要求创建的：填 <message> 里的 uid，没有 uid 时填名字`,
     );
   }
   const byId = triggers.filter((trigger) => trigger.author.id === wanted);
   const matched = byId.length > 0 ? byId : triggers.filter((t) => t.author.name === wanted);
-  if (matched.length === 0) return fail(`requested_by 对不上这次触发的人：${list}`);
+  if (matched.length === 0) return fail(`requested_by 与本次触发的人不匹配：${list}`);
   if (new Set(matched.map(keyOf)).size > 1) {
-    return fail(`requested_by 对上了不止一个人，改写 uid：${list}`);
+    return fail(`requested_by 匹配到不止一个人，请改填 uid：${list}`);
   }
   return { ok: true, trigger: matched.at(-1)! };
 }
@@ -951,7 +963,7 @@ export function dueText(task: Task, now: Date): string {
     task.schedule.kind === 'once'
       ? '一次性任务'
       : `周期任务（${describeSchedule(task.schedule, now)}）`;
-  return `任务到点：${clause(task.action)}。${personOf(task.source.author)}在 ${formatShort(new Date(task.createdAt))} 让你建的，${kind}。`;
+  return `任务触发：${clause(task.action)}。由${personOf(task.source.author)}于 ${formatShort(new Date(task.createdAt))} 创建，${kind}。`;
 }
 
 /**
@@ -965,11 +977,11 @@ export function missedText(
 ): string {
   const action = clause(task.action);
   if (task.schedule.kind === 'once') {
-    return `任务超时：${action}（本该 ${formatShort(last)} 到点，那时洛璃服务没在运行）。这个一次性任务已经结束。`;
+    return `任务超时：${action}（原定 ${formatShort(last)} 触发，当时核心服务未运行）。此一次性任务已结束。`;
   }
   const times = count > 1 ? `超时 ${count} 次，最近一次` : '';
-  const after = next ? `下次到点是 ${formatDue(next)}。` : '已经过了截止日期，任务结束。';
-  return `任务超时：${action}（${describeSchedule(task.schedule, now)}；${times}本该 ${formatShort(last)} 到点，那时洛璃服务没在运行）。${after}`;
+  const after = next ? `下次触发的时间是 ${formatDue(next)}。` : '已过截止日期，任务已结束。';
+  return `任务超时：${action}（${describeSchedule(task.schedule, now)}；${times}原定 ${formatShort(last)} 触发，当时核心服务未运行）。${after}`;
 }
 
 function describeError(error: unknown): string {

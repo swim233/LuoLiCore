@@ -623,7 +623,7 @@ describe('出错与拒绝', () => {
     chats!.close();
     expect(await errorOf(`/api/conversations/${cli}/clear`, { author: 'Bob' })).toEqual([
       503,
-      '洛璃服务正在退出',
+      '核心服务正在退出',
     ]);
   });
 });

@@ -43,12 +43,11 @@ export function monitorInput(purpose: MonitorPurpose | 'update') {
       const type = fieldTypes[name];
       if (purpose === 'update') {
         return required === 'no'
-          ? [name, type.nullable().optional().describe(`${text}。写 null 是去掉`)]
+          ? [name, type.nullable().optional().describe(`${text}。填 null 表示去掉此字段`)]
           : [name, type.optional().describe(text)];
       }
       const needed = required === 'yes' || (required === 'task' && purpose === 'task');
-      const note =
-        required === 'task' && purpose === 'try' ? '（建任务时必填，试跑时可以不写）' : '';
+      const note = required === 'task' && purpose === 'try' ? '（创建任务时必填，测试时可选）' : '';
       return [name, (needed ? type : type.optional()).describe(`${text}${note}`)];
     }),
   );
@@ -56,15 +55,15 @@ export function monitorInput(purpose: MonitorPurpose | 'update') {
     .object(shape)
     .describe(
       purpose === 'update'
-        ? '监视任务的描述里要改的字段，只写要改的；各字段的写法见 read_docs 的 monitor'
-        : '监视任务的描述，各字段的写法见 read_docs 的 monitor',
+        ? '监听任务的描述中要修改的字段，仅填写要修改的；各字段的写法见 read_docs 的 monitor'
+        : '监听任务的描述，各字段的写法见 read_docs 的 monitor',
     );
 }
 
 const tryDescription = [
-  '试跑一个监视任务的描述：照描述真的查一次（算进这个服务当天的请求数），告诉你取到几条、每条有哪些字段、哪几条符合 where。',
-  '建监视任务之前先用它试，不对就改了再试；通过了再用 create_task 建（kind 写 monitor）。描述怎么写见 read_docs 的 monitor。',
-  'CLI 会话不能建监视任务，也不用试。',
+  '此工具用于测试监听任务的描述：按描述实际执行一次请求（计入此服务当天的请求次数），返回获取到的条目数、每个条目有哪些字段、哪些条目符合 where。',
+  '创建监听任务前先用此工具测试，有问题就修改后重新测试；测试通过后再用 create_task 创建（kind 填 monitor）。描述的写法见 read_docs 的 monitor。',
+  'CLI 会话不能创建监听任务，无需测试。',
 ].join('\n');
 
 /**
@@ -89,7 +88,7 @@ export function createTryMonitorTool({
       };
       const info = layer.services.find(({ name }) => name === service);
       const endpointTitle = info?.endpoints.find(({ id }) => id === endpoint)?.title ?? endpoint;
-      return ['试跑', info?.title ?? service, endpointTitle].filter(Boolean).join(' · ');
+      return ['测试', info?.title ?? service, endpointTitle].filter(Boolean).join(' · ');
     },
     async execute({ monitor }, ctx) {
       const rejected = await checkConversation(ctx.conversation.id);
@@ -104,9 +103,9 @@ export function createTryMonitorTool({
 /** 试跑没通过：是哪一步、为什么 */
 function failureText(result: Extract<TrialResult, { ok: false }>): string {
   if (result.step === 'describe') {
-    return `试跑没通过：描述有问题，改了再试。\n${problemList(result.error.split('\n'))}`;
+    return `测试未通过：描述有问题，请修改后重新测试。\n${problemList(result.error.split('\n'))}`;
   }
-  return `试跑没通过：${fetchFailureText(result)}`;
+  return `测试未通过：${fetchFailureText(result)}`;
 }
 
 /** 描述的问题逐条列出 */
@@ -120,15 +119,15 @@ export function trialText(result: Extract<TrialResult, { ok: true }>): string {
   const filtered = monitor.where !== undefined;
   const count =
     items.length === 0
-      ? '取到 0 条。'
+      ? '获取到 0 条。'
       : filtered
-        ? `取到 ${items.length} 条，其中 ${matched.filter(Boolean).length} 条符合 where。`
-        : `取到 ${items.length} 条（没写 where，每一条都算）。`;
-  const lines = [resultNotice, `试跑通过。${count}`];
+        ? `获取到 ${items.length} 条，其中 ${matched.filter(Boolean).length} 条符合 where。`
+        : `获取到 ${items.length} 条（未填写 where，全部符合）。`;
+  const lines = [resultNotice, `测试通过。${count}`];
   if (items.length > 0) {
-    lines.push(`每条的字段（从第一条取）：${fieldPaths(items[0]!.data).join('、')}`);
+    lines.push(`条目的字段（取自第一条）：${fieldPaths(items[0]!.data).join('、')}`);
   } else {
-    lines.push('现在没有条目，没法核对字段，照文档写的为准。');
+    lines.push('当前没有条目，无法核对字段，以文档为准。');
   }
   if (warnings.length > 0) lines.push('提醒：', ...warnings.map((warning) => `- ${warning}`));
   if (items.length > 0) {
@@ -142,7 +141,7 @@ export function trialText(result: Extract<TrialResult, { ok: true }>): string {
     if (rest.length > 0) {
       lines.push(
         '',
-        `其余 ${rest.length} 条只列标题：`,
+        `其余 ${rest.length} 条仅列标题：`,
         ...rest.map(
           (item, index) =>
             `- 第 ${item.position} 条${mark(index + shownItems)}：${titleOf(item.data, monitor)}`,
@@ -155,8 +154,8 @@ export function trialText(result: Extract<TrialResult, { ok: true }>): string {
     (name) => monitor[name] === undefined,
   );
   lines.push(
-    `可以用 create_task 建这个监视任务：kind 写 monitor，monitor 里放这份描述${
-      missing.length > 0 ? `（建的时候还要写 ${missing.join('、')}）` : ''
+    `可以用 create_task 创建此监听任务：kind 填 monitor，monitor 填这份描述${
+      missing.length > 0 ? `（创建时还需填写 ${missing.join('、')}）` : ''
     }。`,
   );
   return lines.join('\n');

@@ -29,7 +29,7 @@ export function TaskChip({ convId }: { convId: string }) {
             const c = el ? el.closest<HTMLElement>('.w-card') : null;
             setCard((p) => (p === c ? p : c));
           }}
-          title="这个会话进行中的任务"
+          title="此会话进行中的任务"
         >
           {list.length} 个任务
         </PopoverButton>
@@ -38,7 +38,7 @@ export function TaskChip({ convId }: { convId: string }) {
           glide=".task-row.is-live"
           align="end"
           className="task-pop"
-          aria-label="这个会话的任务"
+          aria-label="此会话的任务"
         >
           {list.map((t) => (
             <TaskItem key={t.id} task={t} now={now} />

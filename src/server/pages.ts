@@ -17,7 +17,7 @@ export function isBuilt(dist: string): boolean {
 const notBuiltPage = `<!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
-<title>洛璃服务</title>
+<title>核心服务</title>
 <p>${notBuiltText}</p>
 </html>
 `;

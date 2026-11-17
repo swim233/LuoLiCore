@@ -13,6 +13,7 @@ import type {
   ModelCall,
   MsgRow,
   TaskBrief,
+  TaskMonitor,
   TaskRow,
   TodaySummary,
 } from '../model/types';
@@ -74,12 +75,12 @@ export function toolBody(summary: string, chars: number): string {
 /* ---------- 任务：和服务的 describeSchedule、nextDue 同一种说法（时间按这台机器的时区，开发模式里它就是「服务器」） ---------- */
 const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
 const mdOf = (d: Date) => `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const stampOf = (ms: number) =>
+export const stampOf = (ms: number) =>
   `${mdOf(new Date(ms))} ${pad2(new Date(ms).getHours())}:${pad2(new Date(ms).getMinutes())}`;
 export function describeSchedule(s: TaskRow['schedule']): string {
   if (s.kind === 'once') return '一次性';
-  // 监视任务（第 5 步的面板才显示它）：开发模式里只给一句
-  if (s.kind === 'monitor') return '监视任务';
+  // 监视任务：真实的服务给的是带服务、接口名称的一行（monitor.line）；addTask 用它，这里只是没有它时的说法
+  if (s.kind === 'monitor') return '监听任务';
   const base =
     s.kind === 'daily'
       ? `每天 ${s.time}`
@@ -121,6 +122,8 @@ export interface NewMockTask {
   createdAt?: number;
   /** 不给时按 schedule 算下次到点；给了就是这个状态（种子数据里已经结束的任务） */
   state?: Partial<Pick<TaskRow, 'status' | 'nextDueAt' | 'lastDueAt' | 'dueCount' | 'endedAt'>>;
+  /** 监视任务：服务给的描述、写成人话的行与几行、检查的状态（schedule 写 { kind: 'monitor', monitor: 描述 }） */
+  monitor?: TaskMonitor;
 }
 const THIRTY_DAYS = 30 * 864e5;
 
@@ -350,7 +353,7 @@ export class MockServer implements Api {
       id,
       ref: 't' + id,
       action: n.action,
-      scheduleText: describeSchedule(n.schedule),
+      scheduleText: n.monitor?.line ?? describeSchedule(n.schedule),
       conversation: {
         id: c.id,
         platform: c.platform,
@@ -367,40 +370,79 @@ export class MockServer implements Api {
       requestedBy: n.by,
       createdAt: new Date(created).toISOString(),
       ...(n.state?.endedAt ? { endedAt: n.state.endedAt } : {}),
+      ...(n.monitor ? { monitor: n.monitor } : {}),
     };
     this.putTask(row);
     return row;
   }
-  /** 事件消息：没有发言人的用户消息，正文是写给模型看的完整句子（只写消息，不改任务） */
-  addEvent(convId: string, taskId: number, type: 'task' | 'task-missed', at = Date.now()) {
+  /** 事件消息：没有发言人的用户消息，正文是写给模型看的完整句子（只写消息，不改任务）。监视的两种事件正文由调用方给（text） */
+  addEvent(
+    convId: string,
+    taskId: number,
+    type: 'task' | 'task-missed' | 'monitor' | 'monitor-failed',
+    at = Date.now(),
+    text?: string,
+  ) {
     const t = this.taskMap.get(taskId);
     if (!t) return null;
+    if (type === 'monitor' || type === 'monitor-failed') {
+      return this.addMsg(convId, {
+        role: 'user',
+        parts: [
+          {
+            type: 'text',
+            text: text ?? `${type === 'monitor' ? '监听触发' : '监听失败'}：${t.action}`,
+          },
+        ],
+        event: { type, taskId },
+        at,
+      });
+    }
     const who = t.requestedBy.id
       ? `${t.requestedBy.name}（uid ${t.requestedBy.id}）`
       : t.requestedBy.name;
     const kind = t.schedule.kind === 'once' ? '一次性任务' : `周期任务（${t.scheduleText}）`;
     const due = t.lastDueAt ? stampOf(Date.parse(t.lastDueAt)) : stampOf(at);
-    const text =
+    // 周期任务超时以后：还有下一次就写下次触发的时间，已经过了截止日期就写任务结束
+    const nextAt = nextDue(t.schedule, at);
+    const after = nextAt ? `下次触发的时间是 ${stampOf(nextAt)}。` : '已过截止日期，任务已结束。';
+    const body =
       type === 'task'
-        ? `任务到点：${t.action}。${who}在 ${stampOf(Date.parse(t.createdAt))} 让你建的，${kind}。`
+        ? `任务触发：${t.action}。由${who}于 ${stampOf(Date.parse(t.createdAt))} 创建，${kind}。`
         : t.schedule.kind === 'once'
-          ? `任务超时：${t.action}（本该 ${due} 到点，那时洛璃服务没在运行）。这个一次性任务已经结束。`
-          : `任务超时：${t.action}（${t.scheduleText}；本该 ${due} 到点，那时洛璃服务没在运行）。`;
+          ? `任务超时：${t.action}（原定 ${due} 触发，当时核心服务未运行）。此一次性任务已结束。`
+          : `任务超时：${t.action}（${t.scheduleText}；原定 ${due} 触发，当时核心服务未运行）。${after}`;
     return this.addMsg(convId, {
       role: 'user',
-      parts: [{ type: 'text', text }],
+      parts: [{ type: 'text', text: body }],
       event: { type, taskId },
       at,
     });
   }
   /**
    * 到点（task）或任务超时（task-missed）：写事件消息，改任务（一次性的完成；周期的下次到点往后挪，到点的次数加一），推 task 事件。
-   * 返回事件消息。顺序同真实的服务：事件消息先写，任务的新样子接着推
+   * 返回事件消息。顺序同真实的服务：事件消息先写，任务的新样子接着推。
+   * 监视任务：monitor（查到了新的）写事件，到点的次数加一、上次检查和上次查通换成现在、不再是查不到；monitor-failed（满 6 小时说一次）只写事件。
+   * 监视任务没有下次到点，一直进行中
    */
-  fireTask(taskId: number, type: 'task' | 'task-missed'): MsgRow | null {
+  fireTask(
+    taskId: number,
+    type: 'task' | 'task-missed' | 'monitor' | 'monitor-failed',
+    text?: string,
+  ): MsgRow | null {
     const t = this.taskMap.get(taskId);
     if (!t || t.status !== 'active') return null;
     const now = Date.now();
+    if (type === 'monitor' || type === 'monitor-failed') {
+      const row = this.addEvent(t.conversation.id, taskId, type, now, text);
+      if (type === 'monitor' && t.monitor) {
+        const iso = new Date(now).toISOString();
+        const monitor: TaskMonitor = { ...t.monitor, lastCheckedAt: iso, lastSuccessAt: iso };
+        delete monitor.failing;
+        this.putTask({ ...t, dueCount: t.dueCount + 1, lastDueAt: iso, monitor });
+      }
+      return row;
+    }
     const due = t.nextDueAt ?? new Date(now).toISOString();
     const row = this.addEvent(t.conversation.id, taskId, type, now);
     const next =
@@ -436,10 +478,12 @@ export class MockServer implements Api {
 
   /* ---------- 读：和服务的接口一样 ---------- */
   private preview(m: MsgRow): ConversationRow['last'] {
-    let text = textOf(m).replace(/\s+/g, ' ').trim();
+    const event = m.message.metadata?.event?.type;
+    // 和服务一样（server/views.ts 的 preview）：事件只取正文的第一行，监听事件第二行起是查到的数据、失败的原因，压成一行会接在第一句后面
+    const source = event ? textOf(m).trim().split(/\r?\n/, 1)[0] : textOf(m);
+    let text = source.replace(/\s+/g, ' ').trim();
     if (text.length > PREVIEW_CHARS) text = text.slice(0, PREVIEW_CHARS);
     else if (!text && m.message.parts.some((p) => p.type === 'file')) text = '[图片]';
-    const event = m.message.metadata?.event?.type;
     return {
       seq: m.seq,
       createdAt: m.createdAt,

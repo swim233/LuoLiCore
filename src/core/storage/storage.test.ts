@@ -2786,6 +2786,6 @@ describe('只读读出会话（readConversations）', () => {
     db.exec(version1Schema);
     db.exec('PRAGMA user_version = 1');
     db.close();
-    expect(() => readConversations(old)).toThrow('先启动一次洛璃服务');
+    expect(() => readConversations(old)).toThrow('请先启动一次核心服务');
   });
 });

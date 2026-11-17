@@ -31,8 +31,8 @@ const limits = monitorLimits;
 
 /** 描述的字段，按这个先后：yes 必填；task 建任务时必填，试跑时可以不写；no 可以不写 */
 export const monitorFields = [
-  { name: 'service', required: 'yes', text: '服务名，见 read_docs 的说明里「现在能用的服务」' },
-  { name: 'endpoint', required: 'yes', text: '接口 id，服务的文档里写着' },
+  { name: 'service', required: 'yes', text: '服务名，见 read_docs 工具说明里的「当前可用服务」' },
+  { name: 'endpoint', required: 'yes', text: '接口 id（详见服务的文档）' },
   {
     name: 'params',
     required: 'no',
@@ -41,29 +41,33 @@ export const monitorFields = [
   {
     name: 'interval_minutes',
     required: 'task',
-    text: `多久查一次，整数分钟；不能短于这个服务的最短间隔，最长 ${limits.maxIntervalMinutes}（7 天）`,
+    text: `监听间隔，单位分钟，整数；不得小于此服务的最短间隔，最长 ${limits.maxIntervalMinutes}（7 天）`,
   },
   {
     name: 'items',
     required: 'yes',
-    text: '条目在哪，也就是返回里那个列表的路径；返回本身就是列表时写空字符串',
+    text: '条目列表在返回数据中的路径；返回数据本身就是列表时填空字符串',
   },
   {
     name: 'key',
     required: 'yes',
-    text: '每条里当编号用的字段的路径，用来认新旧（没见过的编号就是新的）；那个值要是字符串或数字',
+    text: '每个条目中用作编号的字段的路径，用于判断新旧（未出现过的编号即为新条目）；其值须为字符串或数字',
   },
-  { name: 'where', required: 'no', text: '只要哪些，一个条件；不写就是全都要' },
-  { name: 'title', required: 'yes', text: '每条的标题用哪个字段（路径）' },
+  {
+    name: 'where',
+    required: 'no',
+    text: '监听范围：一个条件，仅符合条件的新条目才触发；未填写时所有新条目都触发',
+  },
+  { name: 'title', required: 'yes', text: '用作条目标题的字段（路径）' },
   {
     name: 'show',
     required: 'yes',
-    text: `到点时写进事件、给你看的字段，1 到 ${limits.maxShow} 个路径`,
+    text: `触发时写入事件的字段，填 1 到 ${limits.maxShow} 个路径`,
   },
   {
     name: 'mode',
     required: 'task',
-    text: '处理方式，reply 触发你回复一次，record 只写进会话、不触发你',
+    text: '处理方式：reply 触发你回复一次；record 仅写入会话，不触发回复',
   },
 ] as const satisfies ReadonlyArray<{
   name: string;
@@ -76,25 +80,25 @@ export type MonitorField = (typeof monitorFields)[number]['name'];
 /** 「必填」那一列的说法 */
 export const requiredText = {
   yes: '必填',
-  task: '建任务时必填，试跑时可以不写',
-  no: '可以不写',
+  task: '创建任务时必填，测试时可选',
+  no: '可选',
 } as const;
 
 const compareRule =
-  '两边都能当成数字时按数字比（写成字符串的数字，如 "12"，也算）；不然两边都是字符串时按字典序比（同一种格式的时间可以这样比）；别的情况不成立';
+  '两边都能当作数字时按数值比较（写成字符串的数字，如 "12"，也算）；否则两边都是字符串时按字典序比较（格式相同的时间可以这样比较）；其他情况不成立';
 
 /** 比法 */
 export const monitorOps = [
   {
     op: 'eq',
     name: '等于',
-    rule: '字段的值和 value 按文字比，数字、布尔值、字符串都行（200 等于 "200"），分大小写；没有这个字段时不成立',
+    rule: '字段的值与 value 按文本比较，数字、布尔值、字符串均可（200 等于 "200"），区分大小写；字段不存在时不成立',
   },
-  { op: 'ne', name: '不等于', rule: '和 eq 相反；没有这个字段时成立' },
+  { op: 'ne', name: '不等于', rule: '与 eq 相反；字段不存在时成立' },
   {
     op: 'in',
     name: '是这几个值之一',
-    rule: `value 写成数组（1 到 ${limits.maxInValues} 个值），和其中任何一个 eq 就成立`,
+    rule: `value 填数组（1 到 ${limits.maxInValues} 个值），字段的值与其中任意一个 eq 即成立`,
   },
   { op: 'gt', name: '大于', rule: compareRule },
   { op: 'gte', name: '大于等于', rule: compareRule },
@@ -103,7 +107,7 @@ export const monitorOps = [
   {
     op: 'contains',
     name: '包含',
-    rule: '字段是字符串时看里面有没有 value 这段字，不分大小写；字段是列表时看有没有一个元素和 value eq；别的情况不成立',
+    rule: '字段为字符串时，判断其中是否包含 value 这段文本，不区分大小写；字段为列表时，判断是否有元素与 value eq；其他情况不成立',
   },
 ] as const satisfies ReadonlyArray<{ op: string; name: string; rule: string }>;
 
@@ -124,12 +128,12 @@ export function opsText(): string {
 /** 元文档里 {{limits}}：层数、个数这些上限（元文档里它单独一节，有自己的标题） */
 export function limitsText(): string {
   return [
-    `- all、any 最多套 ${limits.maxDepth} 层（\`{ "all": [ { "any": [ … ] } ] }\` 算 2 层），里面至少要有一个条件。`,
-    `- 一个 where 里的比较（写着 field、op、value 的那种）总共最多 ${limits.maxComparisons} 个。`,
-    `- value 只能是字符串、数字或布尔值，字符串最多 ${limits.maxValueChars} 个字；in 的 value 是 1 到 ${limits.maxInValues} 个这样的值组成的数组。gt、gte、lt、lte 的 value 不能是布尔值，contains 的 value 不能是空的字符串。`,
-    `- 路径最多 ${limits.maxPathChars} 个字，每一段都不能是空的，不支持数组下标（如 \`alerts[0]\`）。`,
-    `- show 写 1 到 ${limits.maxShow} 个路径；interval_minutes 最长 ${limits.maxIntervalMinutes}（7 天）。`,
-    `- 一次查到的条目最多处理 ${limits.maxItems} 条，多出来的不要；写进事件的每个值最多 ${limits.maxShownChars} 个字，超出的截短。`,
-    `- 一次新的条目多时，到点的事件里只写前 ${limits.maxEventItems} 条的内容，其余只列标题；整条事件最多 ${limits.maxEventChars} 个字，写不下时从后面的条目起改成只列标题。`,
+    `- all、any 最多嵌套 ${limits.maxDepth} 层（\`{ "all": [ { "any": [ … ] } ] }\` 算 2 层），其中至少包含一个条件。`,
+    `- 一个 where 中的比较（含 field、op、value 的条件）总数最多 ${limits.maxComparisons} 个。`,
+    `- value 只能是字符串、数字或布尔值，字符串最多 ${limits.maxValueChars} 个字；in 的 value 是 1 到 ${limits.maxInValues} 个此类值组成的数组。gt、gte、lt、lte 的 value 不能是布尔值，contains 的 value 不能是空字符串。`,
+    `- 路径最多 ${limits.maxPathChars} 个字，每一段都不能为空，不支持数组下标（如 \`alerts[0]\`）。`,
+    `- show 填 1 到 ${limits.maxShow} 个路径；interval_minutes 最长 ${limits.maxIntervalMinutes}（7 天）。`,
+    `- 每次请求最多处理 ${limits.maxItems} 个条目，超出的丢弃；写入事件的每个值最多 ${limits.maxShownChars} 个字，超出的部分截断。`,
+    `- 一次新条目较多时，触发的事件里只写前 ${limits.maxEventItems} 条的内容，其余仅列标题；整条事件最多 ${limits.maxEventChars} 个字，超出时从靠后的条目起改为仅列标题。`,
   ].join('\n');
 }

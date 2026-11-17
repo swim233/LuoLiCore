@@ -27,7 +27,7 @@ function Notice({ phase }: { phase: 'loading' | 'down' }) {
     <Pane>
       <div className="today ll-pane-sc">
         {phase === 'down' ? (
-          <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>
+          <Empty title="与核心服务的连接中断">自动重连中</Empty>
         ) : (
           <Empty title="加载中…" />
         )}
@@ -174,7 +174,7 @@ export const TODAY_DEF: WidgetDef = {
   refreshOn: ['today:update', 'data:reset', 'link'],
   thumb: () =>
     link.get().phase === 'down' ? (
-      '连不上洛璃服务'
+      '与核心服务的连接中断'
     ) : (
       <>
         今天 <em>{db.today?.replies ?? 0}</em> 次回复

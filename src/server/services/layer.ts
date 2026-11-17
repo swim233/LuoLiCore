@@ -116,7 +116,8 @@ export function createServiceLayer({
 
   function find(name: string): InstalledService {
     const service = byName.get(name);
-    if (!service) throw new ServiceError('unknown', `没有这个服务：${name}（有：${names()}）`);
+    if (!service)
+      throw new ServiceError('unknown', `服务不存在：${name}（可用的服务：${names()}）`);
     return service;
   }
 
@@ -126,7 +127,7 @@ export function createServiceLayer({
       const ids = list(service.definition.endpoints.map((candidate) => candidate.id));
       throw new ServiceError(
         'unknown',
-        `服务 ${service.definition.name} 没有接口 ${id}（有：${ids}）`,
+        `服务 ${service.definition.name} 没有接口 ${id}（可用的接口：${ids}）`,
       );
     }
     return endpoint;
@@ -174,7 +175,7 @@ export function createServiceLayer({
         try {
           authHeaders = service.sign?.({ now: at }) ?? {};
         } catch {
-          throw new ServiceError('auth', `服务 ${name} 的认证出错，请求没有发出去`);
+          throw new ServiceError('auth', `服务 ${name} 认证出错，请求未发出`);
         }
         // 要抹的：环境变量的值、算出来的主机名、贴上去的请求头的值，以及值里按空格切开的各段
         // （第一段是 Bearer 这样的认证方式，不算）。短的由抹的那一步去掉
@@ -190,7 +191,7 @@ export function createServiceLayer({
         if (requests === undefined) {
           throw new ServiceError(
             'quota',
-            `今天的额度用完了（服务 ${name} 每天最多 ${service.maxRequestsPerDay} 次请求），明天再试`,
+            `今日额度已用完（服务 ${name} 每天最多 ${service.maxRequestsPerDay} 次请求），请明天再试`,
           );
         }
 
@@ -207,10 +208,10 @@ export function createServiceLayer({
         if (response.status < 200 || response.status > 299) {
           const reason = redact(normalizeJson(text.trim()).text).slice(0, reasonChars);
           const redirect =
-            response.status >= 300 && response.status < 400 ? '（要求跳转，不跟随）' : '';
+            response.status >= 300 && response.status < 400 ? '（要求跳转，未跟随）' : '';
           throw new ServiceError(
             'status',
-            `服务 ${name} 回了 HTTP ${response.status}${redirect}${reason ? `：${reason}` : ''}`,
+            `服务 ${name} 返回 HTTP ${response.status}${redirect}${reason ? `：${reason}` : ''}`,
             response.status,
           );
         }
@@ -241,7 +242,7 @@ export function createServiceLayer({
         const ids = list(service.definition.endpoints.map(({ id }) => id));
         throw new ServiceError(
           'unknown',
-          `服务 ${name} 的文档没有这一节：${section}（有：${ids}）`,
+          `服务 ${name} 的文档没有此章节：${section}（可用的章节：${ids}）`,
         );
       }
       const file = section === undefined ? 'overview.md' : `${section}.md`;
@@ -252,7 +253,7 @@ export function createServiceLayer({
           { service: name, file, code: (error as NodeJS.ErrnoException).code },
           'service.docs_failed',
         );
-        throw new ServiceError('docs', `服务 ${name} 的文档读不了：${file}`);
+        throw new ServiceError('docs', `服务 ${name} 的文档读取失败：${file}`);
       }
     },
   };
@@ -266,15 +267,15 @@ export function createServiceLayer({
 function buildPath(endpoint: InstalledService['definition']['endpoints'][number], params: unknown) {
   const pathNames = pathParams(endpoint.path) ?? [];
   const allowed = [...pathNames.map((name) => `${name}（路径参数，必填）`), ...endpoint.query];
-  const hint = `接口 ${endpoint.id} 能用的参数：${allowed.length > 0 ? allowed.join('、') : '没有'}`;
+  const hint = `接口 ${endpoint.id} 可用的参数：${allowed.length > 0 ? allowed.join('、') : '没有'}`;
   if (typeof params !== 'object' || params === null || Array.isArray(params)) {
-    throw new ServiceError('params', `参数要写成一个对象。${hint}`);
+    throw new ServiceError('params', `参数须为对象。${hint}`);
   }
   const entries = Object.entries(params as Record<string, unknown>);
   const values = new Map<string, string>();
   for (const [name, value] of entries) {
     if (!pathNames.includes(name) && !endpoint.query.includes(name)) {
-      throw new ServiceError('params', `参数 ${name} 不认识。${hint}`);
+      throw new ServiceError('params', `不支持参数 ${name}。${hint}`);
     }
     if (
       typeof value !== 'string' &&
@@ -285,7 +286,7 @@ function buildPath(endpoint: InstalledService['definition']['endpoints'][number]
     }
     const text = String(value);
     if ([...text].length > maxParamChars) {
-      throw new ServiceError('params', `参数 ${name} 太长（最多 ${maxParamChars} 个字符）`);
+      throw new ServiceError('params', `参数 ${name} 过长（最多 ${maxParamChars} 个字符）`);
     }
     values.set(name, text);
   }
@@ -296,7 +297,7 @@ function buildPath(endpoint: InstalledService['definition']['endpoints'][number]
   const path = endpoint.path.replace(/\{([^{}]+)\}/g, (_match, name: string) => {
     const value = values.get(name)!;
     if (value === '' || value === '.' || value === '..') {
-      throw new ServiceError('params', `路径参数 ${name} 不能是空的、. 或 ..`);
+      throw new ServiceError('params', `路径参数 ${name} 不能为空，也不能是 . 或 ..`);
     }
     return encodeURIComponent(value);
   });
@@ -320,9 +321,9 @@ function fromFetchError(
   }
   switch (error.kind) {
     case 'timeout':
-      return new ServiceError('timeout', `服务 ${name} 超过 ${timeoutMs / 1000} 秒没有回应`);
+      return new ServiceError('timeout', `服务 ${name} 超过 ${timeoutMs / 1000} 秒未响应`);
     case 'aborted':
-      return new ServiceError('aborted', `调用服务 ${name} 被中止了`);
+      return new ServiceError('aborted', `对服务 ${name} 的调用已中止`);
     default:
       return new ServiceError('network', `服务 ${name} 请求出错：${redact(error.message)}`);
   }

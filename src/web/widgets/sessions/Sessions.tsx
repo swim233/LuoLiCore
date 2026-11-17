@@ -25,7 +25,7 @@ import type { FullParams, ViewProps, WidgetDef } from '../types';
 /* 列表没有内容时显示什么：加载中、连不上服务、确实没有会话 */
 function emptyOf(phase: LinkPhase) {
   if (phase === 'loading') return <Empty title="加载中…" />;
-  if (phase === 'down') return <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>;
+  if (phase === 'down') return <Empty title="与核心服务的连接中断">自动重连中</Empty>;
   return <Empty title="还没有会话">群里有人发言后，会话会出现在这里</Empty>;
 }
 const EVENTS: BusEventName[] = [
@@ -286,7 +286,7 @@ export const SESSIONS_DEF: WidgetDef = {
   },
   thumb() {
     const phase = link.get().phase;
-    if (phase === 'down') return '连不上洛璃服务';
+    if (phase === 'down') return '与核心服务的连接中断';
     if (phase === 'loading') return '加载中…';
     const n = db.conversations.filter((c) => c.unread > 0).length;
     return n ? (

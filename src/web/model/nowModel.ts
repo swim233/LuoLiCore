@@ -1,7 +1,7 @@
 import { uid } from '@luoli/ui/util';
 import { bus } from './bus';
 import { db } from './db';
-import { eventOf } from './events';
+import { eventOf, liveTaskLine } from './events';
 import { argsLine, authorOf, isFile, isReasoning, isTool, textOf, toolName } from './parts';
 import { cachedRecentMessages, recentMessages } from './sync';
 import { status } from './status';
@@ -42,7 +42,7 @@ export interface Line {
   aborted?: boolean;
   err?: boolean;
   retry?: boolean;
-  /** status：任务到点触发了这次回复（「任务到点 · 做什么」） */
+  /** status：任务触发了这次回复（「任务触发 · 做什么」，监视任务是「监听触发 · …」「监听失败 · …」） */
   task?: boolean;
   open?: boolean;
   /** user：这一行对应哪条消息（防止同一条显示两次） */
@@ -330,9 +330,8 @@ bus.on('reply:start', ({ convId, replyId, at, tasks }) => {
   const s = ensure(convId);
   s.replyId = replyId;
   s.cur = null;
-  // 任务到点触发的回复：几个任务都列出来
-  for (const t of tasks ?? [])
-    push(s, { kind: 'status', task: true, text: `任务到点 · ${t.action}`, at });
+  // 任务到点触发的回复：几个任务都列出来（监视任务按服务给的 event 写「监听触发」「监听失败」）
+  for (const t of tasks ?? []) push(s, { kind: 'status', task: true, text: liveTaskLine(t), at });
   emit('sessions');
 });
 bus.on('reply:queued', ({ convId }) => {

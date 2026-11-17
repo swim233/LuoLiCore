@@ -179,7 +179,7 @@ export function createChats({
     status,
     error,
   });
-  const leaving = () => refuse(503, '洛璃服务正在退出');
+  const leaving = () => refuse(503, '核心服务正在退出');
 
   function stateOf(conversationId: string): ChatState {
     let state = states.get(conversationId);
@@ -242,7 +242,7 @@ export function createChats({
       );
       out.write({
         type: 'error',
-        errorText: closing ? '洛璃服务正在退出' : redact((error as Error).message),
+        errorText: closing ? '核心服务正在退出' : redact((error as Error).message),
       });
       out.close();
       state.running = undefined;
@@ -654,11 +654,11 @@ export function createChats({
      */
     async due({ conversationId, tasks, fromSeq }: TaskDue): Promise<void> {
       if (closing) return;
-      const refs: LiveTask[] = tasks.map(({ id, action, monitor }) => ({
+      const refs: LiveTask[] = tasks.map(({ id, action, event }) => ({
         id,
         ref: taskRef(id),
         action,
-        ...(monitor ? { monitor } : {}),
+        ...(event ? { event } : {}),
       }));
       const conversation = await sessions.open(conversationId);
       // 打开会话期间可能开始了退出、开始了别的回复
@@ -686,7 +686,7 @@ export function createChats({
       author: string,
       signal?: AbortSignal,
     ): Promise<CommandStart> {
-      const leavingCommand: CommandStart = { ok: false, status: 503, error: '洛璃服务正在退出' };
+      const leavingCommand: CommandStart = { ok: false, status: 503, error: '核心服务正在退出' };
       if (closing) return leavingCommand;
       const name = author.trim();
       if (!name) return { ok: false, status: 400, error: '要带执行人的名字（author）' };

@@ -53,8 +53,16 @@ export type Sender = {
   sendRich(target: ChatTarget, message: InputRichMessage, replyTo?: number): Promise<void>;
 };
 
-/** 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点；monitor：是监视任务 */
-export type RoundTask = { id: number; ref: string; action: string; monitor?: true };
+/**
+ * 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点。event：监视任务写的是哪种事件
+ * （monitor 查到了新的东西，monitor-failed 连续查不到）；定时任务没有
+ */
+export type RoundTask = {
+  id: number;
+  ref: string;
+  action: string;
+  event?: 'monitor' | 'monitor-failed';
+};
 
 /**
  * bot 用的会话对象：核心的会话，reply 多收一个 tasks（任务到点触发的回复是哪几个任务）。
@@ -966,11 +974,11 @@ export function createTelegramBot({
         onMessage(session, {
           kind: 'due',
           target: { chatId: Number(chatId) },
-          tasks: tasks.map(({ id, ref, action, monitor }) => ({
+          tasks: tasks.map(({ id, ref, action, event }) => ({
             id,
             ref,
             action,
-            ...(monitor ? { monitor } : {}),
+            ...(event ? { event } : {}),
           })),
           quote: source !== undefined && /^\d+$/.test(source) ? Number(source) : undefined,
         });

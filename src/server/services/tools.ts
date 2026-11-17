@@ -36,15 +36,15 @@ function readDocsTool(
   monitorDoc: Pick<MonitorDoc, 'read'> | undefined,
 ): ToolDefinition {
   const description = [
-    '读外部服务的文档。调一个服务（call_service）之前先读它的文档，照文档写接口和参数，不要猜：',
-    '- 不写 section：读总说明（这个服务能做什么、有哪些接口、怎么用、要注意什么），结尾列出各节；',
-    '- section 写接口 id：读那个接口的一节（参数、返回的字段、要注意的地方）。',
+    '此工具用于读取外部服务的文档。调用服务（call_service）之前先读它的文档，照文档写接口和参数，不要猜：',
+    '- 未填写 section 时：读总说明（这个服务能做什么、有哪些接口、怎么用、要注意什么），结尾列出各节；',
+    '- section 填写接口 id 时：读那个接口的一节（参数、返回的字段、要注意的地方）。',
     ...(monitorDoc
       ? [
-          `doc 写 ${monitorDocName}（不用写 section）时读「监视任务怎么写」：有人要你盯着一件事、有新的就说一声时，先读它，再照它写监视任务。`,
+          `doc 填 ${monitorDocName}（无需填写 section）时读取「监听任务的写法」：有人要你持续关注一件事、有新情况就通知时，先读此文档，再按文档编写监听任务。`,
         ]
       : []),
-    '现在能用的服务：',
+    '当前可用服务：',
     serviceList(layer.services),
   ].join('\n');
   return defineTool({
@@ -55,13 +55,16 @@ function readDocsTool(
         .string()
         .describe(
           monitorDoc
-            ? `文档的名字：服务名（见工具说明里的「现在能用的服务」），或者 ${monitorDocName}`
-            : '文档的名字：服务名，见工具说明里的「现在能用的服务」',
+            ? `文档名：服务名（见工具说明里的「当前可用服务」），或者 ${monitorDocName}`
+            : '文档名：服务名，见工具说明里的「当前可用服务」',
         ),
-      section: z.string().optional().describe('节名：接口 id（总说明的结尾列着）；不写时读总说明'),
+      section: z
+        .string()
+        .optional()
+        .describe('章节名：接口 id（由总说明的结尾给出）；未填写时读总说明'),
     }),
     summary: ({ input: { doc, section } }) => {
-      if (monitorDoc && doc === monitorDocName) return '监视任务怎么写';
+      if (monitorDoc && doc === monitorDocName) return '监听任务的写法';
       const service = layer.services.find(({ name }) => name === doc);
       const part =
         section === undefined
@@ -85,7 +88,7 @@ function readDocsTool(
         '',
         '---',
         ...(monitorDoc ? [limitsLine(service)] : []),
-        `这份文档的各节（读一节：read_docs，doc 写 ${doc}，section 写接口 id）：`,
+        `本文档的各节（读取其中一节：调用 read_docs，doc 填 ${doc}，section 填接口 id）：`,
         ...service.endpoints.map(({ id, title }) => `- ${id}：${title}`),
       ].join('\n');
     },
@@ -98,15 +101,15 @@ function callServiceTool(layer: ServiceLayer): ToolDefinition {
     '- service 写服务名，endpoint 写接口 id；params 里写这个接口的参数，路径参数和查询参数都写在这里，值是字符串、数字或布尔值。',
     '- 结果是服务返回的正文（JSON 会排版）。出错时给出原因：参数不对时会列出这个接口能用的参数；服务回了错误时带上状态码和服务说的原因，先看原因再改，不要原样重试。',
     '- 每个服务每天的请求次数有上限，不要为同一件事反复调。',
-    '现在能用的服务：',
+    '当前可用服务：',
     serviceList(layer.services),
   ].join('\n');
   return defineTool({
     name: 'call_service',
     description,
     input: z.object({
-      service: z.string().describe('服务名，见工具说明里的「现在能用的服务」'),
-      endpoint: z.string().describe('接口 id（文档里写着）'),
+      service: z.string().describe('服务名，见工具说明里的「当前可用服务」'),
+      endpoint: z.string().describe('接口 id（详见文档）'),
       params: z
         .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
         .optional()
@@ -133,9 +136,9 @@ function callServiceTool(layer: ServiceLayer): ToolDefinition {
       const body = response.body;
       const chars = [...body];
       const header = [resultNotice];
-      if (response.truncated) header.push('正文太长，服务那边只读了前 1 MB');
+      if (response.truncated) header.push('正文过长，仅读取了前 1 MB');
       if (chars.length > maxResultChars) {
-        header.push(`正文共 ${chars.length} 字符，太长，下面只给出前 ${maxResultChars} 字符`);
+        header.push(`正文共 ${chars.length} 字符，过长，以下仅给出前 ${maxResultChars} 字符`);
       }
       return [
         ...header,
@@ -151,7 +154,7 @@ function callServiceTool(layer: ServiceLayer): ToolDefinition {
  */
 function limitsLine({ name, minIntervalSeconds, maxRequestsPerDay }: ServiceInfo): string {
   const minutes = Math.max(1, Math.ceil(minIntervalSeconds / 60));
-  return `监视任务盯服务 ${name} 时，最短每 ${minutes} 分钟查一次（interval_minutes 不能小于 ${minutes}）；这个服务每天最多发 ${maxRequestsPerDay} 次请求，一次性的查询（call_service）和监视合在一起算。`;
+  return `监听服务 ${name} 时，监听间隔最短 ${minutes} 分钟（interval_minutes 不得小于 ${minutes}）；此服务每天最多 ${maxRequestsPerDay} 次请求，call_service 的调用和监听任务的请求合并计算。`;
 }
 
 /** 服务层的错误换成模型看到的说明（ToolError）；别的错误原样抛出 */

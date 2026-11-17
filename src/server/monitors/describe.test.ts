@@ -63,16 +63,16 @@ describe('描述的检查：字段', () => {
     expect(result.monitor.show).toEqual(['headline', 'severity']);
   });
 
-  it('试跑时 interval_minutes、mode 可以不写，写了照样检查；建任务时必填', () => {
+  it('试跑时 interval_minutes、mode 可选，写了照样检查；建任务时必填', () => {
     const bare = changed({ interval_minutes: undefined, mode: undefined });
     expect(check(bare, 'try')).toMatchObject({ ok: true });
     expect(problems(bare, 'task')).toEqual([
-      `缺少 interval_minutes（建任务时必填）：${monitorFields.find(({ name }) => name === 'interval_minutes')!.text}`,
-      `缺少 mode（建任务时必填）：${monitorFields.find(({ name }) => name === 'mode')!.text}`,
+      `缺少 interval_minutes（创建任务时必填）：${monitorFields.find(({ name }) => name === 'interval_minutes')!.text}`,
+      `缺少 mode（创建任务时必填）：${monitorFields.find(({ name }) => name === 'mode')!.text}`,
     ]);
     expect(problems(changed({ interval_minutes: 0, mode: 'loud' }), 'try')).toEqual([
-      'interval_minutes 不能短于 1 分钟（服务 demo 的最短间隔）',
-      'mode 只能是 reply（触发你回复）或 record（只记录）',
+      'interval_minutes 不得小于 1 分钟（服务 demo 的最短间隔）',
+      'mode 只能是 reply（触发回复）或 record（仅记录）',
     ]);
   });
 
@@ -84,36 +84,34 @@ describe('描述的检查：字段', () => {
 
   it('不是对象；有不认得的字段：说出能写哪些', () => {
     for (const input of [null, [], 'qweather', 3]) {
-      expect(problems(input)).toEqual([
-        'monitor 要写成一个对象，各字段的写法见 read_docs 的 monitor',
-      ]);
+      expect(problems(input)).toEqual(['monitor 须为对象，各字段的写法见 read_docs 的 monitor']);
     }
     expect(problems({ ...valid, item: 'alerts', interval: 5 })).toEqual([
-      `monitor 里没有 item 这个字段（能写的：${monitorFields.map(({ name }) => name).join('、')}）`,
-      `monitor 里没有 interval 这个字段（能写的：${monitorFields.map(({ name }) => name).join('、')}）`,
+      `monitor 不支持字段 item（可用的字段：${monitorFields.map(({ name }) => name).join('、')}）`,
+      `monitor 不支持字段 interval（可用的字段：${monitorFields.map(({ name }) => name).join('、')}）`,
     ]);
   });
 
   it('服务、接口、参数交给服务层检查，说明同 call_service；不发请求', () => {
     expect(problems(changed({ service: 'nope' }))).toEqual([
-      '没有这个服务：nope（有：demo、slow）',
+      '服务不存在：nope（可用的服务：demo、slow）',
     ]);
     expect(problems(changed({ endpoint: 'nope' }))).toEqual([
-      '服务 demo 没有接口 nope（有：item、search）',
+      '服务 demo 没有接口 nope（可用的接口：item、search）',
     ]);
     expect(problems(changed({ params: { city: '上海' } }))).toEqual([
-      '参数 city 不认识。接口 search 能用的参数：q',
+      '不支持参数 city。接口 search 可用的参数：q',
     ]);
     expect(problems(changed({ endpoint: 'item', params: { q: 'x' } }))).toEqual([
-      '缺少路径参数 id。接口 item 能用的参数：id（路径参数，必填）、lang、q',
+      '缺少路径参数 id。接口 item 可用的参数：id（路径参数，必填）、lang、q',
     ]);
     expect(problems(changed({ params: { q: { x: 1 } } }))).toEqual([
       '参数 q 的值只能是字符串、数字或布尔值',
     ]);
-    expect(problems(changed({ params: 'q=1' }))[0]).toContain('参数要写成一个对象');
+    expect(problems(changed({ params: 'q=1' }))[0]).toContain('参数须为对象');
     expect(problems(changed({ service: 3, endpoint: [] }))).toEqual([
-      'service 要是字符串：服务名',
-      'endpoint 要是字符串：接口 id',
+      'service 须为字符串：服务名',
+      'endpoint 须为字符串：接口 id',
     ]);
     // 没写 params 也行
     expect(check(changed({ params: undefined }))).toMatchObject({ ok: true });
@@ -127,13 +125,13 @@ describe('描述的检查：字段', () => {
       `interval_minutes 最长 ${max}（7 天）`,
     ]);
     expect(problems(changed({ interval_minutes: 1.5 }))).toEqual([
-      'interval_minutes 要是整数（分钟）',
+      'interval_minutes 须为整数（分钟）',
     ]);
     expect(problems(changed({ interval_minutes: '10' }))).toEqual([
-      'interval_minutes 要是整数（分钟）',
+      'interval_minutes 须为整数（分钟）',
     ]);
     expect(problems(changed({ service: 'slow', interval_minutes: 1 }))).toEqual([
-      'interval_minutes 不能短于 2 分钟（服务 slow 的最短间隔）',
+      'interval_minutes 不得小于 2 分钟（服务 slow 的最短间隔）',
     ]);
     expect(check(changed({ service: 'slow', interval_minutes: 2 }))).toMatchObject({ ok: true });
   });
@@ -142,27 +140,27 @@ describe('描述的检查：字段', () => {
     expect(check(changed({ items: '' }))).toMatchObject({ ok: true });
     expect(check(changed({ key: 'meta.id', title: 'a.b.c' }))).toMatchObject({ ok: true });
     expect(problems(changed({ key: '' }))).toEqual([
-      'key 不能是空的：写一个路径，如 messageType.code',
+      'key 不能为空：请填写一个路径，如 messageType.code',
     ]);
     expect(problems(changed({ items: 3 }))).toEqual([
-      'items 要是字符串：返回里那个列表的路径，返回本身就是列表时写空字符串',
+      'items 须为字符串：条目列表在返回数据中的路径，返回数据本身就是列表时填空字符串',
     ]);
     expect(problems(changed({ items: '.alerts', key: 'a..b', title: 'headline.' }))).toEqual([
-      'items 写成了「.alerts」：每一段都不能是空的（不要以点开头或结尾，不要连着写两个点）',
-      'key 写成了「a..b」：每一段都不能是空的（不要以点开头或结尾，不要连着写两个点）',
-      'title 写成了「headline.」：每一段都不能是空的（不要以点开头或结尾，不要连着写两个点）',
+      'items 填的是「.alerts」：每一段都不能为空（不能以点开头或结尾，不能连续两个点）',
+      'key 填的是「a..b」：每一段都不能为空（不能以点开头或结尾，不能连续两个点）',
+      'title 填的是「headline.」：每一段都不能为空（不能以点开头或结尾，不能连续两个点）',
     ]);
     expect(problems(changed({ items: 'data[0].alerts' }))).toEqual([
-      'items 写成了「data[0].alerts」：路径不支持数组下标，只能一层一层往对象里走',
+      'items 填的是「data[0].alerts」：路径不支持数组下标，只能逐层进入对象',
     ]);
     expect(problems(changed({ title: 'a'.repeat(monitorLimits.maxPathChars + 1) }))).toEqual([
-      `title 太长：路径最多 ${monitorLimits.maxPathChars} 个字`,
+      `title 过长：路径最多 ${monitorLimits.maxPathChars} 个字`,
     ]);
     expect(check(changed({ title: '长'.repeat(monitorLimits.maxPathChars) }))).toMatchObject({
       ok: true,
     });
     expect(problems(changed({ key: 7 }))).toEqual([
-      'key 要是字符串：一个路径，如 messageType.code',
+      'key 须为字符串：一个路径，如 messageType.code',
     ]);
   });
 
@@ -171,19 +169,19 @@ describe('描述的检查：字段', () => {
     const many = Array.from({ length: max }, (_, index) => `f${index}`);
     expect(check(changed({ show: many }))).toMatchObject({ ok: true });
     for (const show of [[], [...many, 'more'], 'headline']) {
-      expect(problems(changed({ show }))).toEqual([`show 要是 1 到 ${max} 个路径组成的数组`]);
+      expect(problems(changed({ show }))).toEqual([`show 须为 1 到 ${max} 个路径组成的数组`]);
     }
     expect(problems(changed({ show: ['a', '', 'b.', 'a'] }))).toEqual([
-      'show[1] 不能是空的：写一个路径，如 messageType.code',
-      'show[2] 写成了「b.」：每一段都不能是空的（不要以点开头或结尾，不要连着写两个点）',
-      'show 里「a」写了不止一次',
+      'show[1] 不能为空：请填写一个路径，如 messageType.code',
+      'show[2] 填的是「b.」：每一段都不能为空（不能以点开头或结尾，不能连续两个点）',
+      'show 中「a」重复出现',
     ]);
   });
 
   it('mode：reply、record；decide 还不支持', () => {
     expect(check(changed({ mode: 'record' }))).toMatchObject({ ok: true });
     expect(problems(changed({ mode: 'decide' }))).toEqual([
-      'mode 写 decide（你自己决定）还不支持，现在只能写 reply（触发你回复）或 record（只记录）',
+      'mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）',
     ]);
   });
 });
@@ -204,16 +202,16 @@ describe('描述的检查：条件', () => {
 
   it('不认得的比法；缺 field、op、value；比较里多写了别的', () => {
     expect(where({ field: 'a', op: 'like', value: 'x' })).toEqual([
-      `where.op 写成了「like」：比法只有 ${monitorOps.map(({ op }) => op).join('、')}`,
+      `where.op 填的是「like」：比较方式只有 ${monitorOps.map(({ op }) => op).join('、')}`,
     ]);
     expect(where({ value: 'x', extra: 1 })).toEqual([
-      'where 里没有 extra 这个字段：比较写 { field, op, value }，几个条件用 all、any 包起来',
-      'where 缺少 field：要比的字段（路径）',
-      `where 缺少 op：比法，${monitorOps.map(({ op }) => op).join('、')} 之一`,
+      'where 不支持字段 extra：单个比较写作 { field, op, value }，多个条件用 all、any 组合',
+      'where 缺少 field：要比较的字段（路径）',
+      `where 缺少 op：比较方式，${monitorOps.map(({ op }) => op).join('、')} 之一`,
     ]);
     expect(where({ field: 'a', op: 'eq' })).toEqual(['where 缺少 value']);
     expect(where({ field: 'a..b', op: 'eq', value: 1 })).toEqual([
-      'where.field 写成了「a..b」：每一段都不能是空的（不要以点开头或结尾，不要连着写两个点）',
+      'where.field 填的是「a..b」：每一段都不能为空（不能以点开头或结尾，不能连续两个点）',
     ]);
   });
 
@@ -226,24 +224,24 @@ describe('描述的检查：条件', () => {
     }
     expect(
       where({ field: 'a', op: 'eq', value: 'x'.repeat(monitorLimits.maxValueChars + 1) }),
-    ).toEqual([`where.value 太长：字符串最多 ${monitorLimits.maxValueChars} 个字`]);
+    ).toEqual([`where.value 过长：字符串最多 ${monitorLimits.maxValueChars} 个字`]);
     fine({ field: 'a', op: 'in', value: Array.from({ length: maxIn }, (_, index) => index) });
     for (const value of [[], Array.from({ length: maxIn + 1 }, (_, index) => index), 'alert']) {
       expect(where({ field: 'a', op: 'in', value })).toEqual([
-        `where.value：in 的 value 要是 1 到 ${maxIn} 个值组成的数组`,
+        `where.value：in 的 value 须为 1 到 ${maxIn} 个值组成的数组`,
       ]);
     }
     expect(where({ field: 'a', op: 'in', value: ['ok', null] })).toEqual([
       'where.value[1] 只能是字符串、数字或布尔值',
     ]);
     expect(where({ field: 'a', op: 'eq', value: ['x'] })).toEqual([
-      'where.value 是数组：只有 in 的 value 写数组，eq 写一个值',
+      'where.value 是数组：仅 in 的 value 可以是数组，eq 须填单个值',
     ]);
     expect(where({ field: 'a', op: 'gte', value: true })).toEqual([
-      'where.value：gte 要和数字或字符串比，不能是布尔值',
+      'where.value：gte 只能与数字或字符串比较，不能是布尔值',
     ]);
     expect(where({ field: 'a', op: 'contains', value: '' })).toEqual([
-      'where.value：contains 的 value 不能是空的',
+      'where.value：contains 的 value 不能为空',
     ]);
   });
 
@@ -251,10 +249,10 @@ describe('描述的检查：条件', () => {
     fine({
       all: [{ field: 'a', op: 'eq', value: 1 }, { any: [{ field: 'b', op: 'ne', value: 2 }] }],
     });
-    expect(where({ all: [] })).toEqual(['where.all 要是数组，里面至少一个条件']);
-    expect(where({ any: { field: 'a' } })).toEqual(['where.any 要是数组，里面至少一个条件']);
+    expect(where({ all: [] })).toEqual(['where.all 须为数组，其中至少一个条件']);
+    expect(where({ any: { field: 'a' } })).toEqual(['where.any 须为数组，其中至少一个条件']);
     expect(where({ all: [{ field: 'a', op: 'eq', value: 1 }], any: [] })).toEqual([
-      'where 里 all、any 只能写一个，不能和别的写在一起',
+      'where 中 all、any 只能填一个，且不能与其他字段同时出现',
     ]);
     expect(
       where({
@@ -264,10 +262,10 @@ describe('描述的检查：条件', () => {
         ],
       }),
     ).toEqual([
-      `where.all[1].any[0].op 写成了「xx」：比法只有 ${monitorOps.map(({ op }) => op).join('、')}`,
-      'where.all[1].any[1] 要是一个对象：比较写 { field, op, value }，几个条件用 { all: [...] } 或 { any: [...] } 包起来',
+      `where.all[1].any[0].op 填的是「xx」：比较方式只有 ${monitorOps.map(({ op }) => op).join('、')}`,
+      'where.all[1].any[1] 须为对象：单个比较写作 { field, op, value }，多个条件用 { all: [...] } 或 { any: [...] } 组合',
     ]);
-    expect(where('a = 1')[0]).toContain('where 要是一个对象');
+    expect(where('a = 1')[0]).toContain('where 须为对象');
   });
 
   it('最多套 4 层、比较最多 20 个，到上限的照收', () => {
@@ -276,13 +274,13 @@ describe('描述的检查：条件', () => {
       layers === 0 ? comparison : { [layers % 2 ? 'all' : 'any']: [nest(layers - 1)] };
     fine(nest(monitorLimits.maxDepth));
     expect(where(nest(monitorLimits.maxDepth + 1))).toEqual([
-      `where 套得太深：all、any 最多套 ${monitorLimits.maxDepth} 层`,
+      `where 嵌套过深：all、any 最多嵌套 ${monitorLimits.maxDepth} 层`,
     ]);
 
     const max = monitorLimits.maxComparisons;
     fine({ any: Array.from({ length: max }, () => comparison) });
     expect(
       where({ all: [comparison, { any: Array.from({ length: max }, () => comparison) }] }),
-    ).toEqual([`where 里的比较太多：最多 ${max} 个，现在有 ${max + 1} 个`]);
+    ).toEqual([`where 中的比较过多：最多 ${max} 个，当前有 ${max + 1} 个`]);
   });
 });

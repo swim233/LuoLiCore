@@ -162,41 +162,39 @@ describe('建任务给的时间', () => {
   });
 
   it('一次性：已经过了、晚于一年后、写法不对、多写了周期的字段，都说明哪里不对', () => {
-    expect(error({ kind: 'once', at: '2026-11-09 21:30' })).toContain('这个时刻已经过了');
+    expect(error({ kind: 'once', at: '2026-11-09 21:30' })).toContain('此时刻已过');
     expect(error({ kind: 'once', at: '2026-11-09 21:00' })).toContain(
-      '现在是 2026-11-09 21:30（周一）',
+      '当前时间 2026-11-09 21:30（周一）',
     );
     expect(error({ kind: 'once', at: '2027-11-09 21:30' })).toBeUndefined();
-    expect(error({ kind: 'once', at: '2027-11-09 21:31' })).toContain('最远只能约到一年后');
-    expect(error({ kind: 'once', at: '11-10 9 点' })).toContain('at 的写法不对');
-    expect(error({ kind: 'once' })).toContain('一次性任务要写 at');
+    expect(error({ kind: 'once', at: '2027-11-09 21:31' })).toContain('最长只能设到一年后');
+    expect(error({ kind: 'once', at: '11-10 9 点' })).toContain('at 的格式有误');
+    expect(error({ kind: 'once' })).toContain('一次性任务须填写 at');
     expect(error({ kind: 'once', at: '2026-11-10 09:00', time: '09:00' })).toContain(
-      '一次性任务只写 at，不用 time',
+      '一次性任务只需填写 at，无需填写 time',
     );
   });
 
   it('周期的：缺 time、写法不对、weekday 与 day 缺了或超出范围、字段用错了种类、截止日期已经过了', () => {
-    expect(error({ kind: 'daily' })).toContain('周期任务要写 time');
-    expect(error({ kind: 'daily', time: '25:00' })).toContain('time 的写法不对');
+    expect(error({ kind: 'daily' })).toContain('周期任务须填写 time');
+    expect(error({ kind: 'daily', time: '25:00' })).toContain('time 的格式有误');
     expect(error({ kind: 'daily', time: '08:00', at: '2026-11-10 08:00' })).toContain(
-      '周期任务不用 at',
+      '周期任务无需填写 at',
     );
-    expect(error({ kind: 'weekly', time: '08:00' })).toContain('weekly 要写 weekday');
+    expect(error({ kind: 'weekly', time: '08:00' })).toContain('weekly 须填写 weekday');
     expect(error({ kind: 'weekly', time: '08:00', weekday: 0 })).toContain('weekday 只能是 1–7');
     expect(error({ kind: 'weekly', time: '08:00', weekday: 8 })).toContain('weekday 只能是 1–7');
-    expect(error({ kind: 'monthly', time: '08:00' })).toContain('monthly 要写 day');
+    expect(error({ kind: 'monthly', time: '08:00' })).toContain('monthly 须填写 day');
     expect(error({ kind: 'monthly', time: '08:00', day: 32 })).toContain('day 只能是 1–31');
-    expect(error({ kind: 'daily', time: '08:00', weekday: 1 })).toContain('只有 weekly 用 weekday');
+    expect(error({ kind: 'daily', time: '08:00', weekday: 1 })).toContain('weekday 仅用于 weekly');
     expect(error({ kind: 'weekly', time: '08:00', weekday: 1, day: 1 })).toContain(
-      '只有 monthly 用 day',
+      'day 仅用于 monthly',
     );
-    expect(error({ kind: 'daily', time: '08:00', until: '12-31' })).toContain('until 的写法不对');
-    expect(error({ kind: 'daily', time: '08:00', until: '2026-11-08' })).toContain(
-      '截止日期已经过了',
-    );
+    expect(error({ kind: 'daily', time: '08:00', until: '12-31' })).toContain('until 的格式有误');
+    expect(error({ kind: 'daily', time: '08:00', until: '2026-11-08' })).toContain('截止日期已过');
     // 截止就是今天，今天的时刻已经过了：没有能到点的时间
     expect(error({ kind: 'daily', time: '08:00', until: '2026-11-09' })).toContain(
-      '截止日期之前没有能到点的时间了',
+      '截止日期之前已没有可触发的时间',
     );
   });
 });

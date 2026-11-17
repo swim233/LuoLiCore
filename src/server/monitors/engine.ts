@@ -38,7 +38,7 @@ const longestRetryMs = 3_600_000;
 /** 引擎自己出错、连失败都记不下时，这个来源最少隔多久再查 */
 const shortestHoldMs = 60_000;
 /** 引擎自己出错时记的那一次失败 */
-const internalFailure = { ok: false, kind: 'internal', text: '程序出错了' } as const;
+const internalFailure = { ok: false, kind: 'internal', text: '监听引擎发生错误' } as const;
 
 /** 引擎要任务服务做的几件事；除了 run，都只在那一串里调用 */
 export type EngineHost = {
@@ -385,7 +385,7 @@ export function createMonitorEngine({
   /** 发请求、取条目。服务没装上时不发请求 */
   async function request(source: FeedSource): Promise<CheckResult> {
     if (!layer.services.some(({ name }) => name === source.service)) {
-      return { ok: false, kind: 'unavailable', text: `服务 ${source.service} 没有装上` };
+      return { ok: false, kind: 'unavailable', text: `服务 ${source.service} 未安装` };
     }
     const fetched: FetchResult = await fetchItems(layer, source, { signal: controller.signal });
     if (fetched.ok) return { ok: true, items: fetched.items };
@@ -540,21 +540,21 @@ export function createMonitorEngine({
             'task.update_failed',
           );
         }
-        if (monitor.mode !== 'record') replies.push(dueTask(task));
+        if (monitor.mode !== 'record') replies.push(dueTask(task, 'monitor'));
       }
       if (replies.length > 0) await host.deliver(conversationId, replies, fromSeq);
     }
     if (cursorError !== undefined) throw cursorError;
   }
 
-  /** 交给前端的一个任务：标出是监视任务 */
-  function dueTask(task: Task): DueTask {
+  /** 交给前端的一个任务：标出是监视任务的哪种事件（查到了新的、查不到） */
+  function dueTask(task: Task, event: 'monitor' | 'monitor-failed'): DueTask {
     const { platformMessageId } = task.source;
     return {
       id: task.id,
       action: task.action,
       ...(platformMessageId === undefined ? {} : { platformMessageId }),
-      monitor: true,
+      event,
     };
   }
 
@@ -591,7 +591,7 @@ export function createMonitorEngine({
           { taskId: task.id, conversationId, source: sourceId },
           'monitor.failed_reported',
         );
-        replies.push(dueTask(task));
+        replies.push(dueTask(task, 'monitor-failed'));
       }
       if (replies.length > 0) await host.deliver(conversationId, replies, fromSeq);
     }

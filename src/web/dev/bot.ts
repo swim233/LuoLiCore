@@ -2,6 +2,7 @@ import { chars, rand, randi, uid } from '@luoli/ui/util';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
 import type { LiveTask } from '../../server/types';
 import { mockLive, mockStatus } from './mock-live';
+import { watchEventText, watchFailedText } from './mock-monitor';
 import { mockServer as server, svgImage } from './mock-server';
 import { U, imgPart, toolPart, toolSummary } from './seed';
 
@@ -114,18 +115,47 @@ class Bot {
   /**
    * 任务到点（Telegram 会话）：服务先写事件消息、改任务，再把它当作一次触发：空闲时走等待合并，开始时带着是哪几个任务；
    * 正在等待合并就并进这一轮（到点本身不推事件）；正在回复就等这次发完再回复一次（推「又被触发」，补的那次带任务）。
-   * Telegram 连不上时只有事件消息，不回复。返回有没有回复
+   * Telegram 连不上时只有事件消息，不回复。返回有没有回复。
+   * kind：task 定时任务到点（默认）；monitor 监视查到了新的；monitor-failed 监视满 6 小时还查不到（事件正文由 mock-monitor.ts 写）
    */
-  dueTasks(convId: string, ids: number[], script: Script) {
+  dueTasks(
+    convId: string,
+    ids: number[],
+    script: Script,
+    kind: 'task' | 'monitor' | 'monitor-failed' = 'task',
+  ) {
     const live: LiveTask[] = [];
     for (const id of ids) {
       const t = server.task(id);
-      if (!t || !server.fireTask(id, 'task')) continue;
-      live.push({ id: t.id, ref: t.ref, action: t.action });
+      if (!t) continue;
+      const text =
+        kind === 'monitor'
+          ? watchEventText(t.action)
+          : kind === 'monitor-failed' && t.monitor?.failing
+            ? watchFailedText(t, Date.parse(t.monitor.failing.since), t.monitor.failing.reason)
+            : undefined;
+      if (!server.fireTask(id, kind, text)) continue;
+      live.push({
+        id: t.id,
+        ref: t.ref,
+        action: t.action,
+        ...(kind === 'task' ? {} : { event: kind }),
+      });
     }
     if (!live.length || !this.online) return false;
     // 洛璃照任务说的做：回复里说一遍任务
-    script = { ...script, text: live.map((t) => `到点啦～ ${t.action}`).join('；') };
+    script = {
+      ...script,
+      text: live
+        .map((t) =>
+          kind === 'monitor'
+            ? `${t.action}：上海中心气象台刚发布了大风黄色预警，傍晚起沿海阵风 7～8 级，出门小心～`
+            : kind === 'monitor-failed'
+              ? `${t.action}，现在已经查不到半天了，可以请人看看服务的配置，或者取消这个任务（${t.ref}）。`
+              : `到点啦～ ${t.action}`,
+        )
+        .join('；'),
+    };
     const cur = this.runs.get(convId);
     if (!cur) {
       replyFlow(convId, { ...script, tasks: live });

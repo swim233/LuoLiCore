@@ -392,8 +392,8 @@ describe('会话管理', () => {
       const conversation = await sessions.open(id);
       await close();
 
-      await expect(sessions.open(id)).rejects.toThrow('洛璃服务正在退出');
-      expect(() => conversation.reply()).toThrow('洛璃服务正在退出');
+      await expect(sessions.open(id)).rejects.toThrow('核心服务正在退出');
+      expect(() => conversation.reply()).toThrow('核心服务正在退出');
     });
 
     it('关闭各会话：进行中的摘要被中止，记 summary.aborted', async () => {

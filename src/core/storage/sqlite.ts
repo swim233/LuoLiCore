@@ -663,7 +663,7 @@ export function readConversations(path: string): StoredConversation[] {
       throw new Error(
         version > schemaVersion
           ? `数据库版本比程序新（文件为 ${version}，程序支持 ${schemaVersion}）`
-          : `数据库版本比程序旧（文件为 ${version}，程序为 ${schemaVersion}），先启动一次洛璃服务`,
+          : `数据库版本比程序旧（文件为 ${version}，程序为 ${schemaVersion}），请先启动一次核心服务`,
       );
     }
     return db

@@ -187,17 +187,17 @@ describe('网址', () => {
     ]);
   });
 
-  it('不是 http、https 的报「只支持 http 和 https」，乱写的报「网址无效」', async () => {
+  it('不是 http、https 的报「仅支持 http 和 https」，乱写的报「网址无效」', async () => {
     const { call } = await fixture({});
-    expect(await toolError(call({ url: 'ftp://example.com/file' }))).toBe('只支持 http 和 https');
+    expect(await toolError(call({ url: 'ftp://example.com/file' }))).toBe('仅支持 http 和 https');
     expect(await toolError(call({ url: 'mailto:someone@example.com' }))).toBe(
-      '只支持 http 和 https',
+      '仅支持 http 和 https',
     );
     expect(await toolError(call({ url: 'http://exa mple.com/' }))).toBe('网址无效');
     expect(await toolError(call({ url: '   ' }))).toBe('网址无效');
   });
 
-  it('默认的判断下本机地址报「不能访问内网地址」', async () => {
+  it('默认的判断下本机地址报「无法访问内网地址」', async () => {
     const web = await serve(html(articleHtml()));
     const requester = createRequester();
     onClose(() => requester.close());
@@ -213,7 +213,7 @@ describe('网址', () => {
         }),
       ),
     );
-    expect(error).toBe('不能访问内网地址');
+    expect(error).toBe('无法访问内网地址');
     expect(web.sockets).toHaveLength(0);
   });
 });
@@ -604,7 +604,7 @@ describe('内容类型', () => {
     expect(parse(await call({ url: url('/bad.json') })).body).toBe('{"name": 坏');
   });
 
-  it('没写类型时按开头判断：像 HTML 的转换，其余不含 NUL 的当纯文本，含 NUL 的当非文本', async () => {
+  it('未标明类型时按开头判断：像 HTML 的转换，其余不含 NUL 的当纯文本，含 NUL 的当非文本', async () => {
     const { call, url } = await fixture({
       '/page': ok(articleHtml()),
       '/text': ok('没有类型的文字'),

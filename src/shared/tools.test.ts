@@ -33,8 +33,8 @@ describe('启动时装配工具清单', () => {
 
     expect(result.ok && result.tools.map((t) => t.definition.name)).toEqual(['dice']);
     expect(lines).toEqual([
-      '工具 search 没有装上：缺少环境变量 LUOLI_TEST_URL',
-      '工具 mail 没有装上：缺少环境变量 LUOLI_TEST_MAIL',
+      '工具 search 未安装：缺少环境变量 LUOLI_TEST_URL',
+      '工具 mail 未安装：缺少环境变量 LUOLI_TEST_MAIL',
     ]);
     expect(entries).toEqual([
       {

@@ -29,7 +29,7 @@ function childOf(value: JsonValue | undefined, segment: string): JsonValue | und
 
 /** 值是什么：给说明用 */
 export function kindOf(value: JsonValue | undefined): string {
-  if (value === undefined) return '没有';
+  if (value === undefined) return '不存在';
   if (value === null) return '空值（null）';
   if (typeof value === 'string') return '字符串';
   if (typeof value === 'boolean') return '布尔值';
@@ -41,9 +41,9 @@ export function kindOf(value: JsonValue | undefined): string {
 /** 键的清单，最多列 30 个 */
 function keysOf(object: JsonObject): string {
   const keys = Object.keys(object);
-  if (keys.length === 0) return '（没有键）';
+  if (keys.length === 0) return '（无键）';
   const shown = keys.slice(0, 30).join('、');
-  return keys.length > 30 ? `${shown} 等 ${keys.length} 个` : shown;
+  return keys.length > 30 ? `${shown} 等共 ${keys.length} 个` : shown;
 }
 
 /** 截短给说明里引用的值 */
@@ -82,26 +82,26 @@ export function extractItems(
   }
   if (current === undefined || current === null) {
     const where = reached
-      ? `${reached.path ? `那一层（${reached.path}）` : '返回的最外层'}有这些键：${keysOf(reached.object)}`
-      : '返回的最外层不是对象';
+      ? `${reached.path ? `该层（${reached.path}）` : '返回数据的最外层'}包含这些键：${keysOf(reached.object)}`
+      : '返回数据的最外层不是对象';
     warnings.push(
-      `items 写的「${itemsPath}」在返回里没有（或者是 null），当作 0 条。${where}。要是路径写错了，改 items`,
+      `items 填的「${itemsPath}」在返回数据中不存在（或为 null），按 0 条处理。${where}。若路径有误，请修改 items`,
     );
     return { ok: true, items: [], warnings };
   }
   if (!Array.isArray(current)) {
-    const keys = isJsonObject(current) ? `（这一层有这些键：${keysOf(current)}）` : '';
-    const target = itemsPath === '' ? '返回本身' : `items 指到的「${itemsPath}」`;
+    const keys = isJsonObject(current) ? `（此层包含这些键：${keysOf(current)}）` : '';
+    const target = itemsPath === '' ? '返回数据本身' : `items 指向的「${itemsPath}」`;
     return {
       ok: false,
-      error: `${target}不是列表，是${kindOf(current)}${keys}。items 要指到返回里那个列表`,
+      error: `${target}不是列表，是${kindOf(current)}${keys}。items 须指向返回数据中的条目列表`,
     };
   }
 
   let list: JsonValue[] = current;
   if (list.length > monitorLimits.maxItems) {
     warnings.push(
-      `返回里有 ${list.length} 条，一次最多处理 ${monitorLimits.maxItems} 条，后面的 ${list.length - monitorLimits.maxItems} 条不要了`,
+      `返回数据共 ${list.length} 条，每次最多处理 ${monitorLimits.maxItems} 条，其后的 ${list.length - monitorLimits.maxItems} 条已丢弃`,
     );
     list = list.slice(0, monitorLimits.maxItems);
   }
@@ -114,7 +114,7 @@ export function extractItems(
     if (!isJsonObject(entry)) {
       return {
         ok: false,
-        error: `第 ${position} 条不是对象，是${kindOf(entry)}。监视只能盯每一条都是对象的列表`,
+        error: `第 ${position} 条不是对象，是${kindOf(entry)}。监听任务仅支持每个条目都是对象的列表`,
       };
     }
     const value = lookup(entry, key);
@@ -123,13 +123,13 @@ export function extractItems(
     if (text === undefined || text.trim() === '') {
       const problem =
         value === undefined
-          ? '没有这个字段'
+          ? '字段不存在'
           : text === undefined
-            ? `是${kindOf(value)}，要是字符串或数字`
-            : '是空的字符串';
+            ? `是${kindOf(value)}，须为字符串或数字`
+            : '是空字符串';
       return {
         ok: false,
-        error: `第 ${position} 条的 key（${key}）${problem}。key 要指到每一条里当编号用的字段`,
+        error: `第 ${position} 条的 key（${key}）${problem}。key 须指向每个条目中用作编号的字段`,
       };
     }
     if (seen.has(text)) {
@@ -142,7 +142,7 @@ export function extractItems(
   }
   if (duplicates > 0) {
     warnings.push(
-      `有 ${duplicates} 条的编号和前面的重复（如「${quote(firstDuplicate!)}」），只算第一次出现的那条。要是 key 选得不对（不是每条都不一样），换一个字段`,
+      `有 ${duplicates} 条的编号与前面的条目重复（如「${quote(firstDuplicate!)}」），仅保留首次出现的那条。若 key 选择不当（并非每条都不同），请更换字段`,
     );
   }
   return { ok: true, items, warnings };
@@ -158,7 +158,7 @@ export function fieldPaths(item: JsonObject): string[] {
   return Object.entries(item).flatMap(([name, value]) => {
     if (!isJsonObject(value)) return [mark(name, value)];
     const inner = Object.entries(value);
-    if (inner.length === 0) return [`${name}（空的对象）`];
+    if (inner.length === 0) return [`${name}（空对象）`];
     return inner.map(([child, childValue]) => mark(`${name}.${child}`, childValue));
   });
 }

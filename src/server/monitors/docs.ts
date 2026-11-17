@@ -45,7 +45,7 @@ export type MonitorDoc = {
 
 /** 元文档。file 默认是这个目录下的 docs/monitor.md，测试里换成临时文件 */
 export function createMonitorDoc({ file = defaultFile }: { file?: string } = {}): MonitorDoc {
-  const label = '监视任务的文档（src/server/monitors/docs/monitor.md）';
+  const label = '监听任务的文档（src/server/monitors/docs/monitor.md）';
   return {
     check() {
       let text: string;
@@ -62,9 +62,9 @@ export function createMonitorDoc({ file = defaultFile }: { file?: string } = {})
       try {
         text = await readFile(file, 'utf8');
       } catch {
-        throw new ServiceError('docs', '监视任务的文档读不了');
+        throw new ServiceError('docs', '监听任务的文档读取失败');
       }
-      if (problemsOf(text).length > 0) throw new ServiceError('docs', '监视任务的文档读不了');
+      if (problemsOf(text).length > 0) throw new ServiceError('docs', '监听任务的文档读取失败');
       return text.replace(placeholder, (_whole, name: string) => placeholders[name]!());
     },
   };
@@ -73,6 +73,6 @@ export function createMonitorDoc({ file = defaultFile }: { file?: string } = {})
 /** 有服务叫 monitor 时的说明（和元文档重名，服务启动时报错退出）；没有时 undefined */
 export function monitorDocClash(services: ReadonlyArray<{ name: string }>): string | undefined {
   return services.some(({ name }) => name === monitorDocName)
-    ? `服务名 ${monitorDocName} 和监视任务的文档重名，服务改个名字`
+    ? `服务名 ${monitorDocName} 和监听任务的文档重名，服务改个名字`
     : undefined;
 }

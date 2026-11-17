@@ -17,7 +17,7 @@ export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 /** 连不上洛璃服务：没在运行、端口不对，或者回的不是洛璃服务 */
 export class ServiceUnreachable extends Error {
   constructor(cause?: unknown) {
-    super('连不上洛璃服务', { cause });
+    super('无法连接核心服务', { cause });
     this.name = 'ServiceUnreachable';
   }
 }

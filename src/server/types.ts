@@ -324,8 +324,11 @@ export type LiveTask = {
   ref: string;
   /** 做什么 */
   action: string;
-  /** 是监视任务（查到了新的东西，或者连续查不到）；定时任务没有 */
-  monitor?: true;
+  /**
+   * 监视任务触发的：monitor 是查到了新的东西，monitor-failed 是连续 6 小时查不到（在会话里说一次）。
+   * 定时任务到点时没有
+   */
+  event?: 'monitor' | 'monitor-failed';
 };
 
 /** 回复里的一段：思考、文字、工具调用。step 是第几步（从 1 起，一步是向模型发一次请求） */
@@ -605,7 +608,7 @@ export type CommandKind = 'compact' | 'clear';
  * POST /api/conversations/:id/compact、POST /api/conversations/:id/clear 的请求体：执行人的名字
  * （1～100 个字符，去掉首尾空白后不能是空的），记在新的一段上。现在只收 CLI 会话。
  * 开始之前就能判断的照 ErrorResponse 返回：404 没有这个会话，400 不是 CLI 会话、参数不对，
- * 415 不是 JSON，503 洛璃服务正在退出。其余情况返回一串 CommandEvent：text/event-stream，
+ * 415 不是 JSON，503 核心服务正在退出。其余情况返回一串 CommandEvent：text/event-stream，
  * 一个事件一行 `data: {JSON}`，事件之间空一行，最后一行是 `data: [DONE]`（和对话接口的流一样）；
  * 每 25 秒插一行注释 `: ping` 作心跳。
  * 会话空着（没有进行中的回复、排队的补回复、前面的指令）时马上执行，否则先发 waiting，等它们全部结束
@@ -694,8 +697,13 @@ export type TaskRow = TaskBrief & {
 export type TaskMonitor = {
   /** 洛璃写的描述，原样 */
   description: Readonly<Record<string, unknown>>;
-  /** 写成人话的一行，如「每 10 分钟查一次 · 和风天气 · 天气预警」（和 scheduleText 相同） */
+  /** 写成人话的一行，如「每 10 分钟执行一次 · 和风天气 · 天气预警」（和 scheduleText 相同） */
   line: string;
+  /**
+   * 写成人话的几行（展开以后看），按这个次序：监听对象、参数（有参数时）、监听间隔、监听范围、事件内容、
+   * 处理方式。说法同 list_tasks 和建、改任务的结果，每项最多 2000 个字，超出的用「……」收尾
+   */
+  facts: Array<{ label: string; text: string }>;
   /** 上次检查（成功、失败都算）；还没查过时没有 */
   lastCheckedAt?: string;
   /** 上次查通 */

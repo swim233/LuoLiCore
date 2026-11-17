@@ -99,7 +99,7 @@ export function chatErrorText(err: unknown): string {
   }
   const status = (err as { statusCode?: unknown } | null)?.statusCode;
   if (typeof status === 'number') return `请求失败（HTTP ${status}）`;
-  if (err instanceof TypeError) return '连不上洛璃服务';
+  if (err instanceof TypeError) return '与核心服务的连接中断';
   if (err instanceof Error && err.message) return err.message;
   return '请求失败';
 }

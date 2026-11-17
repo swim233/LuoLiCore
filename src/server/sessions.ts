@@ -104,7 +104,7 @@ export function createSessions(options: SessionOptions) {
     core: Conversation,
     { tasks, ...replyOptions }: SessionReplyOptions = {},
   ): ReadableStream<MessageChunk> {
-    if (closing) throw new Error('洛璃服务正在退出，不再开始新的回复');
+    if (closing) throw new Error('核心服务正在退出，不再开始新的回复');
     const { abortSignal } = replyOptions;
     const source = core.reply({
       ...replyOptions,
@@ -230,7 +230,7 @@ export function createSessions(options: SessionOptions) {
       conversationId: string,
       { checkIdleOnCreate = true }: { checkIdleOnCreate?: boolean } = {},
     ): Promise<SharedConversation> {
-      if (closing) return Promise.reject(new Error('洛璃服务正在退出，不再打开会话'));
+      if (closing) return Promise.reject(new Error('核心服务正在退出，不再打开会话'));
       let entry = opened.get(conversationId);
       if (!entry) {
         const created = (async () => {

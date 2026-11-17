@@ -74,7 +74,7 @@ if (!pluginSetup.ok) {
 
 // 服务层与 feeds.db：总是有（ADR-0014）。feeds.db 记每天的请求数和监视的来源、动态、谁在盯，打不开时
 // 退出；请求经防内网的安全请求。一个服务都没装上时服务层里没有服务：没有读文档、调服务、试跑监视
-// 三个工具，也建不了监视任务；以前建的监视任务留着，照「服务没有装上」的查不到处理
+// 三个工具，也建不了监视任务；以前建的监视任务留着，照「服务未安装」的查不到处理
 let feeds: FeedsDb;
 try {
   mkdirSync(dirname(config.feedsDbPath), { recursive: true });

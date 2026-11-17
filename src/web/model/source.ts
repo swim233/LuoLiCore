@@ -37,8 +37,8 @@ export interface NewMessage {
   tools?: Record<string, ToolResultInfo>;
   /** 消息时间，默认现在 */
   at?: number;
-  /** 事件（任务到点、任务超时）：没有发言人的用户消息，说的是哪个任务 */
-  event?: { type: 'task' | 'task-missed'; taskId: number };
+  /** 事件（任务触发、任务超时、监听触发、监听失败）：没有发言人的用户消息，说的是哪个任务 */
+  event?: { type: 'task' | 'task-missed' | 'monitor' | 'monitor-failed'; taskId: number };
   meta?: {
     aborted?: true;
     failed?: true;

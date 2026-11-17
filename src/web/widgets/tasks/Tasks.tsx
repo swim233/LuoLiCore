@@ -119,7 +119,7 @@ function TasksView({ mode }: ViewProps) {
   let notice: React.ReactNode = null;
   if (phase === 'loading' || (phase === 'ready' && !ready && !problem))
     notice = <Empty title="加载中…" />;
-  else if (phase === 'down') notice = <Empty title="连不上洛璃服务">连上后会自动恢复</Empty>;
+  else if (phase === 'down') notice = <Empty title="与核心服务的连接中断">自动重连中</Empty>;
   else if (problem)
     notice = (
       <Empty
@@ -137,9 +137,7 @@ function TasksView({ mode }: ViewProps) {
     notice = ended.length ? (
       <Empty flat>没有进行中的任务</Empty>
     ) : (
-      <Empty title="还没有任务">
-        在对话里跟{name}说「明早 9 点提醒我交周报」，任务就会出现在这里。
-      </Empty>
+      <Empty title="当前没有任务">与{name}对话以创建任务</Empty>
     );
   return (
     <Pane>
@@ -190,7 +188,7 @@ export const TASKS_DEF: WidgetDef = {
   refreshOn: ['tasks:update', 'data:reset', 'link', 'today:update'],
   thumb() {
     const phase = link.get().phase;
-    if (phase === 'down') return '连不上洛璃服务';
+    if (phase === 'down') return '与核心服务的连接中断';
     if (phase === 'loading' || !(tasksReady() || tasksProblem())) return '加载中…';
     return tasksThumb();
   },

@@ -16,7 +16,7 @@ type Layer = Pick<ServiceLayer, 'services' | 'check' | 'call'>;
 function tryTool(layer: Layer) {
   const tool = createTryMonitorTool({
     layer,
-    checkConversation: async (id) => (id === 'cli' ? 'CLI 会话不能建任务' : undefined),
+    checkConversation: async (id) => (id === 'cli' ? 'CLI 会话不能创建任务' : undefined),
   });
   const run = (monitor: Record<string, unknown>, conversation = 'web') =>
     Promise.resolve(
@@ -99,8 +99,8 @@ describe('试跑的工具', () => {
     expect(output).toBe(
       [
         resultNotice,
-        '试跑通过。取到 7 条，其中 3 条符合 where。',
-        '每条的字段（从第一条取）：id、headline、messageType.code、severity、level',
+        '测试通过。获取到 7 条，其中 3 条符合 where。',
+        '条目的字段（取自第一条）：id、headline、messageType.code、severity、level',
         '---',
         '第 1 条（符合）：\n预警 1\nseverity: moderate\nlevel: 1.10',
         '',
@@ -112,11 +112,11 @@ describe('试跑的工具', () => {
         '',
         '第 5 条（不符合）：\n预警 5\nseverity: moderate\nlevel: 1.10',
         '',
-        '其余 2 条只列标题：',
+        '其余 2 条仅列标题：',
         '- 第 6 条（符合）：预警 6',
         '- 第 7 条（不符合）：预警 7',
         '---',
-        '可以用 create_task 建这个监视任务：kind 写 monitor，monitor 里放这份描述（建的时候还要写 interval_minutes、mode）。',
+        '可以用 create_task 创建此监听任务：kind 填 monitor，monitor 填这份描述（创建时还需填写 interval_minutes、mode）。',
       ].join('\n'),
     );
     expect(server.requests.map(({ path }) => path)).toEqual([
@@ -140,14 +140,14 @@ describe('试跑的工具', () => {
     });
 
     expect(output.split('\n').slice(1)).toEqual([
-      '试跑通过。取到 1 条（没写 where，每一条都算）。',
-      '每条的字段（从第一条取）：id、name',
+      '测试通过。获取到 1 条（未填写 where，全部符合）。',
+      '条目的字段（取自第一条）：id、name',
       '---',
       '第 1 条：',
       '甲',
       'id: 9007199254740993',
       '---',
-      '可以用 create_task 建这个监视任务：kind 写 monitor，monitor 里放这份描述。',
+      '可以用 create_task 创建此监听任务：kind 填 monitor，monitor 填这份描述。',
     ]);
   });
 
@@ -156,11 +156,11 @@ describe('试跑的工具', () => {
     const { run } = tryTool(layer);
 
     expect((await run(description)).split('\n').slice(1)).toEqual([
-      '试跑通过。取到 0 条。',
-      '现在没有条目，没法核对字段，照文档写的为准。',
+      '测试通过。获取到 0 条。',
+      '当前没有条目，无法核对字段，以文档为准。',
       '提醒：',
-      '- items 写的「alerts」在返回里没有（或者是 null），当作 0 条。返回的最外层有这些键：code、warning。要是路径写错了，改 items',
-      '可以用 create_task 建这个监视任务：kind 写 monitor，monitor 里放这份描述（建的时候还要写 interval_minutes、mode）。',
+      '- items 填的「alerts」在返回数据中不存在（或为 null），按 0 条处理。返回数据的最外层包含这些键：code、warning。若路径有误，请修改 items',
+      '可以用 create_task 创建此监听任务：kind 填 monitor，monitor 填这份描述（创建时还需填写 interval_minutes、mode）。',
     ]);
   });
 
@@ -168,7 +168,7 @@ describe('试跑的工具', () => {
     const { layer } = await serving('{"alerts":[{"id":"a"},{"id":"a"}]}');
     const { run } = tryTool(layer);
     expect(await run({ ...description, where: undefined })).toContain(
-      '提醒：\n- 有 1 条的编号和前面的重复（如「a」），只算第一次出现的那条。',
+      '提醒：\n- 有 1 条的编号与前面的条目重复（如「a」），仅保留首次出现的那条。',
     );
   });
 
@@ -182,10 +182,10 @@ describe('试跑的工具', () => {
 
     expect(message).toBe(
       [
-        '试跑没通过：描述有问题，改了再试。',
-        '- key 不能是空的：写一个路径，如 messageType.code',
-        '- where.op 写成了「like」：比法只有 eq、ne、in、gt、gte、lt、lte、contains',
-        '- mode 写 decide（你自己决定）还不支持，现在只能写 reply（触发你回复）或 record（只记录）',
+        '测试未通过：描述有问题，请修改后重新测试。',
+        '- key 不能为空：请填写一个路径，如 messageType.code',
+        '- where.op 填的是「like」：比较方式只有 eq、ne、in、gt、gte、lt、lte、contains',
+        '- mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）',
       ].join('\n'),
     );
     expect(server.requests).toEqual([]);
@@ -198,31 +198,31 @@ describe('试跑的工具', () => {
     });
     const { run } = tryTool(layer);
     expect(await toolError(run(description))).toBe(
-      '试跑没通过：调接口出错。服务 demo 回了 HTTP 500：{"error":"维护中"}',
+      '测试未通过：调用接口出错。服务 demo 返回 HTTP 500：{"error":"维护中"}',
     );
   });
 
   it('正文不是 JSON、返回的样子和描述对不上：说清是哪一步', async () => {
     const page = await serving('<html>维护中</html>', { contentType: 'text/html' });
     expect(await toolError(tryTool(page.layer).run(description))).toBe(
-      '试跑没通过：服务返回的正文不是 JSON（text/html）。监视只能盯返回 JSON 的接口',
+      '测试未通过：服务返回的正文不是 JSON（text/html）。监听任务仅支持返回 JSON 的接口',
     );
 
     const object = await serving('{"alerts":{"id":"a"}}');
     expect(await toolError(tryTool(object.layer).run(description))).toBe(
-      '试跑没通过：返回的样子和描述对不上。items 指到的「alerts」不是列表，是对象（这一层有这些键：id）。items 要指到返回里那个列表',
+      '测试未通过：返回数据的结构与描述不符。items 指向的「alerts」不是列表，是对象（此层包含这些键：id）。items 须指向返回数据中的条目列表',
     );
 
     const keyless = await serving('{"alerts":[{"headline":"x"}]}');
     expect(await toolError(tryTool(keyless.layer).run(description))).toBe(
-      '试跑没通过：返回的样子和描述对不上。第 1 条的 key（id）没有这个字段。key 要指到每一条里当编号用的字段',
+      '测试未通过：返回数据的结构与描述不符。第 1 条的 key（id）字段不存在。key 须指向每个条目中用作编号的字段',
     );
   });
 
   it('CLI 会话：照检查会话的说明以错误结束，不发请求', async () => {
     const { layer, server } = await serving('[]');
     const { run } = tryTool(layer);
-    expect(await toolError(run(description, 'cli'))).toBe('CLI 会话不能建任务');
+    expect(await toolError(run(description, 'cli'))).toBe('CLI 会话不能创建任务');
     expect(server.requests).toEqual([]);
   });
 
@@ -231,8 +231,8 @@ describe('试跑的工具', () => {
     const { tool } = tryTool(layer);
     const summary = (monitor: Record<string, unknown>) =>
       (tool as ToolDefinition).summary!({ input: { monitor } });
-    expect(summary(description)).toBe('试跑 · 示例服务 · 搜索');
-    expect(summary({ ...description, service: 'nope', endpoint: 'x' })).toBe('试跑 · nope · x');
-    expect(summary({})).toBe('试跑');
+    expect(summary(description)).toBe('测试 · 示例服务 · 搜索');
+    expect(summary({ ...description, service: 'nope', endpoint: 'x' })).toBe('测试 · nope · x');
+    expect(summary({})).toBe('测试');
   });
 });

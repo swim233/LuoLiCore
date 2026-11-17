@@ -1938,6 +1938,54 @@ body::before {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* 监视的两种事件（监视到点、监视查不到）：这一行是个按钮（字和别的事件一样，悬停变亮，末尾一个小箭头），点一下在下面展开正文。
+   外框固定成最宽，展开前后这一行不左右挪；正文的底是库的半透明面板（ll-inset），高度从 0 平滑地长出来（写法同库里折叠的高度过渡），
+   正文最高 240 像素、超出的在里面滚（库的细滚动条 ll-scrollbar）。收着的时候 inert，Tab 走不进去 */
+.evt.is-fold {
+  width: min(92%, 640px);
+}
+.evt-head {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+@media (hover: hover) {
+  .evt-head:hover {
+    color: var(--ll-fg-2);
+  }
+}
+/* 小箭头跟着时间走（时间不换行，箭头不会单独掉到下一行） */
+.evt-head .ll-chev {
+  margin-left: 0.6em;
+  vertical-align: 0.1em;
+}
+.evt-body {
+  interpolate-size: allow-keywords;
+  height: 0;
+  overflow: clip;
+  transition: height 0.2s var(--ll-ease-out);
+}
+.evt-body[data-open] {
+  height: auto;
+}
+.evt-body-in {
+  max-height: 240px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  overflow: auto;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--ll-text-sm);
+  line-height: 1.55;
+  color: var(--ll-fg-2);
+}
 /* 「此刻」里的洛璃：等宽字、行距 1.6，排版跟着收紧 */
 .tl-body .ll-md-p {
   margin-bottom: 0.2em;
@@ -2300,7 +2348,7 @@ body::before {
 
 /* ---------- 任务 ----------
    任务部件：按会话分组的列表（窗格的滚动区，悬停高亮同会话列表），行的字号、行距、次要文字的颜色和会话列表一致；
-   「下次到点」用强调色（蓝）：任务不是洛璃本人，不用金色。已结束的行整体暗一档。
+   「下次触发」用强调色（蓝）：任务不是洛璃本人，不用金色。已结束的行整体暗一档。
    全屏会话头部的浮层（.task-pop）是库的 Popover（长开），外壳（玻璃底、模糊、位置）库给，这里只写宽度、内边距和行的圆角 */
 .tasks {
   --ll-pane-sc-pt: 4px;
@@ -2363,7 +2411,7 @@ body::before {
     pointer-events: none;
   }
 }
-/* 取消在这一行里确认：「取消这个任务？」「确认」「算了」 */
+/* 取消在这一行里确认：「取消此任务？」「确认」「返回」 */
 .task-ask {
   display: flex;
   align-items: center;
@@ -2416,6 +2464,91 @@ body::before {
 }
 .task-pop .task-row {
   border-radius: var(--ll-radius-md);
+}
+/* 内容多到出竖向滚动条时，浮层里悬停高亮的那一块（库的 ll-glide）还是按滚动条出现之前的宽度排的版，右边会超出几像素、
+   短暂撑出一条横向滚动条（鼠标一动、高亮重新量过就没了）：浮层里滚动的那一层不横向滚（里面真要横着滚的，比如描述原文，有自己的滚动） */
+.task-pop .ll-popover-body {
+  overflow-x: hidden;
+}
+
+/* 监视任务的一行：右边第一行是检查的情况加展开的小箭头（库的 Button，ghost、sm），「取消」在它下面；
+   「查不到」是库的标签（soft），换成危险色用的是标签自己的颜色变量；展开后的内容整行宽，在行的下面 */
+.task-side-top {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* 小箭头的按钮比一行小字高，有自己的内边距：上下、往右各让出一点，行不被它撑高，箭头和下面的「取消」对齐 */
+  margin: -6px -6px -6px 0;
+}
+/* 监视任务的行里，展开的内容（高度 0 时）不多占一条行距；它和上面隔开的距离写在 .task-detail-in 里 */
+.task-row.is-monitor {
+  row-gap: 0;
+}
+.task-side-top > :first-child {
+  margin-right: 4px;
+}
+.task-fail {
+  --ll-tag-fg: var(--ll-danger-pale);
+  --ll-tag-bg: var(--ll-danger-soft);
+  font-weight: 600;
+}
+/* 展开的内容：高度从 0 平滑地长出来（写法同库里折叠的高度过渡，不引 JS）；收着的时候 inert，Tab 走不进去 */
+.task-detail {
+  interpolate-size: allow-keywords;
+  min-width: 0;
+  height: 0;
+  overflow: clip;
+  transition: height 0.2s var(--ll-ease-out);
+}
+.task-detail[data-open] {
+  height: auto;
+}
+.task-detail-in {
+  margin-top: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--ll-text-sm);
+  line-height: 1.55;
+  color: var(--ll-fg-2);
+}
+.task-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 12px;
+}
+.task-facts dt {
+  color: var(--ll-fg-dim);
+  white-space: nowrap;
+}
+.task-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.task-check,
+.task-due {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.task-check[data-kind='failing'] {
+  color: var(--ll-danger);
+}
+.task-desc-head {
+  padding: 2px 0;
+}
+.task-json {
+  max-width: 100%;
+  max-height: 320px;
+  margin: 4px 0 0;
+  padding: 6px 0 2px;
+  overflow: auto;
+  font-family: var(--ll-font-mono);
+  font-size: var(--ll-text-xs);
+  line-height: 1.5;
+  color: var(--ll-fg-2);
 }
 
 /* ---------- 设置（骨架） ---------- */
@@ -2748,6 +2881,11 @@ body::before {
 .still .tl.is-new,
 .still .evt.is-new {
   animation: none !important;
+}
+/* 监视任务展开的内容、监视事件展开的正文：高度是排版，关动画时直接到位，不用上面统一的 0.12 秒过渡 */
+.still .task-detail,
+.still .evt-body {
+  transition: none !important;
 }
 /* 「预先糊好」的气泡里垫的那层星空（.bubble-sky）：新挂上时先按默认的 --sk-x、--sk-y、--sk-w、--sk-h 算出第一份样式，脚本马上写进对好的值；
    上面统一的 0.12 秒过渡会让 background-position、background-size 从默认值滑到对好的位置，那几帧里星空和窗口对不齐（色差 1～3/255）。

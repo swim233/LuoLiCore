@@ -36,7 +36,7 @@ import type {
      断线重连后合并（已经取到的消息和阅读位置留着，补取断线期间的新消息，见 sync.ts 的 applyResync）；
    - 之后的 conversation、message、today、task 事件增量放进 db，发部件在听的总线事件；
    - hello 里的现场、status 与 live 事件交给 live-feed.ts：「此刻」、徽记、顶栏、助手的名字都从那里来；
-   - 连不上时（SSE 断了，或取数据失败）连接状态是 down，部件显示「连不上洛璃服务」；EventSource 自己会重连，连上后自动恢复；
+   - 连不上时（SSE 断了，或取数据失败）连接状态是 down，部件显示「与核心服务的连接中断」；EventSource 自己会重连，连上后自动恢复；
    - 今天的日期（服务器时区）变了就重新取今日概况。 */
 const RETRY_MS = 3000;
 const DAY_CHECK_MS = 30_000;

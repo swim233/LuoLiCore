@@ -113,7 +113,7 @@ describe('read_docs', () => {
         '这是假的文档。',
         '',
         '---',
-        '这份文档的各节（读一节：read_docs，doc 写 demo，section 写接口 id）：',
+        '本文档的各节（读取其中一节：调用 read_docs，doc 填 demo，section 填接口 id）：',
         '- item：条目',
         '- search：搜索',
       ].join('\n'),
@@ -130,10 +130,10 @@ describe('read_docs', () => {
   it('名字不对时以错误结束，列出有哪些', async () => {
     const { call } = toolsFor([fakeService()]);
     expect(await toolError(call('read_docs', { doc: 'nope' }))).toBe(
-      '没有这个服务：nope（有：demo）',
+      '服务不存在：nope（可用的服务：demo）',
     );
     expect(await toolError(call('read_docs', { doc: 'demo', section: 'nope' }))).toBe(
-      '服务 demo 的文档没有这一节：nope（有：item、search）',
+      '服务 demo 的文档没有此章节：nope（可用的章节：item、search）',
     );
   });
 });
@@ -176,7 +176,7 @@ describe('call_service', () => {
       await toolError(
         call('call_service', { service: 'demo', endpoint: 'item', params: { id: 'fail' } }),
       ),
-    ).toBe('服务 demo 回了 HTTP 400：{"a":"***","b":"***"}');
+    ).toBe('服务 demo 返回 HTTP 400：{"a":"***","b":"***"}');
   });
 
   it('不是 JSON 的原样返回', async () => {
@@ -194,7 +194,7 @@ describe('call_service', () => {
     const [first, second, third, body] = output.split('\n');
     expect([first, second, third]).toEqual([
       notice,
-      `正文共 ${maxResultChars + 500} 字符，太长，下面只给出前 ${maxResultChars} 字符`,
+      `正文共 ${maxResultChars + 500} 字符，过长，以下仅给出前 ${maxResultChars} 字符`,
       '---',
     ]);
     expect(body).toBe('天'.repeat(maxResultChars));
@@ -217,18 +217,18 @@ describe('call_service', () => {
       await toolError(
         call('call_service', { service: 'demo', endpoint: 'item', params: { page: 1 } }),
       ),
-    ).toBe('参数 page 不认识。接口 item 能用的参数：id（路径参数，必填）、lang、q');
+    ).toBe('不支持参数 page。接口 item 可用的参数：id（路径参数，必填）、lang、q');
     expect(
       await toolError(
         call('call_service', { service: 'demo', endpoint: 'item', params: { id: 'bad' } }),
       ),
-    ).toBe('服务 demo 回了 HTTP 400：{"error":"Invalid Parameters"}');
+    ).toBe('服务 demo 返回 HTTP 400：{"error":"Invalid Parameters"}');
     await call('call_service', { service: 'demo', endpoint: 'search' });
     expect(await toolError(call('call_service', { service: 'demo', endpoint: 'search' }))).toBe(
-      '今天的额度用完了（服务 demo 每天最多 2 次请求），明天再试',
+      '今日额度已用完（服务 demo 每天最多 2 次请求），请明天再试',
     );
     expect(await toolError(call('call_service', { service: 'nope', endpoint: 'x' }))).toBe(
-      '没有这个服务：nope（有：demo）',
+      '服务不存在：nope（可用的服务：demo）',
     );
   });
 

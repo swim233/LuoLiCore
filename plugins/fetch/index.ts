@@ -18,20 +18,20 @@ import { siteHandlers, type SiteHandler } from './sites.js';
 // fetch：读一个网址，转成 Markdown 交给模型（ADR-0007）
 
 const description = [
-  '读一个网址（http、https），把网页转成 Markdown 返回。群里有人发了链接、问到网页上的内容，或者需要某个网页上的信息时用它。它不能搜索，只能读给定的网址；内网地址读不了。',
-  '结果开头几行是元数据（URL、标题、长度等），`---` 之后是正文。正文太长时一次只给一段，头部「长度」一行给出接着读用的 offset；offset 按同一个 mode 计，换 mode 时从 0 读起。',
-  '默认只取文章正文；要看评论区等正文以外的内容，用 mode: "page" 再读一次。',
+  '此工具用于访问网址（http、https），工具会把网页转成 Markdown 返回给你。会话中有人发了链接、问到网页上的内容，或者需要某个网页上的信息时可以使用此工具。此工具不能搜索，只能读给定的网址；此工具无法访问内网地址。',
+  '结果开头几行为元数据（URL、标题、长度等），`---` 之后是正文。正文太长时一次只给一段，头部「长度」一行给出接着读用的 offset；offset 按同一个 mode 计，换 mode 时从 0 读起。',
+  '默认只取文章正文；要看评论区等正文以外的内容，用 mode: "page" 再次调用工具。',
 ].join('\n');
 
 const input = z.object({
-  url: z.string().describe('要读的网址；没写协议时按 https'),
+  url: z.string().describe('此处填写目标网址；未填写协议时默认为 https'),
   offset: z
     .number()
     .int()
     .min(0)
     .default(0)
     .describe(
-      '从正文的第几个字符开始读，默认 0；接着读时用上次结果头部给的值。按同一个 mode 计，换 mode 时从 0 读起',
+      '从正文的第几个字符开始读取，默认为 0；接着读时用上次结果头部给的值，切换 mode 时需要重新将此参数设置为 0',
     ),
   mode: z
     .enum(['article', 'page'])
@@ -42,8 +42,8 @@ const input = z.object({
 // 请求器的错误换成模型看到的说明；aborted（核心的中止或工具超时）不在这里，照原样抛出
 const fetchErrorTexts: Record<Exclude<FetchErrorKind, 'aborted'>, string> = {
   'invalid-url': '网址无效',
-  protocol: '只支持 http 和 https',
-  blocked: '不能访问内网地址',
+  protocol: '仅支持 http 和 https',
+  blocked: '无法访问内网地址',
   redirects: '抓取失败：跳转次数过多',
   network: '抓取失败：网络错误',
   // 只有 r.jina.ai 的请求带时限，它的超时在 jina.ts 里按失败处理；这里只是兜底
@@ -137,7 +137,7 @@ function normalizeUrl(raw: string): URL {
     throw new ToolError('网址无效');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ToolError('只支持 http 和 https');
+    throw new ToolError('仅支持 http 和 https');
   }
   return url;
 }

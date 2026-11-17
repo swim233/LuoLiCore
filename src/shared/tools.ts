@@ -25,7 +25,7 @@ export function setupTools(
     throw error;
   }
   for (const { name, missing } of setup.skipped) {
-    report(`工具 ${name} 没有装上：缺少环境变量 ${missing.join('、')}`);
+    report(`工具 ${name} 未安装：缺少环境变量 ${missing.join('、')}`);
     logger.warn({ tool: name, missing }, 'tools.skipped');
   }
   logger.info({ tools: setup.tools.map((tool) => tool.definition.name) }, 'tools.installed');

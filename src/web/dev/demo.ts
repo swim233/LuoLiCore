@@ -73,21 +73,32 @@ function webConv() {
   });
   return id;
 }
-/** 这个会话里 n 个进行中的任务；不够的现建一分钟后到点的一次性任务（演示按钮总能用） */
+/** 这个会话里 n 个进行中的定时任务（监听任务不算，它们触发写的是监听的事件）；不够的现建一分钟后到点的一次性任务（演示按钮总能用） */
 function tasksFor(convId: string, n: number): number[] {
-  const ids = server.activeTasks(convId).map((t) => t.id);
+  const ids = server
+    .activeTasks(convId)
+    .filter((t) => !t.monitor)
+    .map((t) => t.id);
   const c = server.conv(convId)!;
   const by = c.platform === 'web' ? { name: WEB_AUTHOR } : { id: UIDS[1001], name: PEOPLE[1001] };
+  const who = c.platform === 'web' ? '我' : '大家'; // 网页会话是一个人在聊
   while (ids.length < n)
     ids.push(
       server.addTask({
         convId,
-        action: ['提醒大家喝水', '提醒大家站起来活动一下', '说说今天的天气'][ids.length % 3],
+        action: [`提醒${who}喝水`, `提醒${who}站起来活动一下`, '说说今天的天气'][ids.length % 3],
         schedule: { kind: 'once', at: new Date(Date.now() + 60e3).toISOString() },
         by,
       }).id,
     );
   return ids.slice(0, n);
+}
+/** 这个会话里进行中的监视任务：ok 查得通的，failing 查不到的 */
+function monitorsFor(convId: string, which: 'ok' | 'failing'): number[] {
+  return server
+    .activeTasks(convId)
+    .filter((t) => t.monitor && !!t.monitor.failing === (which === 'failing'))
+    .map((t) => t.id);
 }
 const NEW_TASKS: {
   key: string;
@@ -190,6 +201,22 @@ export const ACTIONS: Record<string, () => void> = {
   'task-due-two'() {
     const id = convFor('c-star');
     if (!bot.dueTasks(id, tasksFor(id, 2), nextScript('due')))
+      toast('连不上 Telegram：只写了事件，没有回复');
+  },
+  /* 监视任务到点（读书会的「上海天气预警」）：事件正文是查到的预警条目 → 等待合并 → 带任务的回复，「此刻」里标出「监听触发 · 做什么」 */
+  'monitor-due'() {
+    const id = convFor('c-book');
+    const [tid] = monitorsFor(id, 'ok');
+    if (tid === undefined) return toast('读书会里没有正常执行的监听任务：切到「正常」数据');
+    if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor'))
+      toast('连不上 Telegram：只写了事件，没有回复');
+  },
+  /* 监视满 6 小时还查不到（读书会的「北京天气预警」）：会话里说一次，「此刻」里标出「监听失败 · 做什么」 */
+  'monitor-failed'() {
+    const id = convFor('c-book');
+    const [tid] = monitorsFor(id, 'failing');
+    if (tid === undefined) return toast('读书会里没有执行失败的监听任务：切到「正常」数据');
+    if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor-failed'))
       toast('连不上 Telegram：只写了事件，没有回复');
   },
   /* 取任务失败：404（服务版本旧，没有这个接口）→ 500 → 恢复。只有任务部件、全屏会话头部的任务数、胶囊受影响，其余照常 */

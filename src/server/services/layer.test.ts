@@ -136,7 +136,7 @@ describe('调一个接口', () => {
     for (const value of ['', '.', '..']) {
       const error = await failure(layer.call('demo', 'item', { id: value }));
       expect(error.kind).toBe('params');
-      expect(error.message).toBe('路径参数 id 不能是空的、. 或 ..');
+      expect(error.message).toBe('路径参数 id 不能为空，也不能是 . 或 ..');
     }
     expect(server.requests).toHaveLength(0);
   });
@@ -144,11 +144,11 @@ describe('调一个接口', () => {
   it('没有的服务、没有的接口、没声明的参数、缺路径参数、值的类型不对：拒绝，没有请求发出去，也不算次数', async () => {
     const { server, service } = await local(echoPath);
     const { layer, feeds } = layerFor([service]);
-    const hint = '接口 item 能用的参数：id（路径参数，必填）、lang、q';
+    const hint = '接口 item 可用的参数：id（路径参数，必填）、lang、q';
     const cases: Array<[string, string, unknown, string, string]> = [
-      ['nope', 'item', { id: 1 }, 'unknown', '没有这个服务：nope（有：demo）'],
-      ['demo', 'nope', { id: 1 }, 'unknown', '服务 demo 没有接口 nope（有：item、search）'],
-      ['demo', 'item', { id: 1, page: 2 }, 'params', `参数 page 不认识。${hint}`],
+      ['nope', 'item', { id: 1 }, 'unknown', '服务不存在：nope（可用的服务：demo）'],
+      ['demo', 'nope', { id: 1 }, 'unknown', '服务 demo 没有接口 nope（可用的接口：item、search）'],
+      ['demo', 'item', { id: 1, page: 2 }, 'params', `不支持参数 page。${hint}`],
       ['demo', 'item', { lang: 'zh' }, 'params', `缺少路径参数 id。${hint}`],
       ['demo', 'item', {}, 'params', `缺少路径参数 id。${hint}`],
       ['demo', 'item', { id: null }, 'params', '参数 id 的值只能是字符串、数字或布尔值'],
@@ -156,8 +156,8 @@ describe('调一个接口', () => {
       ['demo', 'item', { id: [1] }, 'params', '参数 id 的值只能是字符串、数字或布尔值'],
       ['demo', 'item', { id: Number.NaN }, 'params', '参数 id 的值只能是字符串、数字或布尔值'],
       ['demo', 'item', { id: Infinity }, 'params', '参数 id 的值只能是字符串、数字或布尔值'],
-      ['demo', 'item', [1], 'params', `参数要写成一个对象。${hint}`],
-      ['demo', 'item', 'id=1', 'params', `参数要写成一个对象。${hint}`],
+      ['demo', 'item', [1], 'params', `参数须为对象。${hint}`],
+      ['demo', 'item', 'id=1', 'params', `参数须为对象。${hint}`],
     ];
     for (const [name, endpoint, params, kind, message] of cases) {
       const error = await failure(layer.call(name, endpoint, params));
@@ -179,7 +179,7 @@ describe('调一个接口', () => {
       const error = await failure(layer.call('demo', 'item', params));
       expect([error.kind, error.message]).toEqual([
         'params',
-        `参数 ${Object.keys(params).at(-1)} 太长（最多 2000 个字符）`,
+        `参数 ${Object.keys(params).at(-1)} 过长（最多 2000 个字符）`,
       ]);
     }
     expect(server.requests).toHaveLength(1);
@@ -210,16 +210,16 @@ describe('只检查、不发请求', () => {
     expect(() => layer.check('demo', 'item', { id: '7', q: 'x' })).not.toThrow();
     expect(() => layer.check('demo', 'search')).not.toThrow();
     for (const [args, kind, message] of [
-      [['nope', 'item', {}], 'unknown', '没有这个服务：nope（有：demo）'],
-      [['demo', 'nope', {}], 'unknown', '服务 demo 没有接口 nope（有：item、search）'],
-      [['demo', 'search', { x: 1 }], 'params', '参数 x 不认识。接口 search 能用的参数：q'],
+      [['nope', 'item', {}], 'unknown', '服务不存在：nope（可用的服务：demo）'],
+      [['demo', 'nope', {}], 'unknown', '服务 demo 没有接口 nope（可用的接口：item、search）'],
+      [['demo', 'search', { x: 1 }], 'params', '不支持参数 x。接口 search 可用的参数：q'],
       [
         ['demo', 'item', {}],
         'params',
-        '缺少路径参数 id。接口 item 能用的参数：id（路径参数，必填）、lang、q',
+        '缺少路径参数 id。接口 item 可用的参数：id（路径参数，必填）、lang、q',
       ],
-      [['demo', 'item', { id: '..' }], 'params', '路径参数 id 不能是空的、. 或 ..'],
-      [['demo', 'search', []], 'params', '参数要写成一个对象。接口 search 能用的参数：q'],
+      [['demo', 'item', { id: '..' }], 'params', '路径参数 id 不能为空，也不能是 . 或 ..'],
+      [['demo', 'search', []], 'params', '参数须为对象。接口 search 可用的参数：q'],
     ] as const) {
       let caught: unknown;
       try {
@@ -318,7 +318,7 @@ describe('认证', () => {
     const error = await failure(layer.call('demo', 'search'));
 
     expect([error.kind, error.status]).toEqual(['status', 302]);
-    expect(error.message).toBe('服务 demo 回了 HTTP 302（要求跳转，不跟随）');
+    expect(error.message).toBe('服务 demo 返回 HTTP 302（要求跳转，未跟随）');
     expect(server.requests).toHaveLength(1);
     expect(other.requests).toHaveLength(0);
     expect(other.sockets).toHaveLength(0);
@@ -335,7 +335,7 @@ describe('认证', () => {
     });
     const { layer } = layerFor([service]);
     const error = await failure(layer.call('demo', 'search'));
-    expect([error.kind, error.message]).toEqual(['auth', '服务 demo 的认证出错，请求没有发出去']);
+    expect([error.kind, error.message]).toEqual(['auth', '服务 demo 认证出错，请求未发出']);
     expect(server.requests).toHaveLength(0);
   });
 });
@@ -374,12 +374,12 @@ describe('响应', () => {
     expect([bad.kind, bad.status, bad.message]).toEqual([
       'status',
       400,
-      `服务 demo 回了 HTTP 400：${reason}`,
+      `服务 demo 返回 HTTP 400：${reason}`,
     ]);
     const long = await failure(layer.call('demo', 'item', { id: 'long' }));
-    expect(long.message).toBe(`服务 demo 回了 HTTP 500：${'长'.repeat(500)}`);
+    expect(long.message).toBe(`服务 demo 返回 HTTP 500：${'长'.repeat(500)}`);
     const empty = await failure(layer.call('demo', 'item', { id: 'empty' }));
-    expect(empty.message).toBe('服务 demo 回了 HTTP 503');
+    expect(empty.message).toBe('服务 demo 返回 HTTP 503');
   });
 
   it('超时、被中止、网络错误各是各的类别', async () => {
@@ -392,14 +392,14 @@ describe('响应', () => {
     const { layer } = layerFor([service], { timeoutMs: 200 });
 
     const timeout = await failure(layer.call('demo', 'search'));
-    expect([timeout.kind, timeout.message]).toEqual(['timeout', '服务 demo 超过 0.2 秒没有回应']);
+    expect([timeout.kind, timeout.message]).toEqual(['timeout', '服务 demo 超过 0.2 秒未响应']);
 
     const controller = new AbortController();
     const pending = layer.call('demo', 'search', {}, { signal: controller.signal });
     await arrived;
     controller.abort();
     const aborted = await failure(pending);
-    expect([aborted.kind, aborted.message]).toEqual(['aborted', '调用服务 demo 被中止了']);
+    expect([aborted.kind, aborted.message]).toEqual(['aborted', '对服务 demo 的调用已中止']);
 
     const { layer: unreachable } = layerFor([
       fakeService({ name: 'gone', baseUrl: `http://127.0.0.1:${await closedPort()}` }),
@@ -440,7 +440,7 @@ describe('响应', () => {
     const body = (await layer.call('demo', 'search')).body;
     expect(body).toBe('收到 *** 与 undefined 来自 *** ***');
     const error = await failure(layer.call('demo', 'item', { id: 'fail' }));
-    expect(error.message).toBe('服务 demo 回了 HTTP 401：收到 *** 与 undefined 来自 *** ***');
+    expect(error.message).toBe('服务 demo 返回 HTTP 401：收到 *** 与 undefined 来自 *** ***');
 
     const signed = (await layer.call('signed', 'search')).body;
     expect(signed).not.toContain('abcdefghijkl');
@@ -498,7 +498,7 @@ describe('抹凭据：先规整 JSON，再抹', () => {
 
     const error = await failure(layer.call('demo', 'item', { id: 'fail' }));
 
-    expect(error.message).toBe('服务 demo 回了 HTTP 400：{"error":"bad token ***","echo":"***"}');
+    expect(error.message).toBe('服务 demo 返回 HTTP 400：{"error":"bad token ***","echo":"***"}');
   });
 
   it('不是 JSON 的正文（如截断了的 JSON、网页里嵌的 JSON）：各种转义写法也认得出', async () => {
@@ -511,7 +511,7 @@ describe('抹凭据：先规整 JSON，再抹', () => {
     );
 
     const error = await failure(layer.call('demo', 'item', { id: 'fail' }));
-    expect(error.message).toBe(`服务 demo 回了 HTTP 400：${body}`);
+    expect(error.message).toBe(`服务 demo 返回 HTTP 400：${body}`);
   });
 
   it('短于 6 个字符的不抹，环境变量的值、请求头的值、请求头里切开的各段都按这一条；Bearer 这样的认证方式不算凭据', async () => {
@@ -579,7 +579,7 @@ describe('每天的上限', () => {
 
     expect([quota.kind, quota.message]).toEqual([
       'quota',
-      '今天的额度用完了（服务 demo 每天最多 3 次请求），明天再试',
+      '今日额度已用完（服务 demo 每天最多 3 次请求），请明天再试',
     ]);
     expect(server.requests).toHaveLength(3);
     expect(feeds.requestsOn('demo', '2026-11-16')).toBe(3);
@@ -687,16 +687,22 @@ describe('读文档', () => {
     const { layer } = layerFor([fakeService({ docs })]);
 
     const service = await failure(layer.readDoc('nope'));
-    expect([service.kind, service.message]).toEqual(['unknown', '没有这个服务：nope（有：demo）']);
+    expect([service.kind, service.message]).toEqual([
+      'unknown',
+      '服务不存在：nope（可用的服务：demo）',
+    ]);
     const section = await failure(layer.readDoc('demo', 'nope'));
     expect([section.kind, section.message]).toEqual([
       'unknown',
-      '服务 demo 的文档没有这一节：nope（有：item、search）',
+      '服务 demo 的文档没有此章节：nope（可用的章节：item、search）',
     ]);
 
     unlinkSync(join(fileURLToPath(docs), 'search.md'));
     const missing = await failure(layer.readDoc('demo', 'search'));
-    expect([missing.kind, missing.message]).toEqual(['docs', '服务 demo 的文档读不了：search.md']);
+    expect([missing.kind, missing.message]).toEqual([
+      'docs',
+      '服务 demo 的文档读取失败：search.md',
+    ]);
   });
 
   it('装上的服务列在 services 里：名字、名称、简介、接口（id、名称、路径参数、查询参数）、最短间隔、每天的上限', () => {

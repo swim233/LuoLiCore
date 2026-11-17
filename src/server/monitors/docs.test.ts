@@ -42,7 +42,7 @@ describe('元文档', () => {
   });
 
   it('启动时的检查：文件读不了、有不认得的占位、缺了占位，都说出来', () => {
-    const label = '监视任务的文档（src/server/monitors/docs/monitor.md）';
+    const label = '监听任务的文档（src/server/monitors/docs/monitor.md）';
     expect(createMonitorDoc({ file: join(tempDir(), 'none.md') }).check()).toBe(
       `${label}读不了：ENOENT`,
     );
@@ -60,13 +60,13 @@ describe('元文档', () => {
     writeFileSync(file, '{{fields}} {{ops}}');
     const error = await doc.read().catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ServiceError);
-    expect(error).toMatchObject({ kind: 'docs', message: '监视任务的文档读不了' });
+    expect(error).toMatchObject({ kind: 'docs', message: '监听任务的文档读取失败' });
   });
 
   it('有服务叫 monitor 时和元文档重名', () => {
     expect(monitorDocClash([{ name: 'qweather' }])).toBeUndefined();
     expect(monitorDocClash([{ name: 'qweather' }, { name: 'monitor' }])).toBe(
-      '服务名 monitor 和监视任务的文档重名，服务改个名字',
+      '服务名 monitor 和监听任务的文档重名，服务改个名字',
     );
   });
 });
@@ -75,7 +75,7 @@ describe('read_docs 读元文档', () => {
   function readDocs(withMonitorDoc: boolean) {
     const { layer } = layerFor([fakeService()]);
     const monitorDoc = withMonitorDoc
-      ? createMonitorDoc({ file: docFile('监视任务怎么写\n{{fields}}\n{{ops}}\n{{limits}}') })
+      ? createMonitorDoc({ file: docFile('监听任务的写法\n{{fields}}\n{{ops}}\n{{limits}}') })
       : undefined;
     const tool = createServiceTools(layer, monitorDoc ? { monitorDoc } : {})[0]!;
     const run = (input: Record<string, unknown>) =>
@@ -91,13 +91,15 @@ describe('read_docs 读元文档', () => {
     return { tool, run };
   }
 
-  it('给了元文档：说明里多一句，doc 写 monitor 时读它（写了 section 也不管），界面摘要是「监视任务怎么写」', async () => {
+  it('给了元文档：说明里多一句，doc 写 monitor 时读它（写了 section 也不管），界面摘要是「监听任务的写法」', async () => {
     const { tool, run } = readDocs(true);
-    expect(tool.description).toContain('doc 写 monitor（不用写 section）时读「监视任务怎么写」');
-    const expected = `监视任务怎么写\n${fieldsText()}\n${opsText()}\n${limitsText()}`;
+    expect(tool.description).toContain(
+      'doc 填 monitor（无需填写 section）时读取「监听任务的写法」',
+    );
+    const expected = `监听任务的写法\n${fieldsText()}\n${opsText()}\n${limitsText()}`;
     expect(await run({ doc: 'monitor' })).toBe(expected);
     expect(await run({ doc: 'monitor', section: 'search' })).toBe(expected);
-    expect(tool.summary!({ input: { doc: 'monitor' } })).toBe('监视任务怎么写');
+    expect(tool.summary!({ input: { doc: 'monitor' } })).toBe('监听任务的写法');
     // 服务的文档照旧
     expect(await run({ doc: 'demo', section: 'search' })).toBe('# demo 的 search 一节\n');
   });
@@ -107,6 +109,6 @@ describe('read_docs 读元文档', () => {
     expect(tool.description).not.toContain('monitor');
     const error = await run({ doc: 'monitor' }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ToolError);
-    expect((error as ToolError).message).toBe('没有这个服务：monitor（有：demo）');
+    expect((error as ToolError).message).toBe('服务不存在：monitor（可用的服务：demo）');
   });
 });

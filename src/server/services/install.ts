@@ -182,7 +182,7 @@ export function installServices(
   for (const definition of definitions) {
     const missing = definition.env.filter((name) => !env[name]);
     if (missing.length > 0) {
-      report(`服务 ${definition.name} 没有装上：缺少环境变量 ${missing.join('、')}`);
+      report(`服务 ${definition.name} 未安装：缺少环境变量 ${missing.join('、')}`);
       logger.warn({ service: definition.name, missing }, 'services.skipped');
       continue;
     }

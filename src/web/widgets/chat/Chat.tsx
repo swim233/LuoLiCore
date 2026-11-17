@@ -317,7 +317,7 @@ function ChatLog({ convId }: { convId: string }) {
       />
     );
   if (phase === 'down' && info?.state !== 'ready')
-    return note('连不上洛璃服务', '连上后会自动恢复');
+    return note('与核心服务的连接中断', '自动重连中');
   if (!info || info.state === 'loading') return note('加载中…');
   if (info.state === 'error')
     return note(
@@ -404,7 +404,7 @@ function ChatLog({ convId }: { convId: string }) {
   const topNotice =
     phase === 'down' ? (
       <Notice tone="danger" className="log-pill">
-        连不上洛璃服务，连上后会自动恢复
+        与核心服务的连接中断，自动重连中
       </Notice>
     ) : info.older === 'loading' ? (
       <Notice role="status" className="log-pill">

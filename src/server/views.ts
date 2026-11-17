@@ -355,8 +355,13 @@ export function kindOf(
   return 'other';
 }
 
+/**
+ * 会话列表那一行的预览：换行压成空格、截短。事件只取正文的第一行（监视的事件第二行起是查到的数据、
+ * 查不到的原因，压成一行会接在第一句后面）
+ */
 function preview(last: NonNullable<ConversationOverview['last']>): MessagePreview {
-  const text = cut(last.text.replace(/\s+/g, ' ').trim(), previewChars);
+  const source = last.event ? last.text.trim().split(/\r?\n/, 1)[0]! : last.text;
+  const text = cut(source.replace(/\s+/g, ' ').trim(), previewChars);
   return {
     seq: last.seq,
     createdAt: last.createdAt,

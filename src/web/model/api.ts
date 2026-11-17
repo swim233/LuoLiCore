@@ -38,7 +38,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     res = await fetch(path, init);
   } catch {
     // 网络错误（服务没运行、连接断了）：浏览器给的是英文原文，换成中文的说法
-    throw new ApiError('连不上洛璃服务', 0);
+    throw new ApiError('与核心服务的连接中断', 0);
   }
   if (!res.ok) {
     let message = `请求失败（HTTP ${res.status}）`;

@@ -120,3 +120,34 @@ describe('nowModel：结束后被拿掉的会话保留已有的行', () => {
     expect(lines.at(-1)!.kind).toBe('stats');
   });
 });
+
+describe('「此刻」标出任务触发的回复', () => {
+  beforeEach(() => nowModel.reset());
+  const marks = (convId: string) =>
+    nowModel
+      .get(convId)!
+      .lines.filter((l) => l.task)
+      .map((l) => l.text);
+
+  it('定时任务写「任务触发」，监视任务按服务给的 event 写「监听触发」「监听失败」，一次回复里几个任务都列出来', () => {
+    bus.emit('reply:start', {
+      convId: 'a',
+      replyId: 'r1',
+      tasks: [
+        { id: 1, ref: 't1', action: '提醒小明交周报' },
+        { id: 2, ref: 't2', action: '盯着天气预警', event: 'monitor' },
+        { id: 3, ref: 't3', action: '盯着杭州的预警', event: 'monitor-failed' },
+      ],
+    });
+    expect(marks('a')).toEqual([
+      '任务触发 · 提醒小明交周报',
+      '监听触发 · 盯着天气预警',
+      '监听失败 · 盯着杭州的预警',
+    ]);
+  });
+
+  it('人发消息触发的回复没有这几行', () => {
+    bus.emit('reply:start', { convId: 'b', replyId: 'r2' });
+    expect(marks('b')).toEqual([]);
+  });
+});

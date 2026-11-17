@@ -1,8 +1,16 @@
 import { hashStr, pick, rand, randi, startOfDay, uid } from '@luoli/ui/util';
 import type { NewMessage } from '../model/source';
-import type { ImageInfo, ImagePart, Part, TaskRow, ToolResultInfo } from '../model/types';
+import type {
+  ImageInfo,
+  ImagePart,
+  Part,
+  TaskMonitor,
+  TaskRow,
+  ToolResultInfo,
+} from '../model/types';
 import { devUi, WEB_AUTHOR } from './demo-state';
 import type { Dataset } from './demo-state';
+import { FAIL_REASON, WATCHES, watchEventText, watchFailedText, watchView } from './mock-monitor';
 import { mockServer as server, svgImage, toolBody } from './mock-server';
 
 export const PEOPLE: Record<string, string> = {
@@ -204,6 +212,29 @@ const cancelledAt = (ms: number) => ({
   dueCount: 0,
   endedAt: isoOf(ms),
 });
+
+/** 监视任务（ADR-0014）：描述、写成人话的几行来自 mock-monitor.ts；check 是检查的状态（已经取消的没有）；进行中的没有下次到点 */
+function addWatch(
+  convId: string,
+  spec: keyof typeof WATCHES,
+  o: {
+    by: { id?: string; name: string };
+    createdAt: number;
+    check?: Pick<TaskMonitor, 'lastCheckedAt' | 'lastSuccessAt' | 'failing'>;
+    state?: Parameters<typeof server.addTask>[0]['state'];
+  },
+) {
+  const monitor = { ...watchView(WATCHES[spec]), ...o.check };
+  return server.addTask({
+    convId,
+    action: WATCHES[spec].action,
+    schedule: { kind: 'monitor', monitor: monitor.description },
+    by: o.by,
+    createdAt: o.createdAt,
+    monitor,
+    state: o.state,
+  });
+}
 
 /* 各种 Markdown 的写法（洛璃的回复）和带网址的群友消息：看气泡、时间线、「此刻」里怎么画。放在最旧的两个会话里，不挤占列表顶上的位置 */
 const MD_RICH = [
@@ -448,6 +479,52 @@ function seedNormal() {
     usage: [880, 0, 30],
   });
   U(book, 1003, '哈哈，被清空了', now - 50 * MIN);
+  // 监视任务四种样子（任务部件里点右边的小箭头展开）：查得通的（带「并且」的条件，有人让建过、到点两次）、查不到的、已经取消的；只记录的在「推荐几部科幻小说」里
+  const wOk = addWatch(book, 'ok', {
+    by: byPerson(1004),
+    createdAt: now - 3 * DAY,
+    check: { lastCheckedAt: isoOf(now - 4 * MIN), lastSuccessAt: isoOf(now - 4 * MIN) },
+    state: { dueCount: 2, lastDueAt: isoOf(now - 45 * MIN) },
+  });
+  const failSince = now - 6.5 * HOUR;
+  const wBad = addWatch(book, 'failing', {
+    by: byPerson(1001),
+    createdAt: now - 2 * DAY,
+    check: {
+      lastCheckedAt: isoOf(now - 6 * MIN),
+      lastSuccessAt: isoOf(failSince - 4 * MIN),
+      failing: { since: isoOf(failSince), reason: FAIL_REASON },
+    },
+    state: { dueCount: 1, lastDueAt: isoOf(now - 2 * DAY + 3 * HOUR) },
+  });
+  addWatch(book, 'cancelled', {
+    by: byPerson(1002),
+    createdAt: now - 5 * DAY,
+    state: cancelledAt(now - 2 * DAY - 2 * HOUR),
+  });
+  // 时间线里：监听触发（后面跟着洛璃的回复）、监听失败（洛璃告诉大家）
+  server.addEvent(book, wOk.id, 'monitor', now - 45 * MIN, watchEventText(wOk.action, 2));
+  A(
+    book,
+    '上海中心气象台刚发了两条预警：大风黄色预警，今天傍晚到明天上午沿海阵风 7～8 级；暴雨橙色预警，未来 3 小时有强降水，路上小心积水～',
+    now - 45 * MIN + 25e3,
+    { usage: [2240, 1536, 96] },
+  );
+  server.addEvent(
+    book,
+    wBad.id,
+    'monitor-failed',
+    now - 20 * MIN,
+    watchFailedText(wBad, failSince, FAIL_REASON),
+  );
+  A(
+    book,
+    '我盯着北京天气预警的那个任务已经查不到半天了，说是今天的请求次数用完了。可以请人看看服务的配置，或者把这个任务取消（t' +
+      wBad.id +
+      '）～',
+    now - 20 * MIN + 18e3,
+    { usage: [2480, 1792, 74] },
+  );
 
   const star = server.addConv({
     platform: 'telegram',
@@ -623,6 +700,14 @@ function seedNormal() {
     { usage: [1210, 0, 52] },
   );
   server.addEvent(w1, tReview, 'task-missed', now - 2 * DAY);
+  // 只记录的监视任务：到点只写事件，洛璃不回复（这个会话里没有进行中的定时任务）
+  const wRec = addWatch(w1, 'record', {
+    by: { name: WEB_AUTHOR },
+    createdAt: now - 2 * DAY,
+    check: { lastCheckedAt: isoOf(now - 12 * MIN), lastSuccessAt: isoOf(now - 12 * MIN) },
+    state: { dueCount: 3, lastDueAt: isoOf(now - 5 * HOUR) },
+  });
+  server.addEvent(w1, wRec.id, 'monitor', now - 5 * HOUR, watchEventText(wRec.action, 1));
   const w2 = server.addConv({
     platform: 'web',
     kind: 'web',
