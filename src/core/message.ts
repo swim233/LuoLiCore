@@ -54,6 +54,11 @@ export type MessageMetadata = {
    * 没有结束的（中止时还在想的那段）为 null。有思考的助手回复才有，以前写入的消息没有
    */
   reasoningMs?: Array<number | null>;
+  /**
+   * 只出现在回复流的 finish 段里，不会存进历史：这次回复正常完成，但调用方决定不写入
+   * （ReplyOptions.discard 返回了 true），整条回复连同里面的工具调用都没有写入
+   */
+  discarded?: true;
 };
 
 /** 一次回复的 token 用量。服务端没报的项为 undefined（报了 0 就是 0） */

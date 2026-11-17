@@ -10,6 +10,7 @@ import {
   type SegmentOptions,
   type Storage,
 } from '../core/index.js';
+import { endsWithMarker } from './monitors/rules.js';
 import type { LiveTask } from './types.js';
 
 /** 建会话对象的参数，所有会话共用这一份 */
@@ -32,6 +33,23 @@ export type SessionOptions = {
  * 只交给旁听者
  */
 export type SessionReplyOptions = ReplyOptions & { tasks?: readonly LiveTask[] };
+
+/**
+ * 这一轮是不是「自行决定」的回复（ADR-0014）：触发全是处理方式为自行决定的监听任务查到了新的
+ * （tasks 都带 decide），没有人的触发（triggers 是空的）。混着别的触发（有人找她、定时任务、
+ * reply 的监听任务、监听失败）时照普通回复处理。Telegram 前端照同样的规则决定攒着发
+ */
+export function decideRound(
+  tasks: readonly { decide?: true }[] | undefined,
+  triggers: readonly unknown[] | undefined,
+): boolean {
+  return (
+    tasks !== undefined &&
+    tasks.length > 0 &&
+    tasks.every((task) => task.decide === true) &&
+    (triggers?.length ?? 0) === 0
+  );
+}
 
 /** 会话管理给出的会话对象：reply 多收一个 tasks（见 SessionReplyOptions） */
 export type SharedConversation = Omit<Conversation, 'reply'> & {
@@ -73,7 +91,8 @@ type ActiveReply = {
  * 会话管理：洛璃服务里所有会话对象都从这里取。同一个会话 id 在进程里只有一个会话对象
  * （并发打开也一样）。取到的是核心会话对象的一层包装：
  * - reply() 的流经过这里，旁听者（onReply）收到一份；会话管理记着进行中的回复，退出时等它们。
- *   平时前端读一段，会话管理才从核心读一段（背压照旧）；
+ *   平时前端读一段，会话管理才从核心读一段（背压照旧）。「自行决定」的回复（见 decideRound）
+ *   把认标记的函数交给核心：回了约定的标记时核心不写入，finish 段带 discarded；
  * - close() 什么也不做：会话可能还有别的前端在用，由会话管理在退出时统一关闭。
  */
 export function createSessions(options: SessionOptions) {
@@ -106,8 +125,13 @@ export function createSessions(options: SessionOptions) {
   ): ReadableStream<MessageChunk> {
     if (closing) throw new Error('核心服务正在退出，不再开始新的回复');
     const { abortSignal } = replyOptions;
+    const decide = decideRound(tasks, replyOptions.triggers);
+    if (decide) {
+      logger.info({ conversationId, tasks: tasks!.map(({ id }) => id) }, 'sessions.decide_reply');
+    }
     const source = core.reply({
       ...replyOptions,
+      ...(decide ? { discard: endsWithMarker } : {}),
       abortSignal: abortSignal ? AbortSignal.any([abortSignal, stopping.signal]) : stopping.signal,
     });
     const watchers = watch(conversationId, tasks);

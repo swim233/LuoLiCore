@@ -2614,3 +2614,158 @@ describe('事件在面板的数据里', () => {
     expect(await last()).toMatchObject({ text: '第一行 第二行' });
   });
 });
+
+describe('「自行决定」进 Telegram', () => {
+  /** 群里一条消息让建的、处理方式是自行决定的监听任务；外部服务回 list 里的条目 */
+  async function decideIn(model: MockLanguageModelV4, wait?: { idleMs: number; maxMs: number }) {
+    const feed = { list: [{ id: 'a', title: 'A' }] };
+    const outside = await serving(() => JSON.stringify(feed));
+    cleanups.push(() => closeAll());
+    const { tools } = probe();
+    const s = await setup(model, {
+      tools,
+      monitors: { layer: outside.layer, feeds: outside.feeds },
+    });
+    const t = await withTelegram(s, wait);
+    const [source] = t.api.push({ chat: group, from: aliceUser, text: '有新的预警说一声' });
+    const id = await t.conversationOf(group);
+    const created = await s.tasks.create({
+      conversationId: id,
+      triggers: [await t.triggerOf(id, source!)],
+      action: '有新的预警说一声',
+      kind: 'monitor',
+      monitor: {
+        service: 'demo',
+        endpoint: 'search',
+        interval_minutes: 1,
+        items: 'list',
+        key: 'id',
+        title: 'title',
+        show: ['id'],
+        mode: 'decide',
+      },
+    });
+    expect(created.ok).toBe(true);
+    s.tasks.start();
+    await s.tasks.settled();
+    /** 来了新的一条，到点 */
+    async function fresh(): Promise<void> {
+      feed.list = [{ id: 'b', title: 'B' }, ...feed.list];
+      await s.advance(minute);
+    }
+    const ends = () => s.lives().filter((event) => event.type === 'end');
+    return { s, t, id, source: source!, fresh, ends };
+  }
+
+  it('回了标记：一条都不发，回复不进历史；结束事件带 discarded', async () => {
+    const model = scripted([...text('看过了，不用说。'), ...call('probe', {})], answer('[不回复]'));
+    const { s, t, id, fresh, ends } = await decideIn(model);
+
+    await fresh();
+    await waitUntil(() => ends().length === 1, '回复结束');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered).toEqual([]);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor']);
+    expect(ends()[0]).toMatchObject({ outcome: 'completed', discarded: true });
+    expect(s.lives().find((event) => event.type === 'start')).toMatchObject({
+      tasks: [{ id: 1, event: 'monitor', decide: true }],
+    });
+  });
+
+  it('没回标记：几步的话都在结束时才按先后发出（调工具期间不发），最后一条带尾部，引用任务的来源', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('我查一下。'), ...call('probe', {})],
+      [{ gate: hold.promise }, ...answer('上海发布了大风蓝色预警。')],
+    );
+    const { s, t, id, source, fresh, ends } = await decideIn(model);
+
+    await fresh();
+    await waitUntil(() => model.doStreamCalls.length === 2, '调完工具、开始第二步');
+    await sleep(50);
+    expect(t.api.delivered).toEqual([]);
+    hold.open();
+    await waitUntil(() => ends().length === 1, '回复结束');
+    await waitUntil(() => t.api.delivered.length === 2, '两条发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered.map(visible)).toEqual([
+      {
+        chatId: String(group.id),
+        messageId: expect.any(Number),
+        text: '我查一下。',
+        replyTo: source,
+      },
+      {
+        chatId: String(group.id),
+        messageId: expect.any(Number),
+        text: '上海发布了大风蓝色预警。',
+        replyTo: source,
+      },
+    ]);
+    expect(t.api.delivered[0]?.footer).toBeUndefined();
+    expect(t.api.delivered[1]?.footer).toMatch(/^输入 20 · 输出 4 · \d+\.\ds$/);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor', 'assistant']);
+    expect(ends()[0]).not.toHaveProperty('discarded');
+  });
+
+  it('出错：攒下的（做完的那几步）先发出，再发固定的提示', async () => {
+    const model = scripted(
+      [...text('我查一下。'), ...call('probe', {})],
+      [...text('写到一半'), { type: 'error', error: { message: '服务端过载' } }],
+    );
+    const { s, t, id, fresh, ends } = await decideIn(model);
+
+    await fresh();
+    await waitUntil(() => ends().length === 1, '回复结束');
+    await waitUntil(() => t.api.delivered.length === 2, '两条发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered.map(({ text }) => text)).toEqual(['我查一下。', '（出了点问题）']);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor', 'assistant']);
+    expect((await s.messages(id))[2]?.metadata).toMatchObject({ failed: true });
+  });
+
+  it('服务退出（照 main.ts 的次序，会话管理先中止回复）：攒下的一条都不发，历史照中止的规则留着做完的那几步', async () => {
+    const model = scripted(
+      [...text('我查一下。'), ...call('probe', {})],
+      [{ gate: gate().promise }, ...answer('不该有')],
+    );
+    const { s, t, id, fresh, ends } = await decideIn(model);
+
+    await fresh();
+    await waitUntil(() => model.doStreamCalls.length === 2, '调完工具、开始第二步');
+    // main.ts 退出时两个一起关：Telegram 要先等轮询停下才开始它的宽限，会话管理先中止回复
+    await Promise.all([t.telegram.stop(), s.sessions!.close(0, 300)]);
+
+    expect(ends()).toMatchObject([{ outcome: 'aborted' }]);
+    expect(t.api.delivered).toEqual([]);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor', 'assistant']);
+    const [, , reply] = await s.messages(id);
+    expect(reply?.metadata).toMatchObject({ aborted: true });
+    expect(reply && textOf(reply)).toBe('我查一下。');
+  });
+
+  it('等待合并期间有人触发：这一轮照普通回复，一步一步发，不认标记', async () => {
+    const hold = gate();
+    const model = scripted(
+      [...text('我查一下。'), ...call('probe', {})],
+      [{ gate: hold.promise }, ...answer('[不回复]')],
+    );
+    const { s, t, id, fresh, ends } = await decideIn(model, { idleMs: 300, maxMs: 3000 });
+
+    await fresh();
+    const [asked] = t.api.push({ chat: group, from: bobUser, text: 'nori 有什么新消息吗' });
+    await waitUntil(() => t.api.delivered.length === 1, '调工具前的话先发出');
+    expect(t.api.delivered[0]).toMatchObject({ text: '我查一下。', replyTo: asked });
+    hold.open();
+    await waitUntil(() => ends().length === 1, '回复结束');
+    await waitUntil(() => t.api.delivered.length === 2, '第二条发出');
+    await t.telegram.bot.idle();
+
+    expect(t.api.delivered.map(({ text }) => text)).toEqual(['我查一下。', '[不回复]']);
+    expect(await kinds(s, id)).toEqual(['user', 'monitor', 'user', 'assistant']);
+    expect(ends()[0]).not.toHaveProperty('discarded');
+  });
+});

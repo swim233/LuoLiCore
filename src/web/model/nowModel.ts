@@ -44,6 +44,8 @@ export interface Line {
   retry?: boolean;
   /** status：任务触发了这次回复（「任务触发 · 做什么」，监听任务是「监听触发 · …」「监听失败 · …」） */
   task?: boolean;
+  /** 悬停时的说明（stats：这次回复没有发出时的原因） */
+  title?: string;
   open?: boolean;
   /** user：这一行对应哪条消息（防止同一条显示两次） */
   rowId?: string;
@@ -427,12 +429,26 @@ bus.on('reply:abort', ({ convId }) => {
   push(s, { kind: 'status', text: status.online ? '回复被中止' : '回复被中止：bot 离线' });
   finish(s);
 });
-bus.on('reply:end', ({ convId, ms, usage }) => {
+/** 「自行决定」的回复里洛璃回了标记：这次回复没有发出，结束的状态这样写 */
+export const DISCARDED_TEXT = '未回复';
+export const DISCARDED_TITLE = '洛璃判断无需告知，此次回复未发出';
+bus.on('reply:end', ({ convId, ms, usage, discarded }) => {
   replying.delete(convId);
   const s = get(convId);
   if (!s) return;
-  if (s.cur) s.cur.completed = true;
+  /* 丢掉的回复不标「正常完成」：这一行逐字放完不放星尘 */
+  if (s.cur && !discarded) s.cur.completed = true;
   endCur(s);
+  if (discarded) {
+    /* 没有发出：用时留着，token 不写 */
+    push(s, {
+      kind: 'stats',
+      text: `${DISCARDED_TEXT} · ${(ms / 1000).toFixed(1)}s`,
+      title: DISCARDED_TITLE,
+    });
+    finish(s);
+    return;
+  }
   const tokens: string[] = [];
   if (usage.input !== undefined)
     tokens.push(`输入 ${usage.input}${usage.cache !== undefined ? `（缓存 ${usage.cache}）` : ''}`);

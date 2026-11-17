@@ -72,7 +72,7 @@ describe('描述的检查：字段', () => {
     ]);
     expect(problems(changed({ interval_minutes: 0, mode: 'loud' }), 'try')).toEqual([
       'interval_minutes 不得小于 1 分钟（服务 demo 的最短间隔）',
-      'mode 只能是 reply（触发回复）或 record（仅记录）',
+      'mode 只能是 reply（触发回复）、record（仅记录）或 decide（自行决定）',
     ]);
   });
 
@@ -178,10 +178,13 @@ describe('描述的检查：字段', () => {
     ]);
   });
 
-  it('mode：reply、record；decide 还不支持', () => {
-    expect(check(changed({ mode: 'record' }))).toMatchObject({ ok: true });
-    expect(problems(changed({ mode: 'decide' }))).toEqual([
-      'mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）',
+  it('mode：reply、record、decide 都收（建任务、试跑都一样）；别的值说明能填哪几种', () => {
+    for (const mode of ['reply', 'record', 'decide']) {
+      expect(check(changed({ mode }))).toMatchObject({ ok: true, monitor: { mode } });
+      expect(check(changed({ mode }), 'try')).toMatchObject({ ok: true });
+    }
+    expect(problems(changed({ mode: 'Decide' }))).toEqual([
+      'mode 只能是 reply（触发回复）、record（仅记录）或 decide（自行决定）',
     ]);
   });
 });

@@ -654,11 +654,12 @@ export function createChats({
      */
     async due({ conversationId, tasks, fromSeq }: TaskDue): Promise<void> {
       if (closing) return;
-      const refs: LiveTask[] = tasks.map(({ id, action, event }) => ({
+      const refs: LiveTask[] = tasks.map(({ id, action, event, decide }) => ({
         id,
         ref: taskRef(id),
         action,
         ...(event ? { event } : {}),
+        ...(decide ? { decide } : {}),
       }));
       const conversation = await sessions.open(conversationId);
       // 打开会话期间可能开始了退出、开始了别的回复

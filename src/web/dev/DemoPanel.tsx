@@ -168,6 +168,22 @@ export function DemoPanel() {
               <button
                 className="dbtn"
                 type="button"
+                data-act="decide-silent"
+                title="读书会：自行决定的监听任务触发，洛璃判断不值得说、只回标记 →「此刻」里写「未回复」，徽记不闪，会话里没有新消息"
+              >
+                自行决定（不回复）
+              </button>
+              <button
+                className="dbtn"
+                type="button"
+                data-act="decide-reply"
+                title="读书会：自行决定的监听任务触发，洛璃判断值得说，照常回复"
+              >
+                自行决定（回复）
+              </button>
+              <button
+                className="dbtn"
+                type="button"
                 data-act="monitor-failed"
                 title="读书会：监听满 6 小时仍执行失败，会话里说一次，「此刻」里标出「监听失败」"
               >

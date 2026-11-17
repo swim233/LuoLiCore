@@ -7,7 +7,14 @@ import { ServiceError } from '../services/layer.js';
 import { fakeService, tempDir } from '../services/test-services.js';
 import { createServiceTools } from '../services/tools.js';
 import { createMonitorDoc, monitorDocClash } from './docs.js';
-import { fieldsText, limitsText, monitorFields, monitorOps, opsText } from './rules.js';
+import {
+  discardMarker,
+  fieldsText,
+  limitsText,
+  monitorFields,
+  monitorOps,
+  opsText,
+} from './rules.js';
 import { layerFor } from './test-monitors.js';
 
 afterEach(closeAll);
@@ -20,7 +27,7 @@ function docFile(text: string): string {
 }
 
 describe('元文档', () => {
-  it('仓库里的那份：启动时的检查通过；三个占位由程序填好，每个字段、每个比法都在里面', async () => {
+  it('仓库里的那份：启动时的检查通过；四个占位由程序填好，每个字段、每个比法、约定的标记都在里面', async () => {
     const doc = createMonitorDoc();
     expect(doc.check()).toBeUndefined();
 
@@ -29,16 +36,19 @@ describe('元文档', () => {
     expect(text).toContain(fieldsText());
     expect(text).toContain(opsText());
     expect(text).toContain(limitsText());
+    expect(text).toContain(discardMarker);
     for (const { name } of monitorFields) expect(text).toContain(`- ${name}（`);
     for (const { op } of monitorOps) expect(text).toContain(`- ${op}（`);
   });
 
-  it('每次读都重新读文件', async () => {
-    const file = docFile('第一版 {{fields}} {{ops}} {{limits}}');
+  it('每次读都重新读文件；行内的 {{marker}} 可以出现几次，都填成约定的标记', async () => {
+    const file = docFile('第一版 {{fields}} {{ops}} {{limits}} {{marker}}');
     const doc = createMonitorDoc({ file });
     expect(await doc.read()).toMatch(/^第一版 /);
-    writeFileSync(file, '第二版 {{limits}} {{ops}} {{fields}}');
-    expect(await doc.read()).toBe(`第二版 ${limitsText()} ${opsText()} ${fieldsText()}`);
+    writeFileSync(file, '第二版 {{limits}} {{ops}} {{fields}} 回 {{marker}}；只回 {{marker}}');
+    expect(await doc.read()).toBe(
+      `第二版 ${limitsText()} ${opsText()} ${fieldsText()} 回 ${discardMarker}；只回 ${discardMarker}`,
+    );
   });
 
   it('启动时的检查：文件读不了、有不认得的占位、缺了占位，都说出来', () => {
@@ -47,17 +57,19 @@ describe('元文档', () => {
       `${label}读不了：ENOENT`,
     );
     expect(
-      createMonitorDoc({ file: docFile('{{fields}} {{ops}} {{limits}} {{ field }}') }).check(),
+      createMonitorDoc({
+        file: docFile('{{fields}} {{ops}} {{limits}} {{marker}} {{ field }}'),
+      }).check(),
     ).toBe(`${label}有误：不认得的占位 {{ field }}`);
     expect(createMonitorDoc({ file: docFile('{{ops}}') }).check()).toBe(
-      `${label}有误：缺了占位 {{fields}}，缺了占位 {{limits}}`,
+      `${label}有误：缺了占位 {{fields}}，缺了占位 {{limits}}，缺了占位 {{marker}}`,
     );
   });
 
   it('运行中读不了、占位不对：抛服务层的 docs 错误', async () => {
-    const file = docFile('{{fields}} {{ops}} {{limits}}');
+    const file = docFile('{{fields}} {{ops}} {{limits}} {{marker}}');
     const doc = createMonitorDoc({ file });
-    writeFileSync(file, '{{fields}} {{ops}}');
+    writeFileSync(file, '{{fields}} {{ops}} {{marker}}');
     const error = await doc.read().catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ServiceError);
     expect(error).toMatchObject({ kind: 'docs', message: '监听任务的文档读取失败' });
@@ -75,7 +87,9 @@ describe('read_docs 读元文档', () => {
   function readDocs(withMonitorDoc: boolean) {
     const { layer } = layerFor([fakeService()]);
     const monitorDoc = withMonitorDoc
-      ? createMonitorDoc({ file: docFile('监听任务的写法\n{{fields}}\n{{ops}}\n{{limits}}') })
+      ? createMonitorDoc({
+          file: docFile('监听任务的写法\n{{fields}}\n{{ops}}\n{{limits}}\n只回 {{marker}}'),
+        })
       : undefined;
     const tool = createServiceTools(layer, monitorDoc ? { monitorDoc } : {})[0]!;
     const run = (input: Record<string, unknown>) =>
@@ -96,7 +110,7 @@ describe('read_docs 读元文档', () => {
     expect(tool.description).toContain(
       'doc 填 monitor（无需填写 section）时读取「监听任务的写法」',
     );
-    const expected = `监听任务的写法\n${fieldsText()}\n${opsText()}\n${limitsText()}`;
+    const expected = `监听任务的写法\n${fieldsText()}\n${opsText()}\n${limitsText()}\n只回 ${discardMarker}`;
     expect(await run({ doc: 'monitor' })).toBe(expected);
     expect(await run({ doc: 'monitor', section: 'search' })).toBe(expected);
     expect(tool.summary!({ input: { doc: 'monitor' } })).toBe('监听任务的写法');

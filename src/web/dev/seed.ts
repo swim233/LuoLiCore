@@ -497,6 +497,13 @@ function seedNormal() {
     },
     state: { dueCount: 1, lastDueAt: isoOf(now - 2 * DAY + 3 * HOUR) },
   });
+  // 自行决定的监听任务：查到新的以后洛璃自己判断值不值得说；到点两次，上次判断不说，时间线里只有事件、没有回复
+  const wDecide = addWatch(book, 'decide', {
+    by: byPerson(1003),
+    createdAt: now - DAY,
+    check: { lastCheckedAt: isoOf(now - 9 * MIN), lastSuccessAt: isoOf(now - 9 * MIN) },
+    state: { dueCount: 2, lastDueAt: isoOf(now - 30 * MIN) },
+  });
   addWatch(book, 'cancelled', {
     by: byPerson(1002),
     createdAt: now - 5 * DAY,
@@ -509,6 +516,13 @@ function seedNormal() {
     '上海中心气象台刚发了两条预警：大风黄色预警，今天傍晚到明天上午沿海阵风 7～8 级；暴雨橙色预警，未来 3 小时有强降水，路上小心积水～',
     now - 45 * MIN + 25e3,
     { usage: [2240, 1536, 96] },
+  );
+  server.addEvent(
+    book,
+    wDecide.id,
+    'monitor',
+    now - 30 * MIN,
+    watchEventText(wDecide.action, 1, { decide: true, first: 2 }),
   );
   server.addEvent(
     book,

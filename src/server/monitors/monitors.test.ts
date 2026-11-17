@@ -377,11 +377,11 @@ describe('建监听任务', () => {
     const create = (monitor: unknown, extra: Record<string, unknown> = {}) =>
       s.refused('create_task', { action: '盯着', kind: 'monitor', monitor, ...extra }, id);
 
-    expect(await create({ ...description, mode: 'decide', key: '' })).toBe(
+    expect(await create({ ...description, mode: 'quiet', key: '' })).toBe(
       [
         '描述有问题，请修改后重新创建：',
         '- key 不能为空：请填写一个路径，如 messageType.code',
-        '- mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）',
+        '- mode 只能是 reply（触发回复）、record（仅记录）或 decide（自行决定）',
       ].join('\n'),
     );
     expect(await create(undefined)).toBe(

@@ -81,6 +81,7 @@ export type Conversation = {
    * 不算回复失败。重试与首段、段间超时按每一步的请求计。
    * 中途出错时，已完成的步（流里收到 finish-step 的步）写入历史并标记 failed，失败那一步自己的
    * 输出不写；没有完成的步时不写入。写入前没有结果的工具调用都以「工具调用未完成」结束。
+   * 给了 discard 时，正常完成的回复拿最后一步的文字问它一次，它说丢掉就不写入（见 ReplyOptions）。
    * 上一个回复的流还没结束时调用会立即抛错。
    */
   reply(options?: ReplyOptions): ReadableStream<MessageChunk>;
@@ -138,6 +139,14 @@ export type ReplyOptions = {
    * 核心不读它，只原样交给工具（ctx.triggers）
    */
   triggers?: readonly Trigger[];
+  /**
+   * 这次回复要不要丢掉：回复正常完成时，拿最后一步的文字（这一步的各段文字用换行连起来）问一次，
+   * 返回 true 时这条回复不写入历史（连同前面几步说的话、调过的工具），流的 finish 段的
+   * messageMetadata 带上 discarded: true。出错、中止、最后一步没有文字时不问；它抛错时当作不丢。
+   * 模型调用表、工具调用表、请求记录照常（请求确实发了）；按最后一步的输入看要不要压缩也照常。
+   * 核心不认识问的是什么（洛璃服务拿它认「自行决定」的回复里约定的标记）
+   */
+  discard?: (text: string) => boolean;
 };
 
 /** 装了工具时传给 streamText 的几项：工具集与多步的控制 */
@@ -522,7 +531,7 @@ export function createConversation({
       return message;
     },
 
-    reply({ abortSignal, triggers = [] }: ReplyOptions = {}) {
+    reply({ abortSignal, triggers = [], discard }: ReplyOptions = {}) {
       if (replying) throw new Error('上一个回复还没结束');
       replying = true;
 
@@ -640,6 +649,55 @@ export function createConversation({
             } else if (chunk.type === 'reset-step') {
               for (let i = reasoningTimes.length - 1; i >= 0; i--) {
                 if (reasoningTimes[i]!.step === step) reasoningTimes.splice(i, 1);
+              }
+            }
+            controller.enqueue(chunk);
+          },
+        });
+      };
+
+      // 正常完成、调用方说丢掉（见 ReplyOptions.discard）：不写入历史
+      let discarded = false;
+      /**
+       * 记下最后一步的文字（每一步从 start-step 起重新记，流中途重新生成时作废这一步记下的），
+       * 正常完成时（finish 段，之前没有出错）拿它问 discard；说丢掉时 finish 段的 metadata 带上
+       * discarded。中止没有 finish 段，不问
+       */
+      const askDiscard = () => {
+        let errored = false;
+        let texts: string[] = [];
+        let open = new Map<string, number>();
+        return new TransformStream<MessageChunk, MessageChunk>({
+          transform(chunk, controller) {
+            if (chunk.type === 'error') errored = true;
+            else if (chunk.type === 'start-step' || chunk.type === 'reset-step') {
+              texts = [];
+              open = new Map();
+            } else if (chunk.type === 'text-start') {
+              open.set(chunk.id, texts.push('') - 1);
+            } else if (chunk.type === 'text-delta') {
+              const index = open.get(chunk.id);
+              if (index !== undefined) texts[index] += chunk.delta;
+            } else if (chunk.type === 'finish' && discard && !errored) {
+              const text = texts.join('\n');
+              let drop = false;
+              if (text.trim() !== '') {
+                try {
+                  drop = discard(text);
+                } catch (error) {
+                  logger.error(
+                    { ...logFields, error: summarizeError(error) },
+                    'reply.discard_failed',
+                  );
+                }
+              }
+              if (drop) {
+                discarded = true;
+                controller.enqueue({
+                  ...chunk,
+                  messageMetadata: { ...chunk.messageMetadata, discarded: true },
+                } as MessageChunk);
+                return;
               }
             }
             controller.enqueue(chunk);
@@ -846,7 +904,8 @@ export function createConversation({
               .pipeThrough(tracker.markStreamRetries())
               .pipeThrough(timeoutAsFailure())
               .pipeThrough(countFinishedSteps())
-              .pipeThrough(timeReasoning()),
+              .pipeThrough(timeReasoning())
+              .pipeThrough(askDiscard()),
           );
         },
         onError: describeError,
@@ -931,6 +990,21 @@ export function createConversation({
                 },
                 'reply.end',
               );
+            } else if (discarded) {
+              // 调用方说丢掉：不写入，序号空着。拒收图片的标记照写（这次请求换成占位后被接受了，
+              // 否则这些图片一直算可疑）；按最后一步的输入看要不要压缩（看到的上下文和写入的一样大）
+              logger.info(
+                {
+                  ...summary,
+                  outcome: 'completed',
+                  discarded: true,
+                  finishReason,
+                  usage: responseMessage.metadata?.usage,
+                  ...(await markUnreadable()),
+                },
+                'reply.end',
+              );
+              checkCompress();
             } else {
               await save(responseMessage);
               logger.info(

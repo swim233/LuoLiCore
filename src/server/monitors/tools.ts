@@ -19,7 +19,7 @@ const scalar = z.union([z.string(), z.number(), z.boolean()]);
 
 /**
  * 描述里每个字段在工具参数里的类型。where 是递归的结构，有的模型接口不认递归的参数结构，
- * 这里不展开，当成一个对象，由代码校验（describe.ts）。mode 写成字符串：decide 要能进来、得到「还不支持」
+ * 这里不展开，当成一个对象，由代码校验（describe.ts）。mode 写成字符串：写错的值也能进来，由代码说明能填哪几种
  */
 const fieldTypes = {
   service: z.string(),

@@ -24,7 +24,8 @@ import type { LiveState, LiveTask } from '../../server/types';
      reply:reset    {convId, replyId, keep}      流中途出错、重新生成：parts 只留前 keep 段，后面的行作废
      reply:error    {convId, replyId, status, message?, row?}
      reply:abort    {convId, replyId, row?}
-     reply:end      {convId, replyId, ms, usage, row?}
+     reply:end      {convId, replyId, ms, usage, row?, discarded?}  正常完成；discarded：「自行决定」的监听回复里洛璃回了约定的标记，
+                                                 什么都没发出、没写入（「此刻」写「未回复」，徽记不闪、直接回弯月，没有星尘）
      bot:online / bot:offline {lastOnlineAt?}    连得上、连不上 Telegram
      assistant                                   助手的名字、唤醒词变了
      conv:add {conv} / conv:remove {id} / conv:update {id} / unread {convId} / data:reset {}
@@ -108,6 +109,7 @@ export interface BusEvents {
     ms: number;
     usage: { input?: number; cache?: number; output?: number };
     row?: MsgRow | null;
+    discarded?: true;
   };
   'bot:online': Empty;
   'bot:offline': { lastOnlineAt?: number | null };

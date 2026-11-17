@@ -302,6 +302,8 @@ class MockLive {
       usage?: { input?: number; cacheRead?: number; output?: number };
       error?: string;
       statusCode?: number;
+      /** 正常完成，但「自行决定」的回复里洛璃回了标记，什么都没发出 */
+      discarded?: boolean;
     } = {},
   ) {
     const r = this.need(convId);
@@ -334,6 +336,7 @@ class MockLive {
             }
           : {}),
         ...(this.lastReply ? { lastReply: this.lastReply } : {}),
+        ...(outcome === 'completed' && extra.discarded ? { discarded: true as const } : {}),
       },
       at,
     );

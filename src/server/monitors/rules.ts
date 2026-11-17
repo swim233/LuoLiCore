@@ -29,6 +29,28 @@ export const monitorLimits = {
 
 const limits = monitorLimits;
 
+/**
+ * 「自行决定」（mode 为 decide）的回复里约定的标记：洛璃判断不值得告知时只回它，这次回复不发出、
+ * 不写入。给模型看的字、判断都从这里取
+ */
+export const discardMarker = '[不回复]';
+
+/** 标记后面可以去掉的一个字符：空白、句号、反引号、星号 */
+const trailing = /^[\s。.`*]$/u;
+
+/**
+ * 回复的最后一步以标记结尾：这次回复丢掉。先去掉末尾的空白、句号（。.）和包在标记外面的反引号、
+ * 星号（如 `[不回复]`、**[不回复]**），这几样可以叠着，去到没有为止；标记前面有什么不管。
+ * 别的写法（全角括号、换了字）不算。
+ * 从末尾一个字符一个字符往前去，不用「一串到结尾」的正则：那样遇到中间一长串这几样字符时
+ * 耗时是长度的平方（模型陷进重复时会吐出一大片），期间整个服务卡着
+ */
+export function endsWithMarker(text: string): boolean {
+  let end = text.length;
+  while (end > 0 && trailing.test(text[end - 1]!)) end--;
+  return text.endsWith(discardMarker, end);
+}
+
 /** 描述的字段，按这个先后：yes 必填；task 建任务时必填，试跑时可以不写；no 可以不写 */
 export const monitorFields = [
   { name: 'service', required: 'yes', text: '服务名，见 read_docs 工具说明里的「当前可用服务」' },
@@ -67,7 +89,7 @@ export const monitorFields = [
   {
     name: 'mode',
     required: 'task',
-    text: '处理方式：reply 触发你回复一次；record 仅写入会话，不触发回复',
+    text: `处理方式：reply 触发你回复一次；record 仅写入会话，不触发回复；decide 触发你回复一次，由你判断是否告知，不告知时仅回复 ${discardMarker}`,
   },
 ] as const satisfies ReadonlyArray<{
   name: string;

@@ -21,7 +21,8 @@ import { matches } from './where.js';
 // - 查一次：经服务层调接口 → 取条目 → 没见过的编号存进动态 → 对每个盯着它的任务，取游标之后的新条目，
 //   按 where 过滤，有符合的就到点一次 → 推进游标（不符合的也算看过）。
 // - 到点：先问会话所在平台的前端还收不收，不收的取消任务；收的写一条 monitor 事件，记上次到点、到点次数，
-//   reply 的交给前端当作一次触发（同一个会话的几个合在一次），record 的只写事件。
+//   reply、decide 的交给前端当作一次触发（同一个会话的几个合在一次；decide 的带上标志，由前端和会话管理
+//   决定这一轮是不是「自行决定」的回复），record 的只写事件。
 // - 查不到：记下原因，拉长间隔再试；连续满 6 小时在会话里说一次（monitor-failed，触发回复）。6 小时只算
 //   一直在查的时候：比排好的时间晚了超过 lateMs 才开始的检查（中间服务停过、电脑睡过）又失败时，这一轮
 //   从这一次重新算（说过没有不变）。
@@ -540,21 +541,28 @@ export function createMonitorEngine({
             'task.update_failed',
           );
         }
-        if (monitor.mode !== 'record') replies.push(dueTask(task, 'monitor'));
+        // reply、decide 的交给前端当作一次触发（decide 的带上标志）；record 的只写事件
+        if (monitor.mode !== 'record') {
+          replies.push(dueTask(task, 'monitor', monitor.mode === 'decide'));
+        }
       }
       if (replies.length > 0) await host.deliver(conversationId, replies, fromSeq);
     }
     if (cursorError !== undefined) throw cursorError;
   }
 
-  /** 交给前端的一个任务：标出是监听任务的哪种事件（查到了新的、查不到） */
-  function dueTask(task: Task, event: 'monitor' | 'monitor-failed'): DueTask {
+  /**
+   * 交给前端的一个任务：标出是监听任务的哪种事件（查到了新的、查不到）；decide：处理方式是自行决定、
+   * 查到了新的
+   */
+  function dueTask(task: Task, event: 'monitor' | 'monitor-failed', decide = false): DueTask {
     const { platformMessageId } = task.source;
     return {
       id: task.id,
       action: task.action,
       ...(platformMessageId === undefined ? {} : { platformMessageId }),
       event,
+      ...(decide ? { decide: true as const } : {}),
     };
   }
 

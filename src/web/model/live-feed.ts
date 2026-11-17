@@ -132,6 +132,7 @@ function handle(ev: LiveEvent) {
             cache: ev.usage?.cacheRead,
             output: ev.usage?.output,
           },
+          ...(ev.discarded ? { discarded: true as const } : {}),
         });
       } else if (ev.outcome === 'failed') {
         bus.emit('reply:error', {

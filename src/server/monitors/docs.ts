@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { ServiceError } from '../services/layer.js';
-import { fieldsText, limitsText, opsText } from './rules.js';
+import { discardMarker, fieldsText, limitsText, opsText } from './rules.js';
 
 // 元文档「监听任务的写法」（ADR-0014）：read_docs 的 doc 写 monitor 时读它。手写的部分是
-// docs/monitor.md（发给模型的原文，不做格式化）；{{fields}}、{{ops}}、{{limits}} 由程序从 rules.ts 填。
-// 启动时检查文件在、占位认得、三个都在；每次读的时候重新读文件
+// docs/monitor.md（发给模型的原文，不做格式化）；{{fields}}、{{ops}}、{{limits}} 由程序从 rules.ts 填，
+// 行内的 {{marker}} 填「自行决定」的回复里约定的标记（可以出现几次）。
+// 启动时检查文件在、占位认得、四个都在；每次读的时候重新读文件
 
 /** read_docs 里元文档的名字；不能有服务叫这个名字 */
 export const monitorDocName = 'monitor';
@@ -18,6 +19,7 @@ const placeholders: Record<string, () => string> = {
   fields: fieldsText,
   ops: opsText,
   limits: limitsText,
+  marker: () => discardMarker,
 };
 
 // 写法同提示词文件：{{名字}}，{{ 与 }} 之间（不跨行）的任何文字都算一个占位

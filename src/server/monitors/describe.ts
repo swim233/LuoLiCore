@@ -14,8 +14,8 @@ export type Comparison = { field: string; op: MonitorOp; value: Scalar | Scalar[
 /** 条件：一个比较；或者 all（都要满足）、any（满足一个就行），可以互相套 */
 export type Condition = Comparison | { all: Condition[] } | { any: Condition[] };
 
-/** 处理方式：reply 触发回复，record 只记录 */
-export type MonitorMode = 'reply' | 'record';
+/** 处理方式：reply 触发回复，record 只记录，decide 触发回复、由洛璃判断说不说（不说时回约定的标记） */
+export type MonitorMode = 'reply' | 'record' | 'decide';
 
 /** 一份检查过的描述，字段按 rules.ts 的先后，只有认得的字段 */
 export type MonitorDescription = {
@@ -137,12 +137,8 @@ export function checkMonitor(
   }
 
   const mode = input.mode;
-  if (mode !== undefined && mode !== 'reply' && mode !== 'record') {
-    problem(
-      mode === 'decide'
-        ? 'mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）'
-        : 'mode 只能是 reply（触发回复）或 record（仅记录）',
-    );
+  if (mode !== undefined && mode !== 'reply' && mode !== 'record' && mode !== 'decide') {
+    problem('mode 只能是 reply（触发回复）、record（仅记录）或 decide（自行决定）');
   }
 
   if (problems.length > 0) return { ok: false, problems };

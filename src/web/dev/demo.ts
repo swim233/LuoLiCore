@@ -93,11 +93,17 @@ function tasksFor(convId: string, n: number): number[] {
     );
   return ids.slice(0, n);
 }
-/** 这个会话里进行中的监听任务：ok 查得通的，failing 查不到的 */
-function monitorsFor(convId: string, which: 'ok' | 'failing'): number[] {
+/** 这个会话里进行中的监听任务：ok 查得通的（处理方式是触发回复、不是自行决定），failing 查不到的，decide 处理方式是自行决定的 */
+function monitorsFor(convId: string, which: 'ok' | 'failing' | 'decide'): number[] {
   return server
     .activeTasks(convId)
-    .filter((t) => t.monitor && !!t.monitor.failing === (which === 'failing'))
+    .filter((t) => {
+      if (!t.monitor) return false;
+      if (which === 'decide') return t.monitor.description.mode === 'decide';
+      return (
+        t.monitor.description.mode !== 'decide' && !!t.monitor.failing === (which === 'failing')
+      );
+    })
     .map((t) => t.id);
 }
 const NEW_TASKS: {
@@ -209,6 +215,22 @@ export const ACTIONS: Record<string, () => void> = {
     const [tid] = monitorsFor(id, 'ok');
     if (tid === undefined) return toast('读书会里没有正常执行的监听任务：切到「正常」数据');
     if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor'))
+      toast('连不上 Telegram：只写了事件，没有回复');
+  },
+  /* 自行决定的监听任务到点（读书会的「留意上海的天气预警」）：事件正文多一行说明 → 等待合并 → 带任务的回复；
+     洛璃判断不值得说（只回标记）时「此刻」里结束的状态写「未回复」，徽记不闪、直接回弯月；值得说时和普通的监听触发一样 */
+  'decide-silent'() {
+    const id = convFor('c-book');
+    const [tid] = monitorsFor(id, 'decide');
+    if (tid === undefined) return toast('读书会里没有自行决定的监听任务：切到「正常」数据');
+    if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor', 'silent'))
+      toast('连不上 Telegram：只写了事件，没有回复');
+  },
+  'decide-reply'() {
+    const id = convFor('c-book');
+    const [tid] = monitorsFor(id, 'decide');
+    if (tid === undefined) return toast('读书会里没有自行决定的监听任务：切到「正常」数据');
+    if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor', 'reply'))
       toast('连不上 Telegram：只写了事件，没有回复');
   },
   /* 监听满 6 小时还查不到（读书会的「北京天气预警」）：会话里说一次，「此刻」里标出「监听失败 · 做什么」 */

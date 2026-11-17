@@ -61,13 +61,15 @@ export const systemClock: Clock = {
 /**
  * 到点的一个任务：前端据此在「此刻」标出。platformMessageId 是任务来源消息在平台上的 id
  * （Telegram 的回复引用它）；来源没有时没有。event：监听任务写的是哪种事件（monitor 查到了新的东西，
- * monitor-failed 连续查不到）；定时任务没有
+ * monitor-failed 连续查不到）；定时任务没有。decide：处理方式是自行决定的监听任务查到了新的东西（只在
+ * event 为 monitor 时可能有）；一轮回复的触发全是这样的任务时，这一轮是「自行决定」的回复
  */
 export type DueTask = {
   id: number;
   action: string;
   platformMessageId?: string;
   event?: 'monitor' | 'monitor-failed';
+  decide?: true;
 };
 
 /**

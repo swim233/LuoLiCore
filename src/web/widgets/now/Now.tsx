@@ -229,8 +229,11 @@ export const NOW_DEF: WidgetDef = {
     w.on('reply:wait', expand);
     w.on('reply:start', expand);
     w.on('reply:start', ({ convId }) => stardustStart(convId));
-    /* 回复正常完成时的星尘：最后一个字出现时从光标散开（逐字放完的那一刻，Typed.tsx 各处各自调 stardustAt）；这里只管没有光标可散的情况 */
-    w.on('reply:end', ({ convId }) => stardustAtEnd(convId));
+    /* 回复正常完成时的星尘：最后一个字出现时从光标散开（逐字放完的那一刻，Typed.tsx 各处各自调 stardustAt）；这里只管没有光标可散的情况。
+       「自行决定」的回复被丢掉（discarded）时什么都没发出，不放 */
+    w.on('reply:end', ({ convId, discarded }) => {
+      if (!discarded) stardustAtEnd(convId);
+    });
     w.on('reply:error', () => {
       w.flash('error');
       pulse(document.getElementById('top-status'));

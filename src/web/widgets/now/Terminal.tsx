@@ -200,7 +200,11 @@ const TermLine = memo(function TermLine({
   } else if (line.kind === 'think') {
     body = <ThinkBody line={line} />;
   } else {
-    body = <span className="tl-body">{line.text}</span>;
+    body = (
+      <span className="tl-body" title={line.title}>
+        {line.text}
+      </span>
+    );
   }
   return (
     <div

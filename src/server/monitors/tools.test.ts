@@ -177,7 +177,7 @@ describe('试跑的工具', () => {
     const { run } = tryTool(layer);
 
     const message = await toolError(
-      run({ ...description, key: '', where: { field: 'a', op: 'like', value: 1 }, mode: 'decide' }),
+      run({ ...description, key: '', where: { field: 'a', op: 'like', value: 1 }, mode: 'quiet' }),
     );
 
     expect(message).toBe(
@@ -185,7 +185,7 @@ describe('试跑的工具', () => {
         '测试未通过：描述有问题，请修改后重新测试。',
         '- key 不能为空：请填写一个路径，如 messageType.code',
         '- where.op 填的是「like」：比较方式只有 eq、ne、in、gt、gte、lt、lte、contains',
-        '- mode 暂不支持 decide（由你自行决定），当前只能填 reply（触发回复）或 record（仅记录）',
+        '- mode 只能是 reply（触发回复）、record（仅记录）或 decide（自行决定）',
       ].join('\n'),
     );
     expect(server.requests).toEqual([]);

@@ -32,8 +32,9 @@ export const STATE_TONE: Record<State, DotTone | undefined> = {
   error: 'danger',
 };
 const BUSY_ORDER: State[] = ['error', 'retry', 'tool', 'replying', 'thinking', 'waiting'];
-/** 一个会话是怎么离开「进行中」的：正常完成、中止、等待被放弃、出错后的 3.6 秒到了、别的原因（会话被删） */
-export type EndKind = 'end' | 'abort' | 'cancel' | 'error' | 'removed';
+/** 一个会话是怎么离开「进行中」的：正常完成、正常完成但回复被丢掉（自行决定的监听回复里洛璃回了标记，什么都没发）、
+    中止、等待被放弃、出错后的 3.6 秒到了、别的原因（会话被删） */
+export type EndKind = 'end' | 'discard' | 'abort' | 'cancel' | 'error' | 'removed';
 export interface Snap {
   state: State;
   tool?: string;
@@ -121,10 +122,11 @@ bus.on('reply:delta', ({ convId }) => status.set(convId, 'replying'));
 bus.on('tool:start', ({ convId, name }) => status.set(convId, 'tool', { tool: name }));
 bus.on('tool:end', ({ convId }) => status.set(convId, 'thinking'));
 bus.on('reply:retry', ({ convId }) => status.set(convId, 'retry'));
-bus.on('reply:end', ({ convId }) => {
+/* 回复被丢掉的也算一次正常完成的回复（服务的「上次回复」也这么算），但徽记不闪那一下：结束的方式记成 discard，和中止一样直接回弯月 */
+bus.on('reply:end', ({ convId, discarded }) => {
   status.lastReplyAt = Date.now();
   status.lastReplyConv = convId;
-  status.clear(convId, 'end');
+  status.clear(convId, discarded ? 'discard' : 'end');
 });
 bus.on('reply:abort', ({ convId }) => status.clear(convId, 'abort'));
 bus.on('reply:cancel', ({ convId }) => status.clear(convId, 'cancel'));

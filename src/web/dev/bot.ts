@@ -2,7 +2,7 @@ import { chars, rand, randi, uid } from '@luoli/ui/util';
 import type { ImageInfo, ImagePart, MsgRow, Part, ToolResultInfo } from '../model/types';
 import type { LiveTask } from '../../server/types';
 import { mockLive, mockStatus } from './mock-live';
-import { watchEventText, watchFailedText } from './mock-monitor';
+import { DECIDE_MARKER, watchEventText, watchFailedText } from './mock-monitor';
 import { mockServer as server, svgImage } from './mock-server';
 import { U, imgPart, toolPart, toolSummary } from './seed';
 
@@ -32,6 +32,8 @@ export interface Script {
   restreamAt?: number;
   /** 任务到点触发的回复：是哪几个任务（开始时带给「此刻」） */
   tasks?: LiveTask[];
+  /** 「自行决定」的监听回复里洛璃回了标记：说完以后什么都没发出，不写进历史（结束事件带 discarded） */
+  discard?: boolean;
 }
 
 /* 可取消的流程：模拟数据的每一次回复都跑在一个 run 里，切换数据、离线、删会话时整体取消 */
@@ -117,20 +119,33 @@ class Bot {
    * 正在等待合并就并进这一轮（到点本身不推事件）；正在回复就等这次发完再回复一次（推「又被触发」，补的那次带任务）。
    * Telegram 连不上时只有事件消息，不回复。返回有没有回复。
    * kind：task 定时任务到点（默认）；monitor 监听查到了新的；monitor-failed 监听满 6 小时还查不到（事件正文由 mock-monitor.ts 写）
+   * decide：处理方式是「自行决定」的监听任务这次怎么收场（演示用）：silent 洛璃判断不值得说、只回标记，什么都没发出；
+   * reply 值得说，照常回复。事件正文、带给「此刻」的任务都按任务的处理方式写，不看这个参数
    */
   dueTasks(
     convId: string,
     ids: number[],
     script: Script,
     kind: 'task' | 'monitor' | 'monitor-failed' = 'task',
+    decide?: 'silent' | 'reply',
   ) {
     const live: LiveTask[] = [];
+    let silent = false;
     for (const id of ids) {
       const t = server.task(id);
       if (!t) continue;
+      const isDecide = kind === 'monitor' && t.monitor?.description.mode === 'decide';
+      if (isDecide && decide === 'silent') silent = true;
       const text =
         kind === 'monitor'
-          ? watchEventText(t.action)
+          ? watchEventText(
+              t.action,
+              1,
+              isDecide
+                ? // 不值得说的演示挑样本里的高温黄色预警，值得说的挑暴雨橙色
+                  { decide: true, first: decide === 'silent' ? 2 : 1 }
+                : {},
+            )
           : kind === 'monitor-failed' && t.monitor?.failing
             ? watchFailedText(t, Date.parse(t.monitor.failing.since), t.monitor.failing.reason)
             : undefined;
@@ -140,21 +155,22 @@ class Bot {
         ref: t.ref,
         action: t.action,
         ...(kind === 'task' ? {} : { event: kind }),
+        ...(isDecide ? { decide: true as const } : {}),
       });
     }
     if (!live.length || !this.online) return false;
-    // 洛璃照任务说的做：回复里说一遍任务
+    // 洛璃照任务说的做：回复里说一遍任务；自行决定、判断不值得说的，只回标记
+    const say = (t: LiveTask) =>
+      kind === 'monitor'
+        ? t.decide
+          ? `${t.action}：上海中心气象台刚发布了暴雨橙色预警，未来 3 小时有强降水，路上注意积水～`
+          : `${t.action}：上海中心气象台刚发布了大风黄色预警，傍晚起沿海阵风 7～8 级，出门小心～`
+        : kind === 'monitor-failed'
+          ? `${t.action}，现在已经查不到半天了，可以请人看看服务的配置，或者取消这个任务（${t.ref}）。`
+          : `到点啦～ ${t.action}`;
     script = {
       ...script,
-      text: live
-        .map((t) =>
-          kind === 'monitor'
-            ? `${t.action}：上海中心气象台刚发布了大风黄色预警，傍晚起沿海阵风 7～8 级，出门小心～`
-            : kind === 'monitor-failed'
-              ? `${t.action}，现在已经查不到半天了，可以请人看看服务的配置，或者取消这个任务（${t.ref}）。`
-              : `到点啦～ ${t.action}`,
-        )
-        .join('；'),
+      ...(silent ? { discard: true, text: DECIDE_MARKER } : { text: live.map(say).join('；') }),
     };
     const cur = this.runs.get(convId);
     if (!cur) {
@@ -338,22 +354,24 @@ async function replyFlow(convId: string, script: Script, merged = false) {
         output: Math.round(cs.length * 1.3) + randi(4, 20),
       };
   bot.runs.delete(convId);
-  const row = server.has(convId)
-    ? server.addMsg(convId, {
-        role: 'assistant',
-        parts: [...st.parts, { type: 'text', text: st.text }],
-        images: st.images,
-        tools: st.tools,
-        meta: {
-          usage: { input: usage.input, cacheRead: usage.cache, output: usage.output },
-          ...(st.reasoningMs.length ? { reasoningMs: st.reasoningMs } : {}),
-        },
-      })
-    : null;
-  if (row)
+  /* 回了标记（自行决定）：什么都没发出，助手消息不写进历史；模型调用表照常记一行，回复算正常完成 */
+  const row =
+    server.has(convId) && !script.discard
+      ? server.addMsg(convId, {
+          role: 'assistant',
+          parts: [...st.parts, { type: 'text', text: st.text }],
+          images: st.images,
+          tools: st.tools,
+          meta: {
+            usage: { input: usage.input, cacheRead: usage.cache, output: usage.output },
+            ...(st.reasoningMs.length ? { reasoningMs: st.reasoningMs } : {}),
+          },
+        })
+      : null;
+  if (row || (script.discard && server.has(convId)))
     server.addCall({
       conversation_id: convId,
-      reply_id: row.id,
+      reply_id: row?.id ?? null,
       started_at: new Date(st.started).toISOString(),
       duration_ms: Date.now() - st.started,
       first_output_ms: 900,
@@ -369,6 +387,7 @@ async function replyFlow(convId: string, script: Script, merged = false) {
   mockLive.lastReply = row ? { conversationId: convId, at: row.createdAt } : mockLive.lastReply;
   mockLive.end(convId, 'completed', {
     usage: { input: usage.input, cacheRead: usage.cache, output: usage.output },
+    ...(script.discard ? { discarded: true } : {}),
   });
   if (st.pending) {
     const next = st.pending;

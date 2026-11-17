@@ -128,6 +128,8 @@ export function createLive({
     let aborted = false;
     let error: ErrorLine | undefined;
     let usage: Usage | undefined;
+    // 正常完成，但「自行决定」的回复回了约定的标记（finish 段带着 discarded）
+    let discarded = false;
     let failed = false;
     let ended = false;
 
@@ -471,6 +473,8 @@ export function createLive({
           flush();
           finished = true;
           usage = chunk.messageMetadata?.usage;
+          // 「自行决定」的回复回了约定的标记：什么都没发出、没写入
+          discarded = chunk.messageMetadata?.discarded === true;
           return;
         case 'error':
           flush();
@@ -532,6 +536,7 @@ export function createLive({
           ? { error: error.text, ...(error.statusCode ? { statusCode: error.statusCode } : {}) }
           : {}),
         ...(last ? { lastReply: last } : {}),
+        ...(outcome === 'completed' && discarded ? { discarded: true as const } : {}),
       });
     }
 

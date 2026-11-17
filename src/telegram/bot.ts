@@ -55,14 +55,25 @@ export type Sender = {
 
 /**
  * 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点。event：监听任务写的是哪种事件
- * （monitor 查到了新的东西，monitor-failed 连续查不到）；定时任务没有
+ * （monitor 查到了新的东西，monitor-failed 连续查不到）；定时任务没有。decide：处理方式是自行决定的
+ * 监听任务查到了新的（见 decideRound）
  */
 export type RoundTask = {
   id: number;
   ref: string;
   action: string;
   event?: 'monitor' | 'monitor-failed';
+  decide?: true;
 };
+
+/**
+ * 这一轮是不是「自行决定」的回复（ADR-0014）：触发全是带 decide 的任务，没有人的触发。这样的回复
+ * 整条攒到最后再发：洛璃回了约定的标记时（finish 段的 metadata 带 discarded）什么都不发。
+ * 规则同洛璃服务会话管理里的 decideRound（那边据此让核心认标记），两边拿的是同样的触发者与任务
+ */
+export function decideRound(tasks: readonly RoundTask[], triggers: readonly Trigger[]): boolean {
+  return tasks.length > 0 && tasks.every((task) => task.decide === true) && triggers.length === 0;
+}
 
 /**
  * bot 用的会话对象：核心的会话，reply 多收一个 tasks（任务到点触发的回复是哪几个任务）。
@@ -449,7 +460,10 @@ export function createTelegramBot({
    * 失败那一步的文字不发，之前发出的保留，再发失败提示。群里看到的正好是核心写进历史的那些完成的步。
    * 一步的文字怎么拆成几条见 piecesOf，每条怎么发见 deliver；尾部挂在最后一条。失败提示总是普通
    * 消息，不解析、不带尾部。用时从调用 reply() 之前量到 finish 段到达，不含等待合并、不含发最后一条。
-   * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）
+   * 触发者交给核心（工具据此知道是谁让做的），到点的任务交给会话管理（「此刻」标出）。
+   * 「自行决定」的回复（见 decideRound）：本来要发的每一条先按先后攒着（「正在输入」照常），流结束时
+   * 再看：回了约定的标记（finish 段带 discarded）就一条都不发；否则攒下的照原样发出（出错时之后再发
+   * 失败提示），和普通回复发出的内容、先后一样，只是都在最后才发
    */
   async function reply(
     session: Session,
@@ -461,6 +475,12 @@ export function createTelegramBot({
     }: { target: ChatTarget; quote?: number; triggers: Trigger[]; tasks: RoundTask[] },
   ): Promise<void> {
     const fields = { conversationId: session.conversationId };
+    const decide = decideRound(tasks, triggers);
+    // 「自行决定」的回复攒着的几条（文字、尾部），流结束时再决定发不发
+    const kept: Array<{ text: string; footer?: string }> = [];
+    let discarded = false;
+    // 流以 abort 段结束（只有服务退出时会有）
+    let aborted = false;
     // 这一步还没发出的文字
     let pending = '';
     // 结束了的一步的文字，等下一个段决定带不带尾部
@@ -468,7 +488,7 @@ export function createTelegramBot({
     // 这一步出现过工具段：finish-step 时直接发，不留
     let toolInStep = false;
     let failed = false;
-    const flush = async (text: string, footer?: string) => {
+    const sendNow = async (text: string, footer?: string) => {
       // 关闭时被中止的回复不再发出；全是空白的不发
       if (stopping.signal.aborted || !text.trim()) return;
       const pieces = piecesOf(text);
@@ -483,6 +503,11 @@ export function createTelegramBot({
         if (!sent) break;
       }
     };
+    // 普通回复马上发；「自行决定」的回复先攒着
+    const flush = async (text: string, footer?: string) => {
+      if (decide) kept.push({ text, ...(footer === undefined ? {} : { footer }) });
+      else await sendNow(text, footer);
+    };
     const startedAt = now();
     const stream = session.conversation.reply({
       abortSignal: stopping.signal,
@@ -490,6 +515,9 @@ export function createTelegramBot({
       ...(tasks.length > 0 ? { tasks } : {}),
     });
     for await (const chunk of stream) {
+      // 正常完成：「自行决定」的回复回了约定的标记时 finish 段带着 discarded
+      if (chunk.type === 'finish') discarded = chunk.messageMetadata?.discarded === true;
+      if (chunk.type === 'abort') aborted = true;
       if (held !== undefined) {
         const text = held;
         held = undefined;
@@ -525,7 +553,14 @@ export function createTelegramBot({
         else if (text.trim()) held = text;
       }
     }
-    if (stopping.signal.aborted) return;
+    // Telegram 在关了；或者这是「自行决定」的回复而且被中止了，攒下的一条都不发。服务退出时总是
+    // 会话管理先中止回复（Telegram 要先等轮询停下才开始它的宽限），那时这里的 stopping 还没中止
+    if (stopping.signal.aborted || (decide && aborted)) return;
+    // 「自行决定」的回复：回了标记就都不发，否则把攒下的按先后发出
+    if (decide) {
+      if (discarded) logger.info({ ...fields, kept: kept.length }, 'telegram.decide_discarded');
+      else for (const { text, footer } of kept) await sendNow(text, footer);
+    }
     // 错误详情由核心记进日志；群里只发固定提示
     if (failed) await send(target, errorText, quote, fields);
   }
@@ -974,11 +1009,12 @@ export function createTelegramBot({
         onMessage(session, {
           kind: 'due',
           target: { chatId: Number(chatId) },
-          tasks: tasks.map(({ id, ref, action, event }) => ({
+          tasks: tasks.map(({ id, ref, action, event, decide }) => ({
             id,
             ref,
             action,
             ...(event ? { event } : {}),
+            ...(decide ? { decide } : {}),
           })),
           quote: source !== undefined && /^\d+$/.test(source) ? Number(source) : undefined,
         });
