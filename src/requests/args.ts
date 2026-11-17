@@ -24,7 +24,7 @@ export type ParsedArgs =
 export const usage = `用法：pnpm requests [选项]
 
 导出发给模型的请求与响应（请求记录，ADR-0008），输出一个 JSON 数组。
-请求记录与主库都只读打开，洛璃服务运行时也能用。路径与洛璃服务相同：主库 LUOLI_DB（默认 data/luoli.db），
+请求记录与主库都只读打开，核心服务运行时也能用。路径与核心服务相同：主库 LUOLI_DB（默认 data/luoli.db），
 请求记录 LUOLI_REQUESTS_DB（默认主库旁边的 requests.db），图片 LUOLI_FILES_DIR（默认主库旁边的 files/）。
 
 选项：
