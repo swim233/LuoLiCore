@@ -76,8 +76,8 @@ export function emptyViews() {
  * 已读位置存在内存里的 web.db，第一次打开时照常用现有会话初始化；「此刻」与服务的状态照服务里的
  * 接法装上（status 给了就用它代替）。给了 model 时再装上会话管理（回复由「此刻」旁听）、网页会话的
  * 对话接口与任务服务（网页会话的到点入口、取消任务的接口），接法与 main.ts 相同；taskTools 时
- * 任务工具接在 tools 后面。给了 monitors（服务层与 feeds.db）时任务服务带上监视的引擎；服务层里有服务时
- * 任务工具还能建、改监视任务，最后多一个试跑监视的工具。定时器不自己开始（测试里调 tasks.start()）。
+ * 任务工具接在 tools 后面。给了 monitors（服务层与 feeds.db）时任务服务带上监听的引擎；服务层里有服务时
+ * 任务工具还能建、改监听任务，最后多一个试跑监听的工具。定时器不自己开始（测试里调 tasks.start()）。
  * request 默认带上本机的 Host
  */
 export async function testService({
@@ -127,7 +127,7 @@ export async function testService({
   taskTools?: boolean;
   /** 任务服务的时钟（测试里用假的） */
   clock?: Clock;
-  /** 监视（ADR-0014）：服务层与 feeds.db */
+  /** 监听（ADR-0014）：服务层与 feeds.db */
   monitors?: { layer: ServiceLayer; feeds: FeedsDb };
 } = {}) {
   const { logger, entries } = recordingLogger();
@@ -137,7 +137,7 @@ export async function testService({
     ),
   );
   let tasks: TaskService | undefined;
-  // 照服务的装配：服务层里有服务时才能建、试跑监视任务
+  // 照服务的装配：服务层里有服务时才能建、试跑监听任务
   const serving = monitors && monitors.layer.services.length > 0 ? monitors.layer : undefined;
   const installed = taskTools
     ? [

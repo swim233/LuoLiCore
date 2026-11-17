@@ -7,7 +7,7 @@ import { installServices } from '../services/install.js';
 import { createServiceLayer } from '../services/layer.js';
 import { fakeService } from '../services/test-services.js';
 
-// 监视的测试用的东西：真的服务层（请求器只放行 127.0.0.1，feeds.db 在内存里），本地 HTTP 服务当假的
+// 监听的测试用的东西：真的服务层（请求器只放行 127.0.0.1，feeds.db 在内存里），本地 HTTP 服务当假的
 // 外部服务。都在 closeAll（src/net/test-server.ts）时关掉
 
 /** 装上这些服务，建服务层 */

@@ -116,7 +116,7 @@ class Bot {
    * 任务到点（Telegram 会话）：服务先写事件消息、改任务，再把它当作一次触发：空闲时走等待合并，开始时带着是哪几个任务；
    * 正在等待合并就并进这一轮（到点本身不推事件）；正在回复就等这次发完再回复一次（推「又被触发」，补的那次带任务）。
    * Telegram 连不上时只有事件消息，不回复。返回有没有回复。
-   * kind：task 定时任务到点（默认）；monitor 监视查到了新的；monitor-failed 监视满 6 小时还查不到（事件正文由 mock-monitor.ts 写）
+   * kind：task 定时任务到点（默认）；monitor 监听查到了新的；monitor-failed 监听满 6 小时还查不到（事件正文由 mock-monitor.ts 写）
    */
   dueTasks(
     convId: string,

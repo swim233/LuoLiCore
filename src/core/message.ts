@@ -19,8 +19,8 @@ export type Trigger = {
 
 /**
  * 事件（ADR-0010、ADR-0014）：洛璃服务写进会话的一条不是人说的消息，按用户消息存。
- * task：任务到点；task-missed：服务停着时错过了；monitor：监视任务查到了新的东西；
- * monitor-failed：监视任务连续很久查不到。taskId 是任务的 id（Task.id）
+ * task：任务到点；task-missed：服务停着时错过了；monitor：监听任务查到了新的东西；
+ * monitor-failed：监听任务连续很久查不到。taskId 是任务的 id（Task.id）
  */
 export type ConversationEvent = {
   type: 'task' | 'task-missed' | 'monitor' | 'monitor-failed';

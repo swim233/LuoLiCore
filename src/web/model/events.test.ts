@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { eventLine, firstSentence, hasFoldedBody, liveTaskLine } from './events';
 
-/* 事件在面板上的说法：「此刻」里标出触发的任务，监视的两种事件点一下才展开正文 */
+/* 事件在面板上的说法：「此刻」里标出触发的任务，监听的两种事件点一下才展开正文 */
 describe('「此刻」里标出触发的任务', () => {
   it('定时任务（服务没给 event）写「任务触发」', () => {
     expect(liveTaskLine({ action: '提醒小明交周报' })).toBe('任务触发 · 提醒小明交周报');
   });
 
-  it('监视任务按服务给的 event 写', () => {
+  it('监听任务按服务给的 event 写', () => {
     expect(liveTaskLine({ action: '盯着天气预警', event: 'monitor' })).toBe(
       '监听触发 · 盯着天气预警',
     );
@@ -18,7 +18,7 @@ describe('「此刻」里标出触发的任务', () => {
 });
 
 describe('事件的正文', () => {
-  it('只有监视的两种事件点一下展开正文', () => {
+  it('只有监听的两种事件点一下展开正文', () => {
     expect(hasFoldedBody('monitor')).toBe(true);
     expect(hasFoldedBody('monitor-failed')).toBe(true);
     expect(hasFoldedBody('task')).toBe(false);

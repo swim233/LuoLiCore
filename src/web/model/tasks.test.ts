@@ -13,7 +13,7 @@ import {
 } from './tasks';
 import type { TaskMonitor, TaskRow, TodaySummary } from './types';
 
-/* 监视任务在面板上的说法：右边那一小格、展开里的句子、胶囊那句话。时间一律按服务器的时区（这里固定成 UTC，结果不随跑测试的机器变） */
+/* 监听任务在面板上的说法：右边那一小格、展开里的句子、胶囊那句话。时间一律按服务器的时区（这里固定成 UTC，结果不随跑测试的机器变） */
 const TZ = 'UTC';
 const NOW = Date.parse('2026-11-16T22:00:00Z');
 
@@ -48,7 +48,7 @@ function timed(id: number, at: string): TaskRow {
   });
 }
 
-describe('监视任务：检查的情况', () => {
+describe('监听任务：检查的情况', () => {
   it('查得通：上次检查的时刻；还没查过：什么都没有', () => {
     expect(checkState(monitor({ lastCheckedAt: '2026-11-16T21:38:00Z' }))).toEqual({
       kind: 'ok',
@@ -139,7 +139,7 @@ describe('任务部件的胶囊', () => {
   beforeEach(() => db.reset());
   afterEach(() => db.reset());
 
-  it('没有监视任务出问题时，句子后面没有那一段', () => {
+  it('没有监听任务出问题时，句子后面没有那一段', () => {
     put(timed(1, '2026-11-17T01:00:00Z'), timed(2, '2026-11-18T01:00:00Z'));
     expect(tasksThumb(NOW)).toBe('当前有 2 个任务 · 下一个 11-17 01:00');
   });

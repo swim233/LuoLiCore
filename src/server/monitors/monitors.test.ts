@@ -29,7 +29,7 @@ import { monitorLimits } from './rules.js';
 import { layerFor } from './test-monitors.js';
 import { createTryMonitorTool } from './tools.js';
 
-// 监视任务（ADR-0014）：建、查、来源、改、重启、查不到、会话不收、接口。时间按上海（UTC+8）；
+// 监听任务（ADR-0014）：建、查、来源、改、重启、查不到、会话不收、接口。时间按上海（UTC+8）；
 // 定时器用假时钟（只有 advance 时才走）；外部服务是本地 HTTP 服务，经真的服务层；feeds.db 在内存里
 
 let originalTz: string | undefined;
@@ -257,7 +257,7 @@ async function setup({
   async function kinds(conversationId: string) {
     return (await messages(conversationId)).map((m) => m.metadata?.event?.type ?? m.role);
   }
-  /** 新建一个网页会话，在里面建监视任务（默认的描述，可以换掉几项） */
+  /** 新建一个网页会话，在里面建监听任务（默认的描述，可以换掉几项） */
   async function watch(fields: Record<string, unknown> = {}, conversationId?: string) {
     const id = conversationId ?? (await service.observed.createConversation({ platform: 'web' }));
     const output = await run(
@@ -306,7 +306,7 @@ async function settledReply(s: Setup, conversationId: string, replies: number) {
 
 // ─── 建 ─────────────────────────────────────────────────────────────────
 
-describe('建监视任务', () => {
+describe('建监听任务', () => {
   it('通过：真的查一次，已有的条目存进动态、算已有的；结果说清建了什么；不到点、不请求模型', async () => {
     const s = await setup();
     s.feed.lists.sh = [item('a'), item('b')];
@@ -413,7 +413,7 @@ describe('建监视任务', () => {
     ).toBe('monitor 仅在 kind 为 monitor 时填写：定时任务无需描述');
   });
 
-  it('满 20 个进行中的任务（定时的、监视的一起算）：不建、不发请求；CLI 会话不能建', async () => {
+  it('满 20 个进行中的任务（定时的、监听的一起算）：不建、不发请求；CLI 会话不能建', async () => {
     const s = await setup();
     const id = await s.observed.createConversation({ platform: 'web' });
     for (let i = 0; i < 19; i++) {
@@ -469,7 +469,7 @@ describe('定时去查', () => {
     expect(s.model.doStreamCalls).toHaveLength(0);
   });
 
-  it('新的一条：到点一次，写一条 monitor 事件、触发一次回复；记上次到点、到点次数；「此刻」的 start 标出是监视到点（event 是 monitor）', async () => {
+  it('新的一条：到点一次，写一条 monitor 事件、触发一次回复；记上次到点、到点次数；「此刻」的 start 标出是监听触发（event 是 monitor）', async () => {
     const s = await setup({ model: replying('有新的了') });
     const id = await watching(s, [item('a')]);
 
@@ -498,7 +498,7 @@ describe('定时去查', () => {
     expect(s.model.doStreamCalls).toHaveLength(1);
   });
 
-  it('监视触发的回复进行中：现场里这条带着任务和 event，面板新连上时也拿得到', async () => {
+  it('监听触发的回复进行中：现场里这条带着任务和 event，面板新连上时也拿得到', async () => {
     let open!: () => void;
     const gate = new Promise<void>((resolve) => (open = resolve));
     const s = await setup({ model: waiting(gate) });
@@ -689,7 +689,7 @@ describe('来源', () => {
 
 // ─── 改 ─────────────────────────────────────────────────────────────────
 
-describe('改监视任务', () => {
+describe('改监听任务', () => {
   it('改间隔、条件、处理方式、任务内容：马上生效，不发请求', async () => {
     const s = await setup();
     const id = await watching(s, [item('a')]);
@@ -760,7 +760,7 @@ describe('改监视任务', () => {
     expect((await s.messages(id)).map(textOf)).toEqual([`${header(1)}\n\n标题 z\nlevel: red`]);
   });
 
-  it('改不通（描述不对、查不通）：原来的不变；监视任务和定时任务不能互相改', async () => {
+  it('改不通（描述不对、查不通）：原来的不变；监听任务和定时任务不能互相改', async () => {
     const s = await setup();
     const id = await watching(s, [item('a')]);
     const before = await s.storage.getTask(1);
@@ -910,7 +910,7 @@ describe('重启', () => {
     );
   });
 
-  it('对账：进行中的监视任务没有「谁在盯」的补上（下一次查到的只存不到点），已经不在的去掉', async () => {
+  it('对账：进行中的监听任务没有「谁在盯」的补上（下一次查到的只存不到点），已经不在的去掉', async () => {
     const s = await setup();
     const id = await watching(s, [item('a')], { mode: 'record' });
     const source = s.feeds.watcher(1)!.sourceId;
@@ -1275,7 +1275,7 @@ describe('引擎自己出错', () => {
     return seen;
   }
 
-  /** sh、bj 两个来源各一个监视任务（只记录）；sh 的 feeds.db 写入坏掉的那几样由 methods 定 */
+  /** sh、bj 两个来源各一个监听任务（只记录）；sh 的 feeds.db 写入坏掉的那几样由 methods 定 */
   async function twoSources(methods: string[]) {
     const ext = await externals();
     const breaking = breakable(ext.feeds);
@@ -1427,7 +1427,7 @@ describe('会话不收', () => {
 // ─── 接口、列出、文档 ───────────────────────────────────────────────────
 
 describe('给面板的数据、列出任务、读文档', () => {
-  it('任务列表：监视任务带描述、写成人话的一行、上次检查、上次成功；没有下次到点；每次检查之后推 task 事件', async () => {
+  it('任务列表：监听任务带描述、写成人话的一行、上次检查、上次成功；没有下次到点；每次检查之后推 task 事件', async () => {
     const s = await setup();
     await watching(s, [item('a')], { mode: 'record' });
     const pushed = () =>
@@ -1524,7 +1524,7 @@ describe('给面板的数据、列出任务、读文档', () => {
     );
   });
 
-  it('list_tasks：监视任务写出盯的是什么、多久查一次、只要哪些、处理方式、上次检查', async () => {
+  it('list_tasks：监听任务写出盯的是什么、多久查一次、只要哪些、处理方式、上次检查', async () => {
     const s = await setup();
     const id = await watching(s, [item('a')], {
       where: {
@@ -1577,7 +1577,7 @@ describe('给面板的数据、列出任务、读文档', () => {
     expect(tasks[0]!.monitor!.description).toMatchObject({ where, params: { q } });
   });
 
-  it('read_docs 读服务的总说明：结尾写这个服务的监视最短多久查一次、每天最多多少次请求', async () => {
+  it('read_docs 读服务的总说明：结尾写这个服务的监听最短多久查一次、每天最多多少次请求', async () => {
     const s = await setup({
       outside: await externals({
         demo: { limits: { minIntervalSeconds: 300, maxRequestsPerDay: 1500 } },

@@ -92,7 +92,7 @@ function isoWeekday(date: Date): number {
   return date.getDay() === 0 ? 7 : date.getDay();
 }
 
-/** 按时间到点的任务（一次性的、周期的）；监视任务没有约好的时刻 */
+/** 按时间到点的任务（一次性的、周期的）；监听任务没有约好的时刻 */
 export type TimedSchedule = Exclude<TaskSchedule, { kind: 'monitor' }>;
 
 /** 周期任务在这一天（本地日期）到不到点 */
@@ -117,7 +117,7 @@ function onDay(schedule: Exclude<TimedSchedule, { kind: 'once' }>, day: Date): b
 /**
  * 在 after 之后（不含）第一次到点的时刻。一次性的：at 还没到时就是它，否则没有。
  * 周期的：从 after 那一天起往后找第一个到点的日子，取那天的 time；晚于截止（until）时没有，
- * 任务就该完成了。不认识的种类、监视任务（没有约好的时刻）没有
+ * 任务就该完成了。不认识的种类、监听任务（没有约好的时刻）没有
  */
 export function nextDue(schedule: TaskSchedule, after: Date): Date | undefined {
   if (schedule.kind === 'once') {
@@ -152,8 +152,8 @@ export function everyText(minutes: unknown): string | undefined {
 
 /**
  * 一句人话的周期：「一次性」「每天 08:00」「每个工作日 08:00，到 12-31 为止」「每周二 20:00」
- * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日。监视任务是「每 10 分钟执行一次」
- * （带服务、接口名称的那一行由监视那边写）
+ * 「每月 31 号 10:00」。截止日期和 now 同一年时只写月日。监听任务是「每 10 分钟执行一次」
+ * （带服务、接口名称的那一行由监听那边写）
  */
 export function describeSchedule(schedule: TaskSchedule, now: Date): string {
   if (schedule.kind === 'once') return '一次性';

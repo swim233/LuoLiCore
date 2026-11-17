@@ -6,7 +6,7 @@ import type { FeedsDb } from '../feeds-db.js';
 import { pathParams, type InstalledService } from './install.js';
 import { createServiceRedactor, normalizeJson } from './redact.js';
 
-// 服务层（ADR-0014）：洛璃的工具和监视的引擎都经过它调外部服务、读服务的文档。
+// 服务层（ADR-0014）：洛璃的工具和监听的引擎都经过它调外部服务、读服务的文档。
 // 只调装上的服务、声明了的接口，只发 GET，不跟随跳转；凭据只在这里贴上；每天的请求数有上限，
 // 计数存在 feeds.db 里；交给调用方的文字和日志里抹掉凭据
 
@@ -45,15 +45,15 @@ export type ServiceResponse = {
   truncated: boolean;
 };
 
-/** 装上的服务里给工具、监视看的部分 */
+/** 装上的服务里给工具、监听看的部分 */
 export type ServiceInfo = {
   name: string;
   title: string;
   summary: string;
   endpoints: Array<{ id: string; title: string; pathParams: string[]; query: string[] }>;
-  /** 最短多久查一次（秒），监视的间隔不能比它短 */
+  /** 最短多久查一次（秒），监听的间隔不能比它短 */
   minIntervalSeconds: number;
-  /** 每天最多发多少次请求（一次性的查询和监视合在一起算） */
+  /** 每天最多发多少次请求（一次性的查询和监听合在一起算） */
   maxRequestsPerDay: number;
 };
 

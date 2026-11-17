@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 // 洛璃服务自己的 SQLite 文件（默认数据库所在目录下的 feeds.db，LUOLI_FEEDS_DB；ADR-0014），
-// 不进核心的表：服务每天发了多少次请求；监视的来源、查到的动态、谁在盯哪个来源。
+// 不进核心的表：服务每天发了多少次请求；监听的来源、查到的动态、谁在盯哪个来源。
 // 第 i 项把版本 i 的库升到 i + 1
 const migrations = [
   `
@@ -13,7 +13,7 @@ CREATE TABLE service_requests (
 );
 `,
   `
--- 来源：服务、接口、参数、条目在哪、认新旧都相同的一处，只查一次，分给盯着它的每个监视任务
+-- 来源：服务、接口、参数、条目在哪、认新旧都相同的一处，只查一次，分给盯着它的每个监听任务
 CREATE TABLE sources (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   identity         TEXT NOT NULL UNIQUE,      -- 认来源用的 JSON（见 sourceIdentity）
@@ -43,7 +43,7 @@ CREATE TABLE feed_items (
   truncated     INTEGER NOT NULL DEFAULT 0,   -- data 超过 64 KB、截掉了
   UNIQUE (source_id, item_key)
 );
--- 谁在盯：每个监视任务盯着哪个来源、看到了哪里（游标：处理过的最后一条动态）
+-- 谁在盯：每个监听任务盯着哪个来源、看到了哪里（游标：处理过的最后一条动态）
 CREATE TABLE watchers (
   task_id    INTEGER PRIMARY KEY,
   source_id  INTEGER NOT NULL REFERENCES sources(id),
@@ -106,7 +106,7 @@ export type FeedItem = {
   truncated: boolean;
 };
 
-/** 一个监视任务盯着哪个来源、看到了哪里 */
+/** 一个监听任务盯着哪个来源、看到了哪里 */
 export type Watcher = { taskId: number; sourceId: number; cursor?: number; createdAt: string };
 
 const schemaVersion = migrations.length;

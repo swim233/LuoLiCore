@@ -1,7 +1,7 @@
 import type { TaskMonitor, TaskRow } from '../model/types';
 import { stampOf } from './mock-server';
 
-/* 开发模式里的监视任务样本：描述、写成人话的几行（facts）、事件的正文，写法照服务（src/server/monitors/format.ts 的 monitorFactList、
+/* 开发模式里的监听任务样本：描述、写成人话的几行（facts）、事件的正文，写法照服务（src/server/monitors/format.ts 的 monitorFactList、
    monitorEventText、monitorFailedText），只供演示。用的都是和风天气的天气预警接口（真实的服务里只有它）。
    事件的正文：第一行「监听触发：做什么」，第二行说新条目共几条，然后每条是标题一行加 show 的每个字段一行「路径: 值」 */
 
@@ -18,7 +18,7 @@ interface WatchSpec {
   mode: 'reply' | 'record';
 }
 
-/** 一个监视任务在任务列表里的样子（不含检查的状态，由调用方补） */
+/** 一个监听任务在任务列表里的样子（不含检查的状态，由调用方补） */
 export function watchView(w: WatchSpec): TaskMonitor {
   const every =
     w.every % 1440 === 0
@@ -67,7 +67,7 @@ const newAndNotBlue = {
   text: 'messageType.code 是「alert」、「update」之一 并且 color.code 不等于「blue」',
 };
 
-/** 种子数据用的几个监视任务：查得通的（带「并且」）、查不到的、只记录的、已经取消的 */
+/** 种子数据用的几个监听任务：查得通的（带「并且」）、查不到的、只记录的、已经取消的 */
 export const WATCHES = {
   ok: {
     action: '盯着上海的天气预警，有新的就告诉大家',

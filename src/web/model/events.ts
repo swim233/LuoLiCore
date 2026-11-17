@@ -17,12 +17,12 @@ const LABEL: Record<EventType, string> = {
 export const eventOf = (row: ApiMessage): EventType | undefined =>
   row.message.metadata?.event?.type;
 
-/** 点一下能展开正文的事件：监视查到的东西、查不到的原因（正文可能有几千个字，不放进悬停的说明）。
+/** 点一下能展开正文的事件：监听查到的东西、查不到的原因（正文可能有几千个字，不放进悬停的说明）。
     任务触发、任务超时的正文只有一两句，照旧悬停看 */
 export const hasFoldedBody = (type: EventType): boolean =>
   type === 'monitor' || type === 'monitor-failed';
 
-/** 「此刻」里标出一个触发的任务：「任务触发 · 做什么」；监视任务按服务给的 event 写「监听触发 · …」「监听失败 · …」 */
+/** 「此刻」里标出一个触发的任务：「任务触发 · 做什么」；监听任务按服务给的 event 写「监听触发 · …」「监听失败 · …」 */
 export function liveTaskLine(t: Pick<LiveTask, 'action' | 'event'>): string {
   return `${LABEL[t.event ?? 'task']} · ${t.action}`;
 }

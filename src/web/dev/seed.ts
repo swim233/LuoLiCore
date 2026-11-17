@@ -213,7 +213,7 @@ const cancelledAt = (ms: number) => ({
   endedAt: isoOf(ms),
 });
 
-/** 监视任务（ADR-0014）：描述、写成人话的几行来自 mock-monitor.ts；check 是检查的状态（已经取消的没有）；进行中的没有下次到点 */
+/** 监听任务（ADR-0014）：描述、写成人话的几行来自 mock-monitor.ts；check 是检查的状态（已经取消的没有）；进行中的没有下次到点 */
 function addWatch(
   convId: string,
   spec: keyof typeof WATCHES,
@@ -479,7 +479,7 @@ function seedNormal() {
     usage: [880, 0, 30],
   });
   U(book, 1003, '哈哈，被清空了', now - 50 * MIN);
-  // 监视任务四种样子（任务部件里点右边的小箭头展开）：查得通的（带「并且」的条件，有人让建过、到点两次）、查不到的、已经取消的；只记录的在「推荐几部科幻小说」里
+  // 监听任务四种样子（任务部件里点右边的小箭头展开）：查得通的（带「并且」的条件，有人让建过、到点两次）、查不到的、已经取消的；只记录的在「推荐几部科幻小说」里
   const wOk = addWatch(book, 'ok', {
     by: byPerson(1004),
     createdAt: now - 3 * DAY,
@@ -700,7 +700,7 @@ function seedNormal() {
     { usage: [1210, 0, 52] },
   );
   server.addEvent(w1, tReview, 'task-missed', now - 2 * DAY);
-  // 只记录的监视任务：到点只写事件，洛璃不回复（这个会话里没有进行中的定时任务）
+  // 只记录的监听任务：到点只写事件，洛璃不回复（这个会话里没有进行中的定时任务）
   const wRec = addWatch(w1, 'record', {
     by: { name: WEB_AUTHOR },
     createdAt: now - 2 * DAY,

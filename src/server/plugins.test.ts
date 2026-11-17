@@ -27,7 +27,7 @@ const tasks = () => {
 
 const taskToolNames = ['create_task', 'list_tasks', 'cancel_task', 'update_task'];
 const serviceToolNames = ['read_docs', 'call_service'];
-/** 装上了服务时最后一个：试跑监视 */
+/** 装上了服务时最后一个：试跑监听 */
 const monitorToolNames = ['try_monitor'];
 
 /**
@@ -94,7 +94,7 @@ describe('服务启动时装配插件与工具', () => {
     ]);
   });
 
-  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的四个、试跑监视', () => {
+  it('插件清单（配好了和风天气）：装上 qweather；工具是 fetch、读文档与调服务、任务的四个、试跑监听', () => {
     const env = {
       QWEATHER_API_HOST: 'https://abc123.def.qweatherapi.com/',
       QWEATHER_DEVELOPER_ID: 'developer-id-1',
@@ -123,7 +123,7 @@ describe('服务启动时装配插件与工具', () => {
     expect(names).toEqual(['b2', 'b1', 'a1', ...taskToolNames]);
   });
 
-  it('装上了服务时：插件的工具、读文档与调服务、任务的四个、试跑监视；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
+  it('装上了服务时：插件的工具、读文档与调服务、任务的四个、试跑监听；没有服务的插件可以只有工具，没有工具的插件可以只有服务', () => {
     const { names, services } = assemble([
       definePlugin({ name: 'a', tools: [tool('a1')] }),
       definePlugin({ name: 'b', services: [fakeService({ name: 'one' })] }),
@@ -161,7 +161,7 @@ describe('服务启动时装配插件与工具', () => {
     expect(error).toBe('工具定义有误：same（重名）；list_tasks（重名）');
   });
 
-  it('有服务叫 monitor（和监听任务的文档重名）、监视任务的文档有误：返回错误信息（服务打到 stderr 后退出）', () => {
+  it('有服务叫 monitor（和监听任务的文档重名）、监听任务的文档有误：返回错误信息（服务打到 stderr 后退出）', () => {
     expect(
       assemble([definePlugin({ name: 'a', services: [fakeService({ name: 'monitor' })] })]).error,
     ).toBe('服务名 monitor 和监听任务的文档重名，服务改个名字');
@@ -169,7 +169,7 @@ describe('服务启动时装配插件与工具', () => {
     expect(
       assemble([definePlugin({ name: 'a', services: [fakeService()] })], {}, broken).error,
     ).toBe('监听任务的文档（src/server/monitors/docs/monitor.md）读不了：ENOENT');
-    // 没装上服务时没有监视，不看元文档
+    // 没装上服务时没有监听，不看元文档
     expect(assemble([definePlugin({ name: 'a', tools: [tool('a1')] })], {}, broken).names).toEqual([
       'a1',
       ...taskToolNames,

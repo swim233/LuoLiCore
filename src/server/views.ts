@@ -70,7 +70,7 @@ export function createViews({
   timeZone?: string;
   /** 测试里换掉 */
   now?: () => Date;
-  /** 监视任务在任务列表里的样子（描述、人话的一行、检查的状态）；不是监视任务时没有 */
+  /** 监听任务在任务列表里的样子（描述、人话的一行、检查的状态）；不是监听任务时没有 */
   monitorView?: (task: Task) => TaskMonitor | undefined;
 }) {
   // 图片按内容存，同一个地址的内容不会变：宽高读过一次就记下
@@ -193,7 +193,7 @@ export function createViews({
       id: task.id,
       ref: taskRef(task.id),
       action: task.action,
-      // 监视任务：带服务、接口名称的那一行
+      // 监听任务：带服务、接口名称的那一行
       scheduleText: monitorView(task)?.line ?? describeSchedule(task.schedule, now()),
     };
   }
@@ -356,7 +356,7 @@ export function kindOf(
 }
 
 /**
- * 会话列表那一行的预览：换行压成空格、截短。事件只取正文的第一行（监视的事件第二行起是查到的数据、
+ * 会话列表那一行的预览：换行压成空格、截短。事件只取正文的第一行（监听的事件第二行起是查到的数据、
  * 查不到的原因，压成一行会接在第一句后面）
  */
 function preview(last: NonNullable<ConversationOverview['last']>): MessagePreview {

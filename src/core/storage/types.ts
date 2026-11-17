@@ -250,7 +250,7 @@ export type StoredConversation = ConversationInfo & { platform: string };
  * 每周的加星期几 weekday（1 是周一，7 是周日），每月的加几号 day（1–31）；
  * until 是截止的时刻（ISO，UTC），下一次到点晚于它就算完成，不给时不截止。
  * 新建时 at、until 换成 toISOString 的写法，其余原样。
- * monitor 是监视任务（ADR-0014）：没有约好的时刻（也就没有下次到点），带着洛璃写的一份描述
+ * monitor 是监听任务（ADR-0014）：没有约好的时刻（也就没有下次到点），带着洛璃写的一份描述
  * （monitor），核心只当它是数据，不解读里面的字段，校验和定时去查都在洛璃服务里
  */
 export type TaskSchedule =

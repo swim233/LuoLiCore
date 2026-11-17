@@ -5,5 +5,5 @@ pnpm-lock.yaml
 prompts
 # 插件的文档是发给模型的原文，同上
 plugins/*/docs
-# 监视任务的元文档（「监视任务怎么写」）也是发给模型的原文，同上
+# 监听任务的元文档（「监听任务的写法」）也是发给模型的原文，同上
 src/server/monitors/docs

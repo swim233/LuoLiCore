@@ -31,19 +31,19 @@ import {
 
 // 任务工具（ADR-0010、ADR-0014）：建任务、列出任务、取消任务、改任务。由服务提供，接在插件的工具
 // 后面一起装配，所有会话共用；只看、只取消、只改本会话的任务。检查不过都以错误结果告诉模型。
-// 装上了服务时还能建、改监视任务（kind 多一种 monitor，多一个参数 monitor）；没有时和以前完全一样
+// 装上了服务时还能建、改监听任务（kind 多一种 monitor，多一个参数 monitor）；没有时和以前完全一样
 
 type Service = Pick<
   TaskService,
   'create' | 'list' | 'cancelIn' | 'update' | 'now' | 'monitorStatus'
 >;
 
-/** 监视：装上的服务（建、改监视任务的说明，结果里的服务、接口名称） */
+/** 监听：装上的服务（建、改监听任务的说明，结果里的服务、接口名称） */
 type Monitors = { services: readonly ServiceInfo[] };
 
 /**
  * 造四个任务工具，把任务服务传进去。给的是取服务的函数：工具在服务启动时就要装配，任务服务要等
- * 包过一层的存储建好才有，工具执行时才取。给了 monitors（装上了服务）时能建、改监视任务
+ * 包过一层的存储建好才有，工具执行时才取。给了 monitors（装上了服务）时能建、改监听任务
  */
 export function createTaskTools(
   service: () => Service,
@@ -194,7 +194,7 @@ function existingLines({ existing, warnings = [] }: Created): string[] {
   ];
 }
 
-/** 还没有结果时，界面摘要里监视任务的「时间」：「监听 · 服务的名称 · 接口的名称」 */
+/** 还没有结果时，界面摘要里监听任务的「时间」：「监听 · 服务的名称 · 接口的名称」 */
 function monitorTiming(monitor: unknown, titles: ServiceTitles): string {
   const { service, endpoint } = (monitor ?? {}) as { service?: unknown; endpoint?: unknown };
   if (typeof service !== 'string' || typeof endpoint !== 'string') return '监听';
@@ -352,7 +352,7 @@ function updateTaskTool(
   });
 }
 
-/** 列出任务时的一行；监视任务写出盯的是什么、多久查一次、只要哪些、处理方式、上次检查 */
+/** 列出任务时的一行；监听任务写出盯的是什么、多久查一次、只要哪些、处理方式、上次检查 */
 function taskLine(
   task: Task,
   now: Date,
@@ -369,7 +369,7 @@ function taskLine(
   return `${taskRef(task.id)}：${task.action}（${describeSchedule(task.schedule, now)}${next}，${who}）`;
 }
 
-/** 监视任务写成一串：「监听 · 每 10 分钟执行一次 · 和风天气 · 天气预警 · 参数 … · 监听范围 … · 触发回复 · 上次执行 …」 */
+/** 监听任务写成一串：「监听 · 每 10 分钟执行一次 · 和风天气 · 天气预警 · 参数 … · 监听范围 … · 触发回复 · 上次执行 …」 */
 function monitorWords(
   monitor: MonitorDescription,
   titles: ServiceTitles,

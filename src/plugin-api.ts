@@ -115,7 +115,7 @@ export type ServiceDefinition = {
   readonly endpoints: readonly ServiceEndpoint[];
   /** 护栏：两个都是正整数 */
   readonly limits: {
-    /** 最短多久查一次（秒）。给监视的引擎用 */
+    /** 最短多久查一次（秒）。给监听的引擎用 */
     readonly minIntervalSeconds: number;
     /** 每天最多发多少次请求（按服务器的时区算一天），到了当天不再发 */
     readonly maxRequestsPerDay: number;

@@ -136,7 +136,7 @@ export function serviceTitles(
   };
 }
 
-/** 建、改监视任务的结果里描述的那几行：盯的是什么、多久查一次、只要哪些、处理方式 */
+/** 建、改监听任务的结果里描述的那几行：盯的是什么、多久查一次、只要哪些、处理方式 */
 export function monitorFacts(monitor: MonitorDescription, titles: ServiceTitles): string[] {
   return [
     `监听对象：${targetText(monitor, titles)}`,
@@ -194,7 +194,7 @@ export function monitorLine(monitor: MonitorDescription, titles: ServiceTitles):
 // ─── 事件的正文 ─────────────────────────────────────────────────────────
 
 /**
- * 监视到点的事件：第一行「监听触发：」加做什么；第二行说新的有几条、下面是查到的数据（只当数据看）；
+ * 监听触发的事件：第一行「监听触发：」加做什么；第二行说新的有几条、下面是查到的数据（只当数据看）；
  * 然后每条写成文字（最多 maxEventItems 条），其余只列标题。整条超过 maxEventChars 时从后面的条目起
  * 改成只列标题；只列标题还写不下时，后面的标题也不写，说还有几条
  */
@@ -232,7 +232,7 @@ export function monitorEventText(
   return compose(0, 0);
 }
 
-/** 监视连续查不到的事件：哪个任务、从什么时候起、原因，可以让人检查配置或者取消 */
+/** 监听连续查不到的事件：哪个任务、从什么时候起、原因，可以让人检查配置或者取消 */
 export function monitorFailedText(
   action: string,
   ref: string,

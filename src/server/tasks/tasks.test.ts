@@ -394,7 +394,7 @@ describe('任务工具', () => {
     expect(await run('list_tasks', {}, { conversationId: empty })).toBe('此会话没有进行中的任务');
   });
 
-  it('一个服务都没装上时留着的监视任务：照常列出，状态是查不到（服务没有装上）；定时任务照常到点', async () => {
+  it('一个服务都没装上时留着的监听任务：照常列出，状态是查不到（服务没有装上）；定时任务照常到点', async () => {
     const storage = createMemoryStorage();
     const id = await storage.createConversation({ platform: 'web' });
     await storage.createTask({
@@ -1011,7 +1011,7 @@ describe('定时器', () => {
       conversationId: id,
       tasks: [{ id: 1, ref: 't1', action: '提醒 Alice 喝水' }],
     });
-    // 定时任务没有 event（那是监视任务的）
+    // 定时任务没有 event（那是监听任务的）
     expect(startEvent).not.toHaveProperty('tasks.0.event');
     // 没有要到点的了：不再等
     expect(s.clock.pending()).toEqual([]);
@@ -2252,7 +2252,7 @@ describe('到点进 Telegram', () => {
     expect(s.lives().some((event) => event.type === 'again')).toBe(false);
   });
 
-  it('监视任务到点：照任务到点的路，等待合并后回复，引用任务的来源消息；「此刻」标出是监视到点（event 是 monitor）', async () => {
+  it('监听任务到点：照任务到点的路，等待合并后回复，引用任务的来源消息；「此刻」标出是监听触发（event 是 monitor）', async () => {
     let list = [{ id: 'a', title: 'A' }];
     const outside = await serving(() => JSON.stringify({ list }));
     cleanups.push(() => closeAll());
@@ -2523,7 +2523,7 @@ describe('任务的接口', () => {
 // ─── 事件在面板的数据里 ─────────────────────────────────────────────────
 
 describe('事件在面板的数据里', () => {
-  it('未读不算事件（任务的、监视的都是）：Telegram 群里已读位置之后的事件不算，人发的照算', async () => {
+  it('未读不算事件（任务的、监听的都是）：Telegram 群里已读位置之后的事件不算，人发的照算', async () => {
     const s = await setup();
     const id = await s.storage.createConversation({
       platform: 'telegram',
@@ -2537,8 +2537,8 @@ describe('事件在面板的数据里', () => {
     await add({ author: alice, createdAt: at }, '早');
     await add({ event: { type: 'task', taskId: 1 }, createdAt: at }, '任务到点');
     await add({ event: { type: 'task-missed', taskId: 2 }, createdAt: at }, '任务超时');
-    await add({ event: { type: 'monitor', taskId: 3 }, createdAt: at }, '监视到点');
-    await add({ event: { type: 'monitor-failed', taskId: 3 }, createdAt: at }, '监视查不到');
+    await add({ event: { type: 'monitor', taskId: 3 }, createdAt: at }, '监听触发');
+    await add({ event: { type: 'monitor-failed', taskId: 3 }, createdAt: at }, '监听失败');
     await add({ author: bob, createdAt: at }, '在吗');
 
     const { conversations } = (await (
@@ -2585,7 +2585,7 @@ describe('事件在面板的数据里', () => {
     expect(messages[1]).not.toHaveProperty('task');
   });
 
-  it('最后一条是监视的事件（正文有好几行）：预览只取第一行', async () => {
+  it('最后一条是监听的事件（正文有好几行）：预览只取第一行', async () => {
     const s = await setup();
     const id = await s.observed.createConversation({ platform: 'web' });
     const conversation = await s.sessions!.open(id);

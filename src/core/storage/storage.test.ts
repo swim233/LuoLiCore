@@ -1373,7 +1373,7 @@ describe.each([
       expect(await storage.getTask(other.id)).toStrictEqual(other);
     });
 
-    it('监视任务：描述跟着 schedule 原样存取，核心不解读；没有下次到点，不算进到点的和最早的下次到点；能改描述、记到点', async () => {
+    it('监听任务：描述跟着 schedule 原样存取，核心不解读；没有下次到点，不算进到点的和最早的下次到点；能改描述、记到点', async () => {
       const storage = await open();
       const c = await storage.createConversation({ platform: 'web' });
       const monitor = {

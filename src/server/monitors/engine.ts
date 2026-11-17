@@ -15,7 +15,7 @@ import type { MonitorItem } from './items.js';
 import { fetchItems, type FetchResult } from './trial.js';
 import { matches } from './where.js';
 
-// 监视的引擎（ADR-0014）：照每个监视任务的描述定时去查，这一段不请求模型。
+// 监听的引擎（ADR-0014）：照每个监听任务的描述定时去查，这一段不请求模型。
 // - 来源：服务、接口、参数、条目在哪、认新旧都相同的一处（feeds.db 的 sources），只查一次，按盯着它的
 //   任务里最短的间隔；没有任务盯着时不查。服务没在运行时不查，也不补；重启后到了时间的尽快查一次。
 // - 查一次：经服务层调接口 → 取条目 → 没见过的编号存进动态 → 对每个盯着它的任务，取游标之后的新条目，
@@ -56,7 +56,7 @@ export type EngineHost = {
   update(task: Task, changes: { lastDueAt: string; dueCount: number }): Promise<Task>;
 };
 
-/** 一个监视任务的检查状态（给 list_tasks、面板） */
+/** 一个监听任务的检查状态（给 list_tasks、面板） */
 export type MonitorStatus = {
   lastCheckedAt?: string;
   lastSuccessAt?: string;
@@ -107,10 +107,10 @@ export function createMonitorEngine({
   waitMs: number;
   /** 检查比排好的时间晚了超过这么久才开始，说明中间服务停过或电脑睡过（同任务的「超时」） */
   lateMs: number;
-  /** 一个监视任务的检查状态变了（面板要知道） */
+  /** 一个监听任务的检查状态变了（面板要知道） */
   notify?: (task: Task) => void;
 }) {
-  /** 进行中的监视任务（对账时从任务表读一遍，之后由建、改、取消保持） */
+  /** 进行中的监听任务（对账时从任务表读一遍，之后由建、改、取消保持） */
   const known = new Map<number, Task>();
   /** 正在查的来源 */
   const inFlight = new Set<number>();
@@ -547,7 +547,7 @@ export function createMonitorEngine({
     if (cursorError !== undefined) throw cursorError;
   }
 
-  /** 交给前端的一个任务：标出是监视任务的哪种事件（查到了新的、查不到） */
+  /** 交给前端的一个任务：标出是监听任务的哪种事件（查到了新的、查不到） */
   function dueTask(task: Task, event: 'monitor' | 'monitor-failed'): DueTask {
     const { platformMessageId } = task.source;
     return {
@@ -599,7 +599,7 @@ export function createMonitorEngine({
   }
 
   /**
-   * 对账（启动时，在那一串里）：进行中的监视任务都要有「谁在盯」的记录，没有的补上（游标空着：
+   * 对账（启动时，在那一串里）：进行中的监听任务都要有「谁在盯」的记录，没有的补上（游标空着：
    * 下一次查到的只存不到点）；盯的来源和描述对不上的换过去；任务已经不在进行中的去掉记录。
    * 然后照游标补：游标后面还有符合条件的条目，照常到点一次
    */
@@ -663,7 +663,7 @@ export function createMonitorEngine({
     },
 
     /**
-     * 开始盯一个任务（建监视任务；改了来源时也是它）：这次查到的条目存进动态、算已有的（不到点），
+     * 开始盯一个任务（建监听任务；改了来源时也是它）：这次查到的条目存进动态、算已有的（不到点），
      * 也算这个来源查过一次（成功）；游标指到最后一条。在那一串里调用
      */
     watch(task: Task, items: readonly MonitorItem[]): void {
@@ -720,7 +720,7 @@ export function createMonitorEngine({
       rearmSafely();
     },
 
-    /** 一个监视任务的检查状态；没在盯、读不了时没有 */
+    /** 一个监听任务的检查状态；没在盯、读不了时没有 */
     status(taskId: number): MonitorStatus | undefined {
       try {
         const watcher = feeds.watcher(taskId);

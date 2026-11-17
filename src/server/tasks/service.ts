@@ -59,7 +59,7 @@ export const systemClock: Clock = {
 
 /**
  * 到点的一个任务：前端据此在「此刻」标出。platformMessageId 是任务来源消息在平台上的 id
- * （Telegram 的回复引用它）；来源没有时没有。event：监视任务写的是哪种事件（monitor 查到了新的东西，
+ * （Telegram 的回复引用它）；来源没有时没有。event：监听任务写的是哪种事件（monitor 查到了新的东西，
  * monitor-failed 连续查不到）；定时任务没有
  */
 export type DueTask = {
@@ -94,7 +94,7 @@ export type TaskEntrance = {
 };
 
 /**
- * 建任务的参数：工具给的，加上会话与触发者。kind 是 monitor 时是监视任务，描述在 monitor 里
+ * 建任务的参数：工具给的，加上会话与触发者。kind 是 monitor 时是监听任务，描述在 monitor 里
  * （ADR-0014），时间的几项不写
  */
 export type CreateTaskInput = Omit<ScheduleInput, 'kind'> & {
@@ -105,11 +105,11 @@ export type CreateTaskInput = Omit<ScheduleInput, 'kind'> & {
   action: string;
   /** 几个人一起触发时，写明是谁让建的：uid，没有 uid 时写名字 */
   requestedBy?: string;
-  /** 建监视任务时要真的查一次：工具的中止信号 */
+  /** 建监听任务时要真的查一次：工具的中止信号 */
   signal?: AbortSignal;
 };
 
-/** 建好的任务；监视任务还有建的时候查到了几条（算已有的）、取条目时的提醒 */
+/** 建好的任务；监听任务还有建的时候查到了几条（算已有的）、取条目时的提醒 */
 export type Created = { ok: true; task: Task; existing?: number; warnings?: string[] };
 
 /**
@@ -121,9 +121,9 @@ export type UpdateTaskInput = Partial<Omit<ScheduleInput, 'kind'>> & {
   conversationId: string | undefined;
   ref: string;
   action?: string;
-  /** 监视任务：只写要改的字段，和原来的描述合起来再检查；null 是去掉这个字段 */
+  /** 监听任务：只写要改的字段，和原来的描述合起来再检查；null 是去掉这个字段 */
   monitor?: Readonly<Record<string, unknown>>;
-  /** 改监视任务的来源时要真的查一次：工具的中止信号 */
+  /** 改监听任务的来源时要真的查一次：工具的中止信号 */
   signal?: AbortSignal;
 };
 
@@ -163,8 +163,8 @@ export function createTaskService({
   waitMs?: number;
   maxActive?: number;
   /**
-   * 监视（ADR-0014）：给了就建引擎（洛璃服务总是给，一个服务都没装上时 layer 里没有服务：留着的
-   * 监视任务照查不到处理）。layer 是服务层，feeds 存来源、动态、谁在盯；notify 在监视任务的检查状态
+   * 监听（ADR-0014）：给了就建引擎（洛璃服务总是给，一个服务都没装上时 layer 里没有服务：留着的
+   * 监听任务照查不到处理）。layer 是服务层，feeds 存来源、动态、谁在盯；notify 在监听任务的检查状态
    * 变了时调（面板要知道）
    */
   monitors?: {
@@ -198,7 +198,7 @@ export function createTaskService({
     timer = undefined;
   }
 
-  // 监视的引擎：处理查的结果、建、改、取消都排进这一串
+  // 监听的引擎：处理查的结果、建、改、取消都排进这一串
   const engine =
     monitors &&
     createMonitorEngine({
@@ -495,7 +495,7 @@ export function createTaskService({
     now: () => clock.now(),
 
     /**
-     * 建任务：检查会话、触发者、做什么、时间、限额，都过了才建，定时器重排。监视任务（kind 为 monitor）
+     * 建任务：检查会话、触发者、做什么、时间、限额，都过了才建，定时器重排。监听任务（kind 为 monitor）
      * 另走 createMonitor
      */
     create(input: CreateTaskInput): Promise<Created | Failure> {
@@ -560,7 +560,7 @@ export function createTaskService({
      * 工具改任务：只能改这个会话进行中的任务（别的一律「没有这个任务」，同 cancelIn）。只给 action
      * 时只换「做什么」，下次到点不变；给了时间的任何一项时整个时间换成新的，照建任务的规则检查，
      * 下次到点从现在重新算。谁让建的、来源消息、到点次数不变。改完定时器重排。
-     * 监视任务另走 updateMonitor；定时任务和监视任务不能互相改
+     * 监听任务另走 updateMonitor；定时任务和监听任务不能互相改
      */
     async update(input: UpdateTaskInput): Promise<Created | Failure> {
       // 先看一眼是哪种任务（改定时任务的检查都在那一串里重做一遍）
@@ -617,19 +617,19 @@ export function createTaskService({
     },
 
     /**
-     * 能不能在这个会话里用任务（建、试跑监视）：不能时是给她看的原因（如 CLI 会话），能时 undefined
+     * 能不能在这个会话里用任务（建、试跑监听）：不能时是给她看的原因（如 CLI 会话），能时 undefined
      */
     async allows(conversationId: string | undefined): Promise<string | undefined> {
       return (await checkConversation(conversationId))?.error;
     },
 
-    /** 监视任务的检查状态（上次检查、上次成功、是不是查不到）；不是监视任务、没在盯时没有 */
+    /** 监听任务的检查状态（上次检查、上次成功、是不是查不到）；不是监听任务、没在盯时没有 */
     monitorStatus(taskId: number): MonitorStatus | undefined {
       return engine?.status(taskId);
     },
 
     /**
-     * 监视任务在任务列表里的样子（给面板）：描述、写成人话的一行、检查的状态；不是监视任务时没有。
+     * 监听任务在任务列表里的样子（给面板）：描述、写成人话的一行、检查的状态；不是监听任务时没有。
      * 没在盯（已经结束了）时只有描述和那一行
      */
     monitorView(task: Task): TaskMonitor | undefined {
@@ -645,7 +645,7 @@ export function createTaskService({
     },
 
     /**
-     * 开始：先看一眼（处理停机期间错过的、正好到点的），再盯着最近的下次到点；监视的引擎对账、
+     * 开始：先看一眼（处理停机期间错过的、正好到点的），再盯着最近的下次到点；监听的引擎对账、
      * 开始查
      */
     start(): void {
@@ -664,7 +664,7 @@ export function createTaskService({
       }
     },
 
-    /** 退出：停掉定时器和监视的引擎（中止进行中的请求），等正在处理的做完。之后不再到点 */
+    /** 退出：停掉定时器和监听的引擎（中止进行中的请求），等正在处理的做完。之后不再到点 */
     async stop(): Promise<void> {
       stopped = true;
       clearTimer();
@@ -704,7 +704,7 @@ export function createTaskService({
     return ended;
   }
 
-  /** 排着的都做完，监视正在查的也做完（查完的结果又会排进来，所以两边轮流等，直到都没有） */
+  /** 排着的都做完，监听正在查的也做完（查完的结果又会排进来，所以两边轮流等，直到都没有） */
   async function settle(): Promise<void> {
     for (;;) {
       const last = chain;
@@ -767,7 +767,7 @@ export function createTaskService({
   }
 
   /**
-   * 建监视任务（ADR-0014）：静态检查 → 查上限等 → 照描述真的查一次（和试跑同一套，查不通就不建）→
+   * 建监听任务（ADR-0014）：静态检查 → 查上限等 → 照描述真的查一次（和试跑同一套，查不通就不建）→
    * 存任务 → 让引擎开始盯。这次查到的条目存进动态，算已有的，不到点。请求在这一串外面发，
    * 进了这一串再查一次上限
    */
@@ -815,7 +815,7 @@ export function createTaskService({
   }
 
   /**
-   * 改监视任务：monitor 里只写要改的字段（null 是去掉），和原来的描述合起来再检查。改了 service、
+   * 改监听任务：monitor 里只写要改的字段（null 是去掉），和原来的描述合起来再检查。改了 service、
    * endpoint、params、items、key 中的任何一个：照新的描述真的查一次，通过才生效，算换了来源，这次查到的
    * 只存不到点。只改别的、或只改 action：马上生效，不发请求。不能改成定时任务。
    * 合并、检查都对着那一串里重新读到的任务做（同一步里两个修改不会互相盖掉）。要换来源时请求在外面发，

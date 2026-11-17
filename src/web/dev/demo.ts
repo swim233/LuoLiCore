@@ -93,7 +93,7 @@ function tasksFor(convId: string, n: number): number[] {
     );
   return ids.slice(0, n);
 }
-/** 这个会话里进行中的监视任务：ok 查得通的，failing 查不到的 */
+/** 这个会话里进行中的监听任务：ok 查得通的，failing 查不到的 */
 function monitorsFor(convId: string, which: 'ok' | 'failing'): number[] {
   return server
     .activeTasks(convId)
@@ -203,7 +203,7 @@ export const ACTIONS: Record<string, () => void> = {
     if (!bot.dueTasks(id, tasksFor(id, 2), nextScript('due')))
       toast('连不上 Telegram：只写了事件，没有回复');
   },
-  /* 监视任务到点（读书会的「上海天气预警」）：事件正文是查到的预警条目 → 等待合并 → 带任务的回复，「此刻」里标出「监听触发 · 做什么」 */
+  /* 监听任务到点（读书会的「上海天气预警」）：事件正文是查到的预警条目 → 等待合并 → 带任务的回复，「此刻」里标出「监听触发 · 做什么」 */
   'monitor-due'() {
     const id = convFor('c-book');
     const [tid] = monitorsFor(id, 'ok');
@@ -211,7 +211,7 @@ export const ACTIONS: Record<string, () => void> = {
     if (!bot.dueTasks(id, [tid], nextScript('due'), 'monitor'))
       toast('连不上 Telegram：只写了事件，没有回复');
   },
-  /* 监视满 6 小时还查不到（读书会的「北京天气预警」）：会话里说一次，「此刻」里标出「监听失败 · 做什么」 */
+  /* 监听满 6 小时还查不到（读书会的「北京天气预警」）：会话里说一次，「此刻」里标出「监听失败 · 做什么」 */
   'monitor-failed'() {
     const id = convFor('c-book');
     const [tid] = monitorsFor(id, 'failing');

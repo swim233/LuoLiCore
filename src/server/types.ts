@@ -325,7 +325,7 @@ export type LiveTask = {
   /** 做什么 */
   action: string;
   /**
-   * 监视任务触发的：monitor 是查到了新的东西，monitor-failed 是连续 6 小时查不到（在会话里说一次）。
+   * 监听任务触发的：monitor 是查到了新的东西，monitor-failed 是连续 6 小时查不到（在会话里说一次）。
    * 定时任务到点时没有
    */
   event?: 'monitor' | 'monitor-failed';
@@ -689,11 +689,11 @@ export type TaskRow = TaskBrief & {
   createdAt: string;
   /** 完成或取消的时间；进行中的没有 */
   endedAt?: string;
-  /** 监视任务才有（ADR-0014）：描述和检查的状态。监视任务没有下次到点 */
+  /** 监听任务才有（ADR-0014）：描述和检查的状态。监听任务没有下次到点 */
   monitor?: TaskMonitor;
 };
 
-/** 监视任务在任务列表里的样子 */
+/** 监听任务在任务列表里的样子 */
 export type TaskMonitor = {
   /** 洛璃写的描述，原样 */
   description: Readonly<Record<string, unknown>>;

@@ -1,7 +1,7 @@
 import { ServiceError, type ServiceLayer } from '../services/layer.js';
 import { monitorFields, monitorLimits, monitorOps, type MonitorOp } from './rules.js';
 
-// 监视任务的描述（ADR-0014）：洛璃写的一份数据。这里是它的样子和「静态」的检查（不发请求）：
+// 监听任务的描述（ADR-0014）：洛璃写的一份数据。这里是它的样子和「静态」的检查（不发请求）：
 // 字段齐不齐、服务装没装、接口有没有、参数过不过得了服务层的检查、间隔够不够长、路径和条件的写法。
 // 规则（字段表、比法表、上限）在 rules.ts
 

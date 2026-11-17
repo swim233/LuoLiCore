@@ -72,7 +72,7 @@ export function scheduleLine(t: TaskRow, tz = serverZone()): string {
   return t.scheduleText;
 }
 
-/* ---------- 监视任务（ADR-0014）：没有下次到点，右边放检查的情况；展开能看服务写成人话的几行、检查的情况、到点的次数、描述原文 ---------- */
+/* ---------- 监听任务（ADR-0014）：没有下次到点，右边放检查的情况；展开能看服务写成人话的几行、检查的情况、到点的次数、描述原文 ---------- */
 
 /** 上次检查的情况：还没查过、查得通（上次查通的时刻）、现在查不到（从什么时候起、最近一次的原因）。
     服务给的 failing 优先：查不到时 lastCheckedAt 也是最近那次失败的检查，不能当成「查得通」 */
@@ -88,7 +88,7 @@ export function checkState(m: TaskMonitor): CheckState {
   return at ? { kind: 'ok', at: Date.parse(at) } : { kind: 'never' };
 }
 
-/** 现在查不到的监视任务有几个（只数进行中的） */
+/** 现在查不到的监听任务有几个（只数进行中的） */
 export const failingCount = (list: TaskRow[]) =>
   list.filter((t) => t.status === 'active' && t.monitor?.failing).length;
 

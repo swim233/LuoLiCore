@@ -5,7 +5,7 @@ import { extractItems, type MonitorItem } from './items.js';
 import { matches } from './where.js';
 
 // 照描述真的查一次（ADR-0014）：经服务层调接口（算进当天的请求数）→ 正文解析成 JSON（数字不走样）→
-// 取条目。试跑、建监视任务、引擎每次查都走这一段
+// 取条目。试跑、建监听任务、引擎每次查都走这一段
 
 /**
  * 查一次的结果。不通过时 step 说是哪一步：call 调接口出错（kind、status 是服务层的类别与状态码，

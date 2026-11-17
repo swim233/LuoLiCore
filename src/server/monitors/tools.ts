@@ -8,7 +8,7 @@ import { fieldPaths } from './items.js';
 import { monitorFields, type MonitorField } from './rules.js';
 import { fetchFailureText, runTrial, type TrialResult } from './trial.js';
 
-// 监视的工具（ADR-0014）：试跑 try_monitor。由洛璃服务提供，装上了服务时才有
+// 监听的工具（ADR-0014）：试跑 try_monitor。由洛璃服务提供，装上了服务时才有
 
 /** 试跑结果里写全的条数，其余只列标题 */
 const shownItems = 5;

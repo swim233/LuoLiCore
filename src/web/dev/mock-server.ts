@@ -79,7 +79,7 @@ export const stampOf = (ms: number) =>
   `${mdOf(new Date(ms))} ${pad2(new Date(ms).getHours())}:${pad2(new Date(ms).getMinutes())}`;
 export function describeSchedule(s: TaskRow['schedule']): string {
   if (s.kind === 'once') return '一次性';
-  // 监视任务：真实的服务给的是带服务、接口名称的一行（monitor.line）；addTask 用它，这里只是没有它时的说法
+  // 监听任务：真实的服务给的是带服务、接口名称的一行（monitor.line）；addTask 用它，这里只是没有它时的说法
   if (s.kind === 'monitor') return '监听任务';
   const base =
     s.kind === 'daily'
@@ -122,7 +122,7 @@ export interface NewMockTask {
   createdAt?: number;
   /** 不给时按 schedule 算下次到点；给了就是这个状态（种子数据里已经结束的任务） */
   state?: Partial<Pick<TaskRow, 'status' | 'nextDueAt' | 'lastDueAt' | 'dueCount' | 'endedAt'>>;
-  /** 监视任务：服务给的描述、写成人话的行与几行、检查的状态（schedule 写 { kind: 'monitor', monitor: 描述 }） */
+  /** 监听任务：服务给的描述、写成人话的行与几行、检查的状态（schedule 写 { kind: 'monitor', monitor: 描述 }） */
   monitor?: TaskMonitor;
 }
 const THIRTY_DAYS = 30 * 864e5;
@@ -375,7 +375,7 @@ export class MockServer implements Api {
     this.putTask(row);
     return row;
   }
-  /** 事件消息：没有发言人的用户消息，正文是写给模型看的完整句子（只写消息，不改任务）。监视的两种事件正文由调用方给（text） */
+  /** 事件消息：没有发言人的用户消息，正文是写给模型看的完整句子（只写消息，不改任务）。监听的两种事件正文由调用方给（text） */
   addEvent(
     convId: string,
     taskId: number,
@@ -422,8 +422,8 @@ export class MockServer implements Api {
   /**
    * 到点（task）或任务超时（task-missed）：写事件消息，改任务（一次性的完成；周期的下次到点往后挪，到点的次数加一），推 task 事件。
    * 返回事件消息。顺序同真实的服务：事件消息先写，任务的新样子接着推。
-   * 监视任务：monitor（查到了新的）写事件，到点的次数加一、上次检查和上次查通换成现在、不再是查不到；monitor-failed（满 6 小时说一次）只写事件。
-   * 监视任务没有下次到点，一直进行中
+   * 监听任务：monitor（查到了新的）写事件，到点的次数加一、上次检查和上次查通换成现在、不再是查不到；monitor-failed（满 6 小时说一次）只写事件。
+   * 监听任务没有下次到点，一直进行中
    */
   fireTask(
     taskId: number,

@@ -54,7 +54,7 @@ export type Sender = {
 };
 
 /**
- * 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点。event：监视任务写的是哪种事件
+ * 任务到点触发的回复带上的任务：「此刻」据此标出是哪个任务到点。event：监听任务写的是哪种事件
  * （monitor 查到了新的东西，monitor-failed 连续查不到）；定时任务没有
  */
 export type RoundTask = {
