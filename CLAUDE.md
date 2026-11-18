@@ -110,7 +110,7 @@ LuoLiCore：群聊助手 agent，核心基于 Vercel AI SDK v7。术语见 `CONT
     - 第一个是和风天气（`plugins/qweather/`）：
       - 环境变量：`QWEATHER_API_HOST`（账号专属的主机名）、`QWEATHER_DEVELOPER_ID`、`QWEATHER_PROJECT_ID`、`QWEATHER_KEY_ID`、`QWEATHER_PRIVATE_KEY_FILE`（Ed25519 私钥文件的路径），都必需；`QWEATHER_MAX_REQUESTS_PER_DAY` 可选，默认 1500。
       - 认证是 JWT，只用 `node:crypto`：头里是 `EdDSA` 和凭据 ID，内容是开发者 ID（`iss`）、项目 ID（`sub`）、`iat`（现在减 30 秒）、`exp`（`iat` 加 900 秒）；剩不到 1 分钟时重签。私钥启动时读一次，只留在内存里。
-      - 四个接口，都按经纬度查（最多两位小数）：城市查询 `city_lookup`、实时天气 `weather_now`、逐天预报 `weather_daily`、天气预警 `weather_alert`。最短间隔 5 分钟。
+      - 五个接口，都按经纬度查（最多两位小数）：城市查询 `city_lookup`、实时天气 `weather_now`、逐小时预报 `weather_hourly`、逐天预报 `weather_daily`、天气预警 `weather_alert`。最短间隔 5 分钟。逐小时预报是后来加的；接口最多给 240 小时，但 `call_service` 的结果最多 2 万个字符，实测放得下 17 小时，所以文档里留了余量，让她一次最多查 16 小时，更晚的时段用逐天预报。
       - 文档在 `plugins/qweather/docs/`，由主会话照官方文档写、用户审；官方改了接口要跟着改。
   - 文档两层（已有），洛璃用工具读，不放进 system：服务文档（一个接口一节，每次读的时候重新读文件）和元文档「监听任务的写法」（`src/server/monitors/docs/monitor.md`，由主会话写、用户审；里面的字段表、比法表、上限三段和行内的标记由程序生成，启动时检查文件和占位）。
   - 洛璃的两个服务工具（已有，`src/server/services/tools.ts`），所有会话都能用：
