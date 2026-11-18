@@ -27,7 +27,7 @@ export const qweatherService = defineService({
   name: 'qweather',
   title: '和风天气',
   summary:
-    '查天气和天气预警，全球都能查。接口有城市查询（地名查成经纬度）、实时天气、逐天预报、天气预警',
+    '查天气和天气预警，全球都能查。接口有城市查询（地名查成经纬度）、实时天气、逐小时预报、逐天预报、天气预警',
   env: [
     'QWEATHER_API_HOST',
     'QWEATHER_DEVELOPER_ID',
@@ -49,6 +49,12 @@ export const qweatherService = defineService({
       title: '实时天气',
       path: '/weather/v1/current/{latitude}/{longitude}',
       query: ['localTime', 'lang'],
+    },
+    {
+      id: 'weather_hourly',
+      title: '逐小时预报',
+      path: '/weather/v1/hourly/{latitude}/{longitude}',
+      query: ['hours', 'localTime', 'lang'],
     },
     {
       id: 'weather_daily',

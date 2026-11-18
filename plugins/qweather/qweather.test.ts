@@ -164,12 +164,13 @@ describe('和风天气的声明', () => {
     });
   });
 
-  it('四个接口的 id、路径、查询参数', () => {
+  it('五个接口的 id、路径、查询参数', () => {
     expect(
       qweatherService.endpoints.map(({ id, path, query }) => [id, path, query.join(',')]),
     ).toEqual([
       ['city_lookup', '/geo/v2/city/lookup', 'location,adm,range,number,lang'],
       ['weather_now', '/weather/v1/current/{latitude}/{longitude}', 'localTime,lang'],
+      ['weather_hourly', '/weather/v1/hourly/{latitude}/{longitude}', 'hours,localTime,lang'],
       ['weather_daily', '/weather/v1/daily/{latitude}/{longitude}', 'days,localTime,lang'],
       ['weather_alert', '/weatheralert/v1/current/{latitude}/{longitude}', 'localTime,lang'],
     ]);
